@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { WebSocketServer } from "ws";
 import {
+  DEFAULT_DIALOUT_HOST,
   EdgeBookDialoutClient,
   createPairRegistration,
   createSessionsRevokeFrame,
@@ -21,6 +22,7 @@ class FakeSocket {
   sent: unknown[] = [];
   listeners: Record<string, Array<(event?: unknown) => void>> = {};
   readyState = 1;
+  closeCount = 0;
 
   send(data: string): void {
     const frame = JSON.parse(data);
@@ -30,6 +32,7 @@ class FakeSocket {
   }
 
   close(): void {
+    this.closeCount += 1;
     this.emit("close");
   }
 
@@ -47,12 +50,15 @@ class FakeSocket {
   }
 }
 
-function makeSocketFactory(): { sockets: FakeSocket[]; factory: () => FakeSocket } {
+function makeSocketFactory(): { sockets: FakeSocket[]; urls: string[]; factory: (url: string) => FakeSocket } {
   const sockets: FakeSocket[] = [];
+  const urls: string[] = [];
   return {
     sockets,
-    factory: () => {
+    urls,
+    factory: (url: string) => {
       const socket = new FakeSocket();
+      urls.push(url);
       sockets.push(socket);
       queueMicrotask(() => socket.emit("open"));
       return socket;
@@ -223,4 +229,42 @@ test("CLI pair and sessions revoke send command frames", async () => {
   const revoke = await handleCli(["sessions", "revoke", "--host", "ws://host.test/agent"], ctx);
   assert.match(revoke.text, /test-channel/);
   assert.ok(sockets.sockets[1].sent.some((frame) => (frame as { type?: string }).type === "sessions_revoke"));
+});
+
+test("CLI hosted commands default to the production host", async () => {
+  const root = await tempRoot();
+  const store = new EdgeBookStore({ home: root });
+  await store.init({ handle: "dialout-cli-default-host.openclaw.local" });
+  const sockets = makeSocketFactory();
+  const ctx = { home: root, socketFactory: sockets.factory, textOnly: true } as never;
+
+  await handleCli(["pair"], ctx);
+  await handleCli(["sessions", "revoke"], ctx);
+
+  assert.deepEqual(sockets.urls, [DEFAULT_DIALOUT_HOST, DEFAULT_DIALOUT_HOST]);
+});
+
+test("dial-out stand_down stops reconnecting until explicitly restarted", async () => {
+  const root = await tempRoot();
+  const store = new EdgeBookStore({ home: root });
+  await store.init({ handle: "dialout-stand-down.openclaw.local" });
+  const sockets = makeSocketFactory();
+  let standDownFrame: unknown;
+  const client = new EdgeBookDialoutClient({
+    home: root,
+    host: "ws://host.test/agent",
+    socketFactory: sockets.factory,
+    backoffMs: 10,
+    onStandDown: (frame) => {
+      standDownFrame = frame;
+    }
+  });
+
+  await client.start();
+  sockets.sockets[0].receive({ type: "stand_down", reason: "idle", idle_ms: 7 * 24 * 60 * 60 * 1000 });
+  await waitFor(() => sockets.sockets[0].closeCount === 1);
+  await new Promise((resolve) => setTimeout(resolve, 40));
+
+  assert.deepEqual(standDownFrame, { type: "stand_down", reason: "idle", idle_ms: 604800000 });
+  assert.equal(sockets.sockets.length, 1);
 });

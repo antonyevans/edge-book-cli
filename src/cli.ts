@@ -3,13 +3,16 @@ import { realpathSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { EdgeBookDialoutClient, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
+import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
 import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
 
+export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
+
 export interface CliContext {
   home?: string;
+  defaultHost?: string;
   textOnly?: boolean;
   socketFactory?: (url: string) => DialoutSocket;
 }
@@ -26,9 +29,9 @@ Usage:
   edge-book init [--home <dir>] [--handle <handle>] [--name <display>]
 
 Hosted reader:
-  edge-book dialout --host <ws-url> [--home <dir>]
-  edge-book pair --host <ws-url> [--ttl-ms <ms>] [--home <dir>]
-  edge-book sessions revoke --host <ws-url> [--home <dir>]
+  edge-book dialout [--host <ws-url>] [--home <dir>]
+  edge-book pair [--host <ws-url>] [--ttl-ms <ms>] [--home <dir>]
+  edge-book sessions revoke [--host <ws-url>] [--home <dir>]
 
 Local agent:
   edge-book doctor [--home <dir>]
@@ -61,6 +64,10 @@ function takeFlag(args: string[], name: string): string | undefined {
 
 function parseHome(args: string[], ctx: CliContext): string | undefined {
   return takeFlag(args, "--home") || ctx.home;
+}
+
+function parseHost(args: string[], ctx: CliContext): string {
+  return takeFlag(args, "--host") || ctx.defaultHost || process.env.EDGE_BOOK_HOST || DEFAULT_DIALOUT_HOST;
 }
 
 function requireArg(value: string | undefined, label: string): string {
@@ -245,7 +252,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   }
 
   if (command === "dialout") {
-    const hostUrl = requireArg(takeFlag(args, "--host"), "--host");
+    const hostUrl = parseHost(args, ctx);
     const client = new EdgeBookDialoutClient({ home, host: hostUrl, socketFactory: ctx.socketFactory });
     await client.start();
     console.log(`Edge Book dial-out connected to ${hostUrl}`);
@@ -253,7 +260,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   }
 
   if (command === "pair") {
-    const hostUrl = requireArg(takeFlag(args, "--host"), "--host");
+    const hostUrl = parseHost(args, ctx);
     const ttlMs = Number(takeFlag(args, "--ttl-ms") || `${5 * 60 * 1000}`);
     if (!ctx.textOnly) {
       const client = new EdgeBookDialoutClient({ home, host: hostUrl, socketFactory: ctx.socketFactory, openLocalApi: false });
@@ -271,7 +278,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   if (command === "sessions") {
     const action = args.shift();
     if (action === "revoke") {
-      const hostUrl = requireArg(takeFlag(args, "--host"), "--host");
+      const hostUrl = parseHost(args, ctx);
       const frame = await sendSessionsRevoke({ home, host: hostUrl, socketFactory: ctx.socketFactory });
       const channel = (frame as SessionsRevokeFrame & { channel_id?: string }).channel_id || "unknown-channel";
       return { text: `Received sessions_revoke_ok for request ${frame.request_id} on ${channel}`, json: frame };

@@ -7,6 +7,7 @@ import { EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import { startEdgeBookServer } from "./http.ts";
 
 const KEY_FILE = "host-dialout-key.json";
+export const DEFAULT_DIALOUT_HOST = "wss://edge-book-host.fly.dev/agent/ws";
 const DEFAULT_PAIR_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_HEARTBEAT_MS = 25_000;
 const DEFAULT_BACKOFF_MS = 1_000;
@@ -84,6 +85,7 @@ export interface DialoutClientOptions {
   backoffMs?: number;
   socketFactory?: (url: string) => DialoutSocket;
   openLocalApi?: boolean;
+  onStandDown?: (frame: { type?: string; reason?: string; idle_ms?: number }) => void | Promise<void>;
 }
 
 interface LocalApi {
@@ -259,6 +261,7 @@ export class EdgeBookDialoutClient {
       backoffMs: options.backoffMs ?? DEFAULT_BACKOFF_MS,
       socketFactory: options.socketFactory ?? socketFactory,
       openLocalApi: options.openLocalApi ?? true,
+      onStandDown: options.onStandDown ?? (() => undefined),
       host: options.host,
       home: options.home
     };
@@ -306,6 +309,7 @@ export class EdgeBookDialoutClient {
   }
 
   private async connect(): Promise<void> {
+    if (this.stopped) return;
     if (this.options.openLocalApi && !this.localApi) this.localApi = await openLocalApi(this.store);
     const socket = this.options.socketFactory(this.options.host);
     this.socket = socket;
@@ -344,6 +348,7 @@ export class EdgeBookDialoutClient {
   }
 
   private scheduleReconnect(): void {
+    if (this.stopped) return;
     const delay = this.currentBackoff;
     this.currentBackoff = Math.min(MAX_BACKOFF_MS, Math.round(this.currentBackoff * 1.7));
     this.reconnectTimer = setTimeout(() => {
@@ -373,6 +378,10 @@ export class EdgeBookDialoutClient {
       this.send({ type: "pong" });
       return;
     }
+    if ((frame as { type?: string }).type === "stand_down" || (frame as { type?: string }).type === "dialout_idle") {
+      await this.standDown(frame as { type?: string; reason?: string; idle_ms?: number });
+      return;
+    }
     if ((frame as { type?: string }).type === "pair_register_ok" || (frame as { type?: string }).type === "pair_register_err") return;
     if ((frame as { type?: string }).type === "sessions_revoke_ok") {
       const ack = frame as unknown as SessionsRevokeAck;
@@ -388,6 +397,16 @@ export class EdgeBookDialoutClient {
     if (frame.type !== "host.api.request" && frame.type !== "api_request") return;
     const response = await this.handleApiRequest(frame);
     this.send(response);
+  }
+
+  private async standDown(frame: { type?: string; reason?: string; idle_ms?: number }): Promise<void> {
+    this.stopped = true;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.heartbeat) clearInterval(this.heartbeat);
+    this.socket?.close();
+    if (this.localApi) await closeServer(this.localApi.server);
+    this.localApi = undefined;
+    await this.options.onStandDown?.(frame);
   }
 
   async handleApiRequest(frame: DialoutApiRequest): Promise<DialoutApiResponse> {
