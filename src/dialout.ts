@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
+import WebSocket from "ws";
 import { EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import { startEdgeBookServer } from "./http.ts";
 
@@ -181,8 +182,7 @@ export async function createSessionsRevokeFrame(store: EdgeBookStore): Promise<S
 }
 
 function socketFactory(url: string): DialoutSocket {
-  const SocketCtor = globalThis.WebSocket;
-  if (!SocketCtor) throw new EdgeBookError("websocket_unavailable", "This Node runtime does not provide global WebSocket");
+  const SocketCtor = globalThis.WebSocket ?? WebSocket;
   return new SocketCtor(url) as unknown as DialoutSocket;
 }
 

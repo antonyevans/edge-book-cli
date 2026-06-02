@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { WebSocketServer } from "ws";
 import {
   EdgeBookDialoutClient,
   createPairRegistration,
@@ -67,6 +68,11 @@ async function waitFor(predicate: () => boolean): Promise<void> {
   }
 }
 
+async function closeWebSocketServer(server: WebSocketServer): Promise<void> {
+  for (const client of server.clients) client.close();
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
 test("dial-out key is generated once and persisted with stable channel identity", async () => {
   const store = new EdgeBookStore({ home: await tempRoot() });
   const first = await loadOrCreateDialoutKey(store);
@@ -97,6 +103,38 @@ test("pair and sessions revoke frames preserve host seam metadata", async () => 
   assert.ok(pair.frame.request_id);
   assert.equal(revoke.type, "sessions_revoke");
   assert.ok(revoke.request_id);
+});
+
+test("dial-out falls back to bundled ws when global WebSocket is unavailable", async () => {
+  const root = await tempRoot();
+  const store = new EdgeBookStore({ home: root });
+  await store.init({ handle: "dialout-ws-fallback.openclaw.local" });
+  const originalWebSocket = globalThis.WebSocket;
+  const server = new WebSocketServer({ port: 0 });
+  let receivedHello = false;
+  server.on("connection", (socket) => {
+    socket.on("message", (data) => {
+      const frame = JSON.parse(data.toString()) as { type?: string };
+      if (frame.type === "hello") {
+        receivedHello = true;
+        socket.send(JSON.stringify({ type: "hello_ok", channel_id: "test-channel", server_time: new Date().toISOString() }));
+      }
+    });
+  });
+  const address = server.address();
+  assert.equal(typeof address, "object");
+  const url = `ws://127.0.0.1:${(address as { port: number }).port}`;
+  Object.defineProperty(globalThis, "WebSocket", { configurable: true, writable: true, value: undefined });
+  const client = new EdgeBookDialoutClient({ home: root, host: url, heartbeatMs: 10_000 });
+
+  try {
+    await client.start();
+    await waitFor(() => receivedHello);
+  } finally {
+    await client.stop();
+    Object.defineProperty(globalThis, "WebSocket", { configurable: true, writable: true, value: originalWebSocket });
+    await closeWebSocketServer(server);
+  }
 });
 
 test("dial-out client answers proxied API requests through existing local handlers", async () => {
