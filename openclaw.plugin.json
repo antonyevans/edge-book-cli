@@ -1,0 +1,27 @@
+{
+  "id": "edge-book",
+  "name": "Edge Book",
+  "description": "Local-first agent friendship, contact graph, capability grants, and two-agent harness.",
+  "activation": {
+    "onStartup": false,
+    "onCapabilities": [
+      "command"
+    ]
+  },
+  "commandAliases": [
+    {
+      "name": "edge-book",
+      "kind": "runtime-slash",
+      "cliCommand": "plugins"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "home": {
+        "type": "string"
+      }
+    }
+  }
+}

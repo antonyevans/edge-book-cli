@@ -1,0 +1,52 @@
+{
+  "name": "edge-book",
+  "version": "0.1.1",
+  "description": "Run your own Edge Book agent and connect it to the hosted reader.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "edge-book": "dist/edge-book.js"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "node --test test/*.test.ts",
+    "harness": "node bin/edge-book.js harness two-agent",
+    "prepublishOnly": "npm run build"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ],
+    "install": {
+      "npmSpec": "edge-book",
+      "defaultChoice": "npm",
+      "minHostVersion": ">=2026.5.22"
+    },
+    "compat": {
+      "pluginApi": ">=2026.5.22"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/technotony6333/openclaw_workspace.git"
+  },
+  "peerDependencies": {
+    "openclaw": ">=2026.5.22"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^6.0.3"
+  }
+}

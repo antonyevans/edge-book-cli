@@ -1,0 +1,319 @@
+import fs from "node:fs/promises";
+import { realpathSync } from "node:fs";
+import net from "node:net";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { EdgeBookDialoutClient, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
+import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
+import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
+import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
+
+export interface CliContext {
+  home?: string;
+  textOnly?: boolean;
+  socketFactory?: (url: string) => DialoutSocket;
+}
+
+export interface CliResult {
+  text: string;
+  json?: unknown;
+}
+
+function usage(): string {
+  return `Edge Book
+
+Usage:
+  edge-book init [--home <dir>] [--handle <handle>] [--name <display>]
+
+Hosted reader:
+  edge-book dialout --host <ws-url> [--home <dir>]
+  edge-book pair --host <ws-url> [--ttl-ms <ms>] [--home <dir>]
+  edge-book sessions revoke --host <ws-url> [--home <dir>]
+
+Local agent:
+  edge-book doctor [--home <dir>]
+  edge-book card show [--home <dir>]
+  edge-book card export --path <file> [--home <dir>]
+  edge-book friend request <card-path-or-url> [--deliver] [--home <dir>]
+  edge-book friend receive <envelope-json-path> [--home <dir>]
+  edge-book friend accept <peer-agent-id> [--deliver] [--home <dir>]
+  edge-book friend apply-response <envelope-json-path> [--home <dir>]
+  edge-book friend revoke <peer-agent-id> [--home <dir>]
+  edge-book friend block <peer-agent-id> [--home <dir>]
+  edge-book contacts list [--home <dir>]
+  edge-book contacts refresh <card-path-or-url> [--home <dir>]
+  edge-book message send <peer-agent-id> --body <text> [--deliver] [--home <dir>]
+  edge-book message receive <envelope-json-path> [--home <dir>]
+  edge-book inbox list [--home <dir>]
+  edge-book inbox pull --relay <url> [--home <dir>]
+  edge-book serve --host <host> --port <port> [--home <dir>]
+  edge-book relay serve --host <host> --port <port> --store <dir>
+  edge-book harness two-agent`;
+}
+
+function takeFlag(args: string[], name: string): string | undefined {
+  const idx = args.indexOf(name);
+  if (idx === -1) return undefined;
+  const value = args[idx + 1];
+  args.splice(idx, 2);
+  return value;
+}
+
+function parseHome(args: string[], ctx: CliContext): string | undefined {
+  return takeFlag(args, "--home") || ctx.home;
+}
+
+function requireArg(value: string | undefined, label: string): string {
+  if (!value) throw new EdgeBookError("missing_arg", `Missing ${label}`);
+  return value;
+}
+
+function takeBoolFlag(args: string[], name: string): boolean {
+  const idx = args.indexOf(name);
+  if (idx === -1) return false;
+  args.splice(idx, 1);
+  return true;
+}
+
+async function readEnvelope(filePath: string) {
+  return JSON.parse(await fs.readFile(path.resolve(filePath), "utf8"));
+}
+
+async function deliverToEndpoint(envelope: Awaited<ReturnType<EdgeBookStore["signEnvelope"]>>, endpoint: string): Promise<string> {
+  await postEnvelope(endpoint, envelope);
+  return `Delivered ${envelope.type} to ${endpoint}`;
+}
+
+async function deliverToPeer(store: EdgeBookStore, envelope: Awaited<ReturnType<EdgeBookStore["signEnvelope"]>>, peerAgentId: string): Promise<string> {
+  const contacts = await store.contacts();
+  const contact = contacts[peerAgentId];
+  const direct = contact?.known_endpoints.find((entry) => entry.mode === "direct")?.endpoint;
+  if (direct) return deliverToEndpoint(envelope, direct);
+  const relay = contact?.known_endpoints.find((entry) => entry.mode === "relay")?.endpoint;
+  if (relay) {
+    await postRelayEnvelope(relay, peerAgentId, envelope);
+    return `Queued ${envelope.type} via relay ${relay}`;
+  }
+  throw new EdgeBookError("no_route", `No direct or relay endpoint for ${peerAgentId}`);
+}
+
+function serverAddress(server: { address(): string | net.AddressInfo | null }): string {
+  const address = server.address();
+  if (!address || typeof address === "string") return String(address);
+  return `${address.address}:${address.port}`;
+}
+
+export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Promise<CliResult> {
+  const args = [...inputArgs];
+  const home = parseHome(args, ctx);
+  const command = args.shift() || "help";
+  const store = new EdgeBookStore({ home });
+
+  if (command === "help" || command === "--help" || command === "-h") {
+    return { text: usage() };
+  }
+
+  if (command === "init") {
+    const handle = takeFlag(args, "--handle");
+    const displayName = takeFlag(args, "--name");
+    const directUrl = takeFlag(args, "--direct-url");
+    const relayUrl = takeFlag(args, "--relay-url");
+    const identity = await store.init({ handle, displayName, directUrl, relayUrl });
+    return { text: `Initialized ${identity.agent_id} at ${store.home}`, json: identity };
+  }
+
+  if (command === "doctor") {
+    const result = await store.doctor();
+    return { text: JSON.stringify(result, null, 2), json: result };
+  }
+
+  if (command === "card") {
+    const action = args.shift() || "show";
+    if (action === "show") {
+      const card = await store.writeCard();
+      return { text: JSON.stringify(card, null, 2), json: card };
+    }
+    if (action === "export") {
+      const target = requireArg(takeFlag(args, "--path"), "--path");
+      const card = await store.writeCard();
+      await fs.mkdir(path.dirname(path.resolve(target)), { recursive: true });
+      await fs.writeFile(path.resolve(target), `${JSON.stringify(card, null, 2)}\n`, "utf8");
+      return { text: `Exported Agent Card to ${path.resolve(target)}`, json: card };
+    }
+  }
+
+  if (command === "friend") {
+    const action = args.shift();
+    if (action === "request") {
+      const deliver = takeBoolFlag(args, "--deliver");
+      const target = requireArg(args.shift(), "card-path-or-url");
+      const card = await loadCard(target);
+      const envelope = await store.createFriendRequest(card);
+      if (deliver) {
+        const direct = card.transports.find((entry) => entry.mode === "direct")?.endpoint;
+        if (direct) return { text: await deliverToEndpoint(envelope, direct), json: envelope };
+        const relay = card.transports.find((entry) => entry.mode === "relay")?.endpoint;
+        if (relay) {
+          await postRelayEnvelope(relay, card.agent_id, envelope);
+          return { text: `Queued friend_request via relay ${relay}`, json: envelope };
+        }
+        throw new EdgeBookError("no_route", `No direct or relay endpoint for ${card.agent_id}`);
+      }
+      return { text: JSON.stringify(envelope, null, 2), json: envelope };
+    }
+    if (action === "receive") {
+      const source = requireArg(args.shift(), "envelope-json-path");
+      const contact = await store.receiveFriendRequest(await readEnvelope(source));
+      return { text: JSON.stringify(contact, null, 2), json: contact };
+    }
+    if (action === "accept") {
+      const deliver = takeBoolFlag(args, "--deliver");
+      const peer = requireArg(args.shift(), "peer-agent-id");
+      const envelope = await store.acceptFriend(peer);
+      if (deliver) return { text: await deliverToPeer(store, envelope, peer), json: envelope };
+      return { text: JSON.stringify(envelope, null, 2), json: envelope };
+    }
+    if (action === "apply-response") {
+      const source = requireArg(args.shift(), "envelope-json-path");
+      await store.applyFriendResponse(await readEnvelope(source));
+      return { text: `Applied friend response from ${path.resolve(source)}` };
+    }
+    if (action === "revoke") {
+      const peer = requireArg(args.shift(), "peer-agent-id");
+      await store.revoke(peer);
+      return { text: `Revoked ${peer}` };
+    }
+    if (action === "block") {
+      const peer = requireArg(args.shift(), "peer-agent-id");
+      await store.block(peer);
+      return { text: `Blocked ${peer}` };
+    }
+  }
+
+  if (command === "contacts") {
+    const action = args.shift() || "list";
+    if (action === "list") {
+      const contacts = await store.contacts();
+      return { text: JSON.stringify(Object.values(contacts), null, 2), json: contacts };
+    }
+    if (action === "refresh") {
+      const target = requireArg(args.shift(), "card-path-or-url");
+      const contact = await store.upsertContactFromCard(await loadCard(target));
+      return { text: JSON.stringify(contact, null, 2), json: contact };
+    }
+  }
+
+  if (command === "message") {
+    const action = args.shift();
+    if (action === "send") {
+      const deliver = takeBoolFlag(args, "--deliver");
+      const peer = requireArg(args.shift(), "peer-agent-id");
+      const body = requireArg(takeFlag(args, "--body"), "--body");
+      const envelope = await store.sendPrivilegedMessage(peer, { text: body });
+      if (deliver) return { text: await deliverToPeer(store, envelope, peer), json: envelope };
+      return { text: JSON.stringify(envelope, null, 2), json: envelope };
+    }
+    if (action === "receive") {
+      const source = requireArg(args.shift(), "envelope-json-path");
+      await store.receivePrivilegedMessage(await readEnvelope(source));
+      return { text: `Received privileged message from ${path.resolve(source)}` };
+    }
+  }
+
+  if (command === "inbox") {
+    const action = args.shift() || "list";
+    if (action === "list") {
+      const inbox = await store.inbox();
+      return { text: JSON.stringify(inbox, null, 2), json: inbox };
+    }
+    if (action === "pull") {
+      const relay = requireArg(takeFlag(args, "--relay"), "--relay");
+      const identity = await store.identity();
+      const envelopes = await pullRelayEnvelopes(relay, identity.agent_id);
+      for (const envelope of envelopes) await store.receiveEnvelope(envelope);
+      return { text: `Pulled ${envelopes.length} envelope(s) from ${relay}`, json: envelopes };
+    }
+  }
+
+  if (command === "serve") {
+    const host = takeFlag(args, "--host") || "127.0.0.1";
+    const port = Number(takeFlag(args, "--port") || "0");
+    const cardUrl = takeFlag(args, "--card-url");
+    const server = await startEdgeBookServer({ home, host, port, cardUrl });
+    console.log(`Edge Book server listening on ${serverAddress(server)}`);
+    await new Promise(() => undefined);
+  }
+
+  if (command === "dialout") {
+    const hostUrl = requireArg(takeFlag(args, "--host"), "--host");
+    const client = new EdgeBookDialoutClient({ home, host: hostUrl, socketFactory: ctx.socketFactory });
+    await client.start();
+    console.log(`Edge Book dial-out connected to ${hostUrl}`);
+    await new Promise(() => undefined);
+  }
+
+  if (command === "pair") {
+    const hostUrl = requireArg(takeFlag(args, "--host"), "--host");
+    const ttlMs = Number(takeFlag(args, "--ttl-ms") || `${5 * 60 * 1000}`);
+    if (!ctx.textOnly) {
+      const client = new EdgeBookDialoutClient({ home, host: hostUrl, socketFactory: ctx.socketFactory, openLocalApi: false });
+      await client.start();
+      const registration = await client.pair(ttlMs);
+      console.log(`Pairing code: ${registration.code}`);
+      console.log(`Expires in: ${ttlMs}ms`);
+      console.log("Edge Book dial-out remains connected; leave this process running during the hosted reader session.");
+      await new Promise(() => undefined);
+    }
+    const registration = await sendPairRegistration({ home, host: hostUrl, ttlMs, socketFactory: ctx.socketFactory });
+    return { text: `Pairing code: ${registration.code}\nExpires in: ${registration.frame.ttl_ms}ms`, json: registration };
+  }
+
+  if (command === "sessions") {
+    const action = args.shift();
+    if (action === "revoke") {
+      const hostUrl = requireArg(takeFlag(args, "--host"), "--host");
+      const frame = await sendSessionsRevoke({ home, host: hostUrl, socketFactory: ctx.socketFactory });
+      const channel = (frame as SessionsRevokeFrame & { channel_id?: string }).channel_id || "unknown-channel";
+      return { text: `Received sessions_revoke_ok for request ${frame.request_id} on ${channel}`, json: frame };
+    }
+  }
+
+  if (command === "relay") {
+    const action = args.shift();
+    if (action === "serve") {
+      const host = takeFlag(args, "--host") || "127.0.0.1";
+      const port = Number(takeFlag(args, "--port") || "0");
+      const relayStore = requireArg(takeFlag(args, "--store"), "--store");
+      const server = await startRelayServer({ host, port, store: relayStore });
+      console.log(`Edge Book relay listening on ${serverAddress(server)}`);
+      await new Promise(() => undefined);
+    }
+  }
+
+  if (command === "harness") {
+    const action = args.shift();
+    if (action === "two-agent") {
+      const result = await runTwoAgentHarness();
+      return { text: `PASS two-agent harness\n${JSON.stringify(result, null, 2)}`, json: result };
+    }
+  }
+
+  throw new EdgeBookError("unknown_command", usage());
+}
+
+export async function runCli(args: string[]): Promise<void> {
+  const result = await handleCli(args);
+  console.log(result.text);
+}
+
+function isCliEntrypoint(): boolean {
+  if (!process.argv[1]) return false;
+  return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+}
+
+if (isCliEntrypoint()) {
+  runCli(process.argv.slice(2)).catch((error) => {
+    console.error(error?.message ?? String(error));
+    process.exitCode = 1;
+  });
+}
