@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import WebSocket from "ws";
-import { EdgeBookError, EdgeBookStore } from "./edge-book.ts";
+import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "./edge-book.ts";
 import { startEdgeBookServer } from "./http.ts";
 
 const KEY_FILE = "host-dialout-key.json";
@@ -86,6 +86,20 @@ export interface DialoutClientOptions {
   socketFactory?: (url: string) => DialoutSocket;
   openLocalApi?: boolean;
   onStandDown?: (frame: { type?: string; reason?: string; idle_ms?: number }) => void | Promise<void>;
+  // Mailbox transport (ea-claude-065). When a queued envelope is delivered, the
+  // client decodes it, applies it via the store (friend request / object share /
+  // revoke), then acks the host. Set autoApplyEnvelopes=false to handle manually.
+  autoApplyEnvelopes?: boolean;
+  onEnvelope?: (envelope: MessageEnvelope, result: { applied: boolean; error?: string }) => void | Promise<void>;
+}
+
+// A delivered mailbox message (Contract 1, mirrors edge-book-host).
+export interface MailboxDeliverFrame {
+  type: "mailbox_deliver";
+  id: string;
+  from: string;
+  blob_b64: string;
+  ts: number;
 }
 
 interface LocalApi {
@@ -253,6 +267,11 @@ export class EdgeBookDialoutClient {
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }>();
+  private pendingMailboxSends = new Map<string, {
+    resolve: (ack: { id: string }) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
 
   constructor(options: DialoutClientOptions) {
     this.options = {
@@ -262,6 +281,8 @@ export class EdgeBookDialoutClient {
       socketFactory: options.socketFactory ?? socketFactory,
       openLocalApi: options.openLocalApi ?? true,
       onStandDown: options.onStandDown ?? (() => undefined),
+      autoApplyEnvelopes: options.autoApplyEnvelopes ?? true,
+      onEnvelope: options.onEnvelope ?? (() => undefined),
       host: options.host,
       home: options.home
     };
@@ -306,6 +327,83 @@ export class EdgeBookDialoutClient {
     });
     this.send(frame);
     return { frame, ack: await ackPromise };
+  }
+
+  // ── Mailbox transport (Contract 1 / ea-claude-065) ─────────────────────────
+
+  // Low-level: hand an opaque blob to the host for delivery to `to` (a peer DID
+  // or channel_id). Resolves with the host-assigned message id once enqueued.
+  async sendMailbox(to: string, blob: Buffer | Uint8Array, timeoutMs = 5_000): Promise<{ id: string }> {
+    const request_id = crypto.randomUUID();
+    const blob_b64 = Buffer.from(blob).toString("base64");
+    const ack = new Promise<{ id: string }>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingMailboxSends.delete(request_id);
+        reject(new EdgeBookError("mailbox_send_timeout", "Timed out waiting for mailbox_send_ok"));
+      }, timeoutMs);
+      this.pendingMailboxSends.set(request_id, { resolve, reject, timer });
+    });
+    this.send({ type: "mailbox_send", request_id, to, blob_b64 });
+    return ack;
+  }
+
+  // High-level: deliver a signed envelope to its recipient (envelope.to_agent_id;
+  // the host resolves the DID to a channel). Used to route friend requests,
+  // object shares, and revokes through the mailbox instead of a manual file hop.
+  async sendEnvelope(envelope: MessageEnvelope): Promise<{ id: string }> {
+    return this.sendMailbox(envelope.to_agent_id, Buffer.from(JSON.stringify(envelope), "utf8"));
+  }
+
+  private async handleMailboxDeliver(frame: MailboxDeliverFrame): Promise<void> {
+    let envelope: MessageEnvelope | undefined;
+    let applied = false;
+    let error: string | undefined;
+    try {
+      envelope = JSON.parse(Buffer.from(frame.blob_b64, "base64").toString("utf8")) as MessageEnvelope;
+      if (this.mailboxQueue) {
+        this.pushMailbox({ id: frame.id, to: envelope.to_agent_id, from: frame.from, blob: frame.blob_b64, ts: frame.ts });
+      } else if (this.options.autoApplyEnvelopes) {
+        await this.store.receiveEnvelope(envelope);
+        applied = true;
+      }
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+    // Ack so the host deletes it. At-least-once delivery + dedupe-by-message_id
+    // (verifyEnvelope rejects replays) makes acking-always safe and avoids a
+    // poison message redelivering forever. Manual consumers ack via the queue.
+    if (!this.mailboxQueue) this.send({ type: "mailbox_ack", id: frame.id });
+    if (envelope) await this.options.onEnvelope?.(envelope, { applied, error });
+  }
+
+  // Contract-1 Transport facade. Enabling it switches deliver handling to manual
+  // (queue) mode so the consumer drives apply + ack via receive()/ack().
+  private mailboxQueue?: Array<{ id: string; to: string; from: string; blob: string; ts: number }>;
+  private mailboxWaiters: Array<() => void> = [];
+  private pushMailbox(m: { id: string; to: string; from: string; blob: string; ts: number }): void {
+    this.mailboxQueue?.push(m);
+    this.mailboxWaiters.splice(0).forEach((w) => w());
+  }
+  transport(): {
+    send: (recipient: string, bytes: Uint8Array) => Promise<{ id: string }>;
+    receive: () => AsyncIterable<{ id: string; to: string; from: string; blob: string; ts: number }>;
+    ack: (id: string) => Promise<void>;
+  } {
+    this.mailboxQueue ||= [];
+    const self = this;
+    return {
+      send: (recipient, bytes) => self.sendMailbox(recipient, bytes),
+      ack: async (id) => { self.send({ type: "mailbox_ack", id }); },
+      receive: async function* () {
+        for (;;) {
+          while (self.mailboxQueue && self.mailboxQueue.length === 0) {
+            await new Promise<void>((r) => self.mailboxWaiters.push(r));
+          }
+          const next = self.mailboxQueue?.shift();
+          if (next) yield next;
+        }
+      }
+    };
   }
 
   private async connect(): Promise<void> {
@@ -393,7 +491,32 @@ export class EdgeBookDialoutClient {
       }
       return;
     }
-    if ((frame as { type?: string }).type === "error") return;
+    const frameType = (frame as { type?: string }).type;
+    if (frameType === "mailbox_send_ok") {
+      const ack = frame as unknown as { request_id?: string; id?: string };
+      const pending = this.pendingMailboxSends.get(ack.request_id || "");
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingMailboxSends.delete(ack.request_id || "");
+        pending.resolve({ id: ack.id || "" });
+      }
+      return;
+    }
+    if (frameType === "mailbox_send_err") {
+      const err = frame as unknown as { request_id?: string; error?: string };
+      const pending = this.pendingMailboxSends.get(err.request_id || "");
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingMailboxSends.delete(err.request_id || "");
+        pending.reject(new EdgeBookError("mailbox_send_failed", err.error || "mailbox_send rejected"));
+      }
+      return;
+    }
+    if (frameType === "mailbox_deliver") {
+      await this.handleMailboxDeliver(frame as unknown as MailboxDeliverFrame);
+      return;
+    }
+    if (frameType === "error") return;
     if (frame.type !== "host.api.request" && frame.type !== "api_request") return;
     const response = await this.handleApiRequest(frame);
     this.send(response);
