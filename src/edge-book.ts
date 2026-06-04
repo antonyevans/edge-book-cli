@@ -94,11 +94,45 @@ export interface CapabilityGrant {
   revoked_at: string;
   audit_refs: string[];
   signature: string;
+  // Edge Book MVP (spec-0020 R3): an `object.read` grant binds to exactly one
+  // shared object. Absent for the legacy relationship-wide scopes.
+  object_id?: string;
+}
+
+// Edge Book MVP shared object (spec-0020 R2). ONE type ("request"), at most ONE
+// attachment, gated by ONE `object.read` grant. NO status/state/verification/
+// payment field — that execution lane is Shodai's (R4).
+export interface SharedObjectAttachment {
+  filename: string;
+  mime: string;
+  size: number;
+  ref: string; // local content ref (a file under attachments/), agent-held
+}
+
+export interface SharedObject {
+  object_id: string;
+  type: "request";
+  from_agent: string;
+  request: { title: string; body: string };
+  attachment?: SharedObjectAttachment;
+  created_at: string;
+  signature: string;
+}
+
+export interface ObjectShareBody {
+  object: SharedObject;
+  grant: CapabilityGrant;
+  attachment_b64?: string; // inline attachment bytes for delivery (recipient stores locally)
+}
+
+export interface ObjectRevokeBody {
+  object_id: string;
+  grant_id: string;
 }
 
 export interface MessageEnvelope {
   message_id: string;
-  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error";
+  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error" | "object_share" | "object_revoke";
   from_agent_id: string;
   to_agent_id: string;
   relationship_id: string;
@@ -209,6 +243,8 @@ export class EdgeBookError extends Error {
 const IDENTITY_FILE = "identity.json";
 const CONTACTS_FILE = "contacts.json";
 const GRANTS_FILE = "grants.json";
+const OBJECTS_FILE = "objects.json";
+const ATTACHMENTS_DIR = "attachments";
 const SEEN_MESSAGES_FILE = "seen-messages.json";
 const CONFIG_FILE = "config.json";
 const RELATIONSHIP_EVENTS_FILE = "relationship-events.jsonl";
@@ -674,6 +710,236 @@ export class EdgeBookStore {
     await this.audit("message.receive", envelope.from_agent_id, { message_id: envelope.message_id });
   }
 
+  // ──────────────────────────────────────────────────────────────────────
+  // Edge Book MVP: single shared object + object.read grant (spec-0020 R2/R3)
+  // ea-claude-066. One object type ("request"), ≤1 attachment, fail-closed
+  // access, append-only audit on create/grant/access/revoke. No R4 fields.
+  // ──────────────────────────────────────────────────────────────────────
+
+  async objects(): Promise<Record<string, SharedObject>> {
+    return readJson<Record<string, SharedObject>>(this.file(OBJECTS_FILE), {});
+  }
+
+  async saveObjects(objects: Record<string, SharedObject>): Promise<void> {
+    await writeJson(this.file(OBJECTS_FILE), objects);
+  }
+
+  async getObject(objectId: string): Promise<SharedObject | undefined> {
+    return (await this.objects())[objectId];
+  }
+
+  // Create one shared object (a request + at most one attachment). Signed and
+  // stored locally; writes an `object.create` audit event.
+  async createObject(input: {
+    title: string;
+    body: string;
+    attachment?: { filename: string; mime: string; bytes: Buffer };
+  }): Promise<SharedObject> {
+    const identity = await this.identity();
+    const object_id = randomId("obj");
+    let attachment: SharedObjectAttachment | undefined;
+    if (input.attachment) {
+      const ref = path.join(ATTACHMENTS_DIR, `${object_id}-${input.attachment.filename}`);
+      await fs.mkdir(this.file(ATTACHMENTS_DIR), { recursive: true });
+      await fs.writeFile(this.file(ref), input.attachment.bytes);
+      attachment = {
+        filename: input.attachment.filename,
+        mime: input.attachment.mime,
+        size: input.attachment.bytes.length,
+        ref
+      };
+    }
+    const unsigned: Omit<SharedObject, "signature"> = {
+      object_id,
+      type: "request",
+      from_agent: identity.agent_id,
+      request: { title: input.title, body: input.body },
+      ...(attachment ? { attachment } : {}),
+      created_at: now()
+    };
+    const object: SharedObject = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    const objects = await this.objects();
+    objects[object_id] = object;
+    await this.saveObjects(objects);
+    await this.audit("object.create", identity.agent_id, { object_id, has_attachment: Boolean(attachment) });
+    return object;
+  }
+
+  // Issue an `object.read` grant binding ONE object to ONE subject (revocable).
+  async issueObjectGrant(subjectAgentId: string, objectId: string, expiresAt = ""): Promise<CapabilityGrant> {
+    const identity = await this.identity();
+    if (!(await this.getObject(objectId))) throw new EdgeBookError("unknown_object", `Unknown object: ${objectId}`);
+    const unsigned: Omit<CapabilityGrant, "signature"> = {
+      grant_id: randomId("grant"),
+      issuer_agent_id: identity.agent_id,
+      subject_agent_id: subjectAgentId,
+      relationship_id: relationshipId(identity.agent_id, subjectAgentId),
+      scopes: ["object.read"],
+      status: "active",
+      issued_at: now(),
+      expires_at: expiresAt,
+      revoked_at: "",
+      audit_refs: [],
+      object_id: objectId
+    };
+    const grant = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    await this.storeGrant(grant);
+    await this.audit("grant.issue", subjectAgentId, { grant_id: grant.grant_id, object_id: objectId, scope: "object.read" });
+    return grant;
+  }
+
+  // Fail-closed predicate (spec-0020 R3): readable IFF an active, unexpired
+  // `object.read` grant exists for (object_id, subject). Does NOT audit — use
+  // readObject() for an audited access. The object's owner may always read it.
+  async canReadObject(objectId: string, subjectAgentId: string, at = Date.now()): Promise<boolean> {
+    const object = await this.getObject(objectId);
+    if (object && object.from_agent === subjectAgentId) return true; // owner
+    const grants = await this.grants();
+    return Object.values(grants).some((grant) =>
+      grant.object_id === objectId &&
+      grant.subject_agent_id === subjectAgentId &&
+      grant.scopes.includes("object.read") &&
+      grant.status === "active" &&
+      (!grant.expires_at || Date.parse(grant.expires_at) > at)
+    );
+  }
+
+  // Audited read. Returns the object iff canReadObject; else fails closed.
+  async readObject(objectId: string, subjectAgentId: string): Promise<SharedObject> {
+    const object = await this.getObject(objectId);
+    if (!object || !(await this.canReadObject(objectId, subjectAgentId))) {
+      throw new EdgeBookError("access_denied", `No active object.read grant for (${objectId}, ${subjectAgentId})`);
+    }
+    await this.audit("object.access", subjectAgentId, { object_id: objectId });
+    return object;
+  }
+
+  // Raw bytes of an object's (single) attachment, agent-held under attachments/.
+  // Caller is responsible for the access check (readObject) first.
+  async readAttachmentBytes(objectId: string): Promise<Buffer> {
+    const object = await this.getObject(objectId);
+    if (!object?.attachment) throw new EdgeBookError("no_attachment", `No attachment for ${objectId}`);
+    return fs.readFile(this.file(object.attachment.ref));
+  }
+
+  // Objects the given subject (default: me) may currently read — the data behind
+  // the reader's "Shared with me" surface. Read-through is unaudited (listing);
+  // readObject() audits the actual open.
+  async sharedObjectsFor(subjectAgentId?: string): Promise<SharedObject[]> {
+    const subject = subjectAgentId ?? (await this.identity()).agent_id;
+    const objects = await this.objects();
+    const out: SharedObject[] = [];
+    for (const object of Object.values(objects)) {
+      if (object.from_agent === subject) continue; // own objects aren't "shared with me"
+      if (await this.canReadObject(object.object_id, subject)) out.push(object);
+    }
+    return out.sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
+  }
+
+  // Build a signed `object_share` envelope (object + grant + inline attachment)
+  // to deliver to a friend over the mailbox transport (ea-claude-065).
+  async shareObjectEnvelope(peerAgentId: string, objectId: string, expiresAt = ""): Promise<MessageEnvelope> {
+    const identity = await this.identity();
+    const contact = (await this.contacts())[peerAgentId];
+    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
+    if (contact.relationship_state !== "friend") {
+      throw new EdgeBookError("not_friend", `Cannot share to relationship_state=${contact.relationship_state}`);
+    }
+    const object = await this.getObject(objectId);
+    if (!object) throw new EdgeBookError("unknown_object", `Unknown object: ${objectId}`);
+    const grant = await this.issueObjectGrant(peerAgentId, objectId, expiresAt);
+    let attachment_b64: string | undefined;
+    if (object.attachment) {
+      attachment_b64 = (await fs.readFile(this.file(object.attachment.ref))).toString("base64");
+    }
+    return this.signEnvelope({
+      type: "object_share",
+      to_agent_id: peerAgentId,
+      relationship_id: relationshipId(identity.agent_id, peerAgentId),
+      capability_id: grant.grant_id,
+      ref: objectId,
+      transport: "local",
+      body: { object, grant, ...(attachment_b64 ? { attachment_b64 } : {}) } as unknown as Record<string, unknown>
+    });
+  }
+
+  // Apply a received `object_share`: store the object (+ attachment) and grant,
+  // after verifying the envelope signature and that the grant matches.
+  async receiveObjectShare(envelope: MessageEnvelope): Promise<SharedObject> {
+    await this.verifyEnvelope(envelope);
+    if (envelope.type !== "object_share") throw new EdgeBookError("wrong_message_type", "Expected object_share envelope");
+    const identity = await this.identity();
+    const body = envelope.body as unknown as ObjectShareBody;
+    const { object, grant } = body;
+    if (!object || !grant) throw new EdgeBookError("malformed_object_share", "object_share missing object or grant");
+    if (object.from_agent !== envelope.from_agent_id) throw new EdgeBookError("agent_id_mismatch", "Shared object author does not match sender");
+    if (grant.object_id !== object.object_id || grant.subject_agent_id !== identity.agent_id || !grant.scopes.includes("object.read")) {
+      throw new EdgeBookError("grant_mismatch", "Grant does not bind this object to me with object.read");
+    }
+    if (body.attachment_b64 && object.attachment) {
+      await fs.mkdir(this.file(ATTACHMENTS_DIR), { recursive: true });
+      await fs.writeFile(this.file(object.attachment.ref), Buffer.from(body.attachment_b64, "base64"));
+    }
+    const objects = await this.objects();
+    objects[object.object_id] = object;
+    await this.saveObjects(objects);
+    await this.storeGrant(grant);
+    await this.audit("object.receive", envelope.from_agent_id, { object_id: object.object_id, grant_id: grant.grant_id });
+    return object;
+  }
+
+  // Revoke an object.read grant (forward-looking; does not claw back delivered
+  // data). Writes a `grant.revoke` audit event. Returns the revoked grant_ids.
+  async revokeObjectGrant(objectId: string, subjectAgentId: string): Promise<string[]> {
+    const grants = await this.grants();
+    const revoked: string[] = [];
+    for (const grant of Object.values(grants)) {
+      if (grant.object_id === objectId && grant.subject_agent_id === subjectAgentId && grant.status === "active") {
+        grant.status = "revoked";
+        grant.revoked_at = now();
+        revoked.push(grant.grant_id);
+      }
+    }
+    if (revoked.length) {
+      await this.saveGrants(grants);
+      await this.audit("grant.revoke", subjectAgentId, { object_id: objectId, grant_ids: revoked });
+    }
+    return revoked;
+  }
+
+  // Build a signed `object_revoke` envelope to forward the revoke to the peer.
+  async revokeObjectEnvelope(peerAgentId: string, objectId: string): Promise<MessageEnvelope> {
+    const identity = await this.identity();
+    const revoked = await this.revokeObjectGrant(objectId, peerAgentId);
+    return this.signEnvelope({
+      type: "object_revoke",
+      to_agent_id: peerAgentId,
+      relationship_id: relationshipId(identity.agent_id, peerAgentId),
+      capability_id: revoked[0] || "",
+      ref: objectId,
+      transport: "local",
+      body: { object_id: objectId, grant_id: revoked[0] || "" } satisfies ObjectRevokeBody as unknown as Record<string, unknown>
+    });
+  }
+
+  // Apply a received `object_revoke`: mark the matching grant revoked locally.
+  async receiveObjectRevoke(envelope: MessageEnvelope): Promise<void> {
+    await this.verifyEnvelope(envelope);
+    if (envelope.type !== "object_revoke") throw new EdgeBookError("wrong_message_type", "Expected object_revoke envelope");
+    const body = envelope.body as unknown as ObjectRevokeBody;
+    const grants = await this.grants();
+    let changed = false;
+    for (const grant of Object.values(grants)) {
+      if (grant.object_id === body.object_id && grant.issuer_agent_id === envelope.from_agent_id && grant.status === "active") {
+        grant.status = "revoked";
+        grant.revoked_at = now();
+        changed = true;
+      }
+    }
+    if (changed) await this.saveGrants(grants);
+    await this.audit("object.revoke.receive", envelope.from_agent_id, { object_id: body.object_id });
+  }
+
   async findUsableGrant(peerAgentId: string, scope: string): Promise<CapabilityGrant | undefined> {
     const identity = await this.identity();
     const grants = await this.grants();
@@ -730,6 +996,8 @@ export class EdgeBookStore {
     if (envelope.type === "friend_request") return this.receiveFriendRequest(envelope);
     if (envelope.type === "friend_response") return this.applyFriendResponse(envelope);
     if (envelope.type === "privileged_message") return this.receivePrivilegedMessage(envelope);
+    if (envelope.type === "object_share") { await this.receiveObjectShare(envelope); return; }
+    if (envelope.type === "object_revoke") { await this.receiveObjectRevoke(envelope); return; }
     throw new EdgeBookError("unsupported_envelope", `Unsupported envelope type: ${envelope.type}`);
   }
 
@@ -1175,6 +1443,13 @@ export function validateCard(card: AgentCard): void {
 }
 
 export async function loadCard(cardPathOrUrl: string): Promise<AgentCard> {
+  // "Add me" invite link: edgebook:invite:<base64url(signed Agent Card)>.
+  if (cardPathOrUrl.startsWith("edgebook:invite:")) {
+    const encoded = cardPathOrUrl.slice("edgebook:invite:".length);
+    const card = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as AgentCard;
+    validateCard(card);
+    return card;
+  }
   if (/^https?:\/\//.test(cardPathOrUrl)) {
     const response = await fetch(cardPathOrUrl);
     if (!response.ok) throw new EdgeBookError("card_fetch_failed", `Failed to fetch card: ${response.status}`);

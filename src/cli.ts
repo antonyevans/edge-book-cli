@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
+import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
 import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
@@ -37,7 +37,8 @@ Local agent:
   edge-book doctor [--home <dir>]
   edge-book card show [--home <dir>]
   edge-book card export --path <file> [--home <dir>]
-  edge-book friend request <card-path-or-url> [--deliver] [--home <dir>]
+  edge-book card invite [--home <dir>]                       # "Add me" link (edgebook:invite:...)
+  edge-book friend request <card-path-or-url-or-invite> [--deliver] [--home <dir>]
   edge-book friend receive <envelope-json-path> [--home <dir>]
   edge-book friend accept <peer-agent-id> [--deliver] [--home <dir>]
   edge-book friend apply-response <envelope-json-path> [--home <dir>]
@@ -47,6 +48,11 @@ Local agent:
   edge-book contacts refresh <card-path-or-url> [--home <dir>]
   edge-book message send <peer-agent-id> --body <text> [--deliver] [--home <dir>]
   edge-book message receive <envelope-json-path> [--home <dir>]
+  edge-book object create --title <t> --body <b> [--file <path>] [--mime <type>] [--home <dir>]
+  edge-book object share <peer-agent-id> <object-id> [--deliver] [--host <ws-url>] [--home <dir>]
+  edge-book object revoke <peer-agent-id> <object-id> [--deliver] [--host <ws-url>] [--home <dir>]
+  edge-book object list [--home <dir>]
+  edge-book object read <object-id> [--home <dir>]
   edge-book inbox list [--home <dir>]
   edge-book inbox pull --relay <url> [--home <dir>]
   edge-book serve --host <host> --port <port> [--home <dir>]
@@ -147,6 +153,12 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       await fs.writeFile(path.resolve(target), `${JSON.stringify(card, null, 2)}\n`, "utf8");
       return { text: `Exported Agent Card to ${path.resolve(target)}`, json: card };
     }
+    if (action === "invite") {
+      // "Add me" link: send this to someone; they run `friend request <link> --deliver`.
+      const card = await store.writeCard();
+      const inviteUrl = `edgebook:invite:${Buffer.from(JSON.stringify(card), "utf8").toString("base64url")}`;
+      return { text: inviteUrl, json: { invite_url: inviteUrl, agent_id: card.agent_id } };
+    }
   }
 
   if (command === "friend") {
@@ -164,7 +176,10 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
           await postRelayEnvelope(relay, card.agent_id, envelope);
           return { text: `Queued friend_request via relay ${relay}`, json: envelope };
         }
-        throw new EdgeBookError("no_route", `No direct or relay endpoint for ${card.agent_id}`);
+        // Dial-out agent (no inbound endpoint): deliver over the host mailbox.
+        const hostUrl = parseHost(args, ctx);
+        const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+        return { text: `Delivered friend_request to ${card.agent_id} over the mailbox (host id ${ack.id})`, json: envelope };
       }
       return { text: JSON.stringify(envelope, null, 2), json: envelope };
     }
@@ -177,7 +192,17 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       const deliver = takeBoolFlag(args, "--deliver");
       const peer = requireArg(args.shift(), "peer-agent-id");
       const envelope = await store.acceptFriend(peer);
-      if (deliver) return { text: await deliverToPeer(store, envelope, peer), json: envelope };
+      if (deliver) {
+        try {
+          return { text: await deliverToPeer(store, envelope, peer), json: envelope };
+        } catch (error) {
+          if (!(error instanceof EdgeBookError) || error.code !== "no_route") throw error;
+          // Dial-out peer (no inbound endpoint): deliver over the host mailbox.
+          const hostUrl = parseHost(args, ctx);
+          const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+          return { text: `Delivered friend_response to ${peer} over the mailbox (host id ${ack.id})`, json: envelope };
+        }
+      }
       return { text: JSON.stringify(envelope, null, 2), json: envelope };
     }
     if (action === "apply-response") {
@@ -195,6 +220,62 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       await store.block(peer);
       return { text: `Blocked ${peer}` };
     }
+  }
+
+  if (command === "object") {
+    const action = args.shift();
+    if (action === "create") {
+      const title = requireArg(takeFlag(args, "--title"), "--title");
+      const body = requireArg(takeFlag(args, "--body"), "--body");
+      const file = takeFlag(args, "--file");
+      let attachment: { filename: string; mime: string; bytes: Buffer } | undefined;
+      if (file) {
+        const bytes = await fs.readFile(path.resolve(file));
+        attachment = { filename: path.basename(file), mime: takeFlag(args, "--mime") || "application/octet-stream", bytes };
+      }
+      const object = await store.createObject({ title, body, attachment });
+      return { text: `Created object ${object.object_id}`, json: object };
+    }
+    if (action === "share") {
+      const deliver = takeBoolFlag(args, "--deliver");
+      const hostUrl = parseHost(args, ctx);
+      const peer = requireArg(args.shift(), "peer-agent-id");
+      const objectId = requireArg(args.shift(), "object-id");
+      const envelope = await store.shareObjectEnvelope(peer, objectId);
+      if (deliver) {
+        const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+        return { text: `Shared object ${objectId} to ${peer} over the mailbox (host id ${ack.id})`, json: envelope };
+      }
+      return { text: JSON.stringify(envelope, null, 2), json: envelope };
+    }
+    if (action === "revoke") {
+      const deliver = takeBoolFlag(args, "--deliver");
+      const hostUrl = parseHost(args, ctx);
+      const peer = requireArg(args.shift(), "peer-agent-id");
+      const objectId = requireArg(args.shift(), "object-id");
+      const envelope = await store.revokeObjectEnvelope(peer, objectId);
+      if (deliver) {
+        const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+        return { text: `Revoked object ${objectId} for ${peer}; forwarded over the mailbox (host id ${ack.id})`, json: envelope };
+      }
+      return { text: JSON.stringify(envelope, null, 2), json: envelope };
+    }
+    if (action === "receive") {
+      const source = requireArg(args.shift(), "envelope-json-path");
+      await store.receiveEnvelope(await readEnvelope(source));
+      return { text: `Applied object envelope from ${path.resolve(source)}` };
+    }
+    if (action === "list") {
+      const objects = await store.sharedObjectsFor();
+      return { text: JSON.stringify(objects, null, 2), json: objects };
+    }
+    if (action === "read") {
+      const objectId = requireArg(args.shift(), "object-id");
+      const me = (await store.identity()).agent_id;
+      const object = await store.readObject(objectId, me);
+      return { text: JSON.stringify(object, null, 2), json: object };
+    }
+    throw new EdgeBookError("unknown_action", `Unknown object action: ${action}`);
   }
 
   if (command === "contacts") {
