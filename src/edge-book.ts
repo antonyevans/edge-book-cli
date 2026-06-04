@@ -814,6 +814,14 @@ export class EdgeBookStore {
     return object;
   }
 
+  // Raw bytes of an object's (single) attachment, agent-held under attachments/.
+  // Caller is responsible for the access check (readObject) first.
+  async readAttachmentBytes(objectId: string): Promise<Buffer> {
+    const object = await this.getObject(objectId);
+    if (!object?.attachment) throw new EdgeBookError("no_attachment", `No attachment for ${objectId}`);
+    return fs.readFile(this.file(object.attachment.ref));
+  }
+
   // Objects the given subject (default: me) may currently read — the data behind
   // the reader's "Shared with me" surface. Read-through is unaudited (listing);
   // readObject() audits the actual open.

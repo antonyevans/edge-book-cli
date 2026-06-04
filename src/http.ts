@@ -46,6 +46,15 @@ function sendHtml(res: http.ServerResponse, value: string): void {
   res.end(value);
 }
 
+function sendBinary(res: http.ServerResponse, status: number, mime: string, filename: string, body: Buffer): void {
+  res.writeHead(status, {
+    "content-type": mime || "application/octet-stream",
+    "content-disposition": `inline; filename="${filename.replace(/[^\w.\- ]/g, "_")}"`,
+    "content-length": String(body.length)
+  });
+  res.end(body);
+}
+
 function sendError(res: http.ServerResponse, error: unknown): void {
   const status = error instanceof EdgeBookError && error.code === "unauthorized"
     ? 401
@@ -155,6 +164,36 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
 
   if (req.method === "GET" && url.pathname === "/api/contacts") {
     sendJson(res, 200, { contacts: await store.contacts(), mutes: await store.contactMutes() });
+    return true;
+  }
+
+  // Edge Book MVP reader surfaces (ea-claude-066/067).
+  // "Shared with me": objects the owner may currently read (grant-gated). Each
+  // carries its binding grant scope so the reader can show provenance.
+  if (req.method === "GET" && url.pathname === "/api/shared-objects") {
+    const objects = await store.sharedObjectsFor();
+    sendJson(res, 200, { objects: objects.map((object) => ({ ...object, grant_scope: "object.read" })) });
+    return true;
+  }
+
+  // "Add me": the owner's signed Agent Card as a shareable, importable invite.
+  if (req.method === "GET" && url.pathname === "/api/invite") {
+    const card = await store.writeCard();
+    const identity = await store.identity();
+    const invite_url = `edgebook:invite:${Buffer.from(JSON.stringify(card), "utf8").toString("base64url")}`;
+    sendJson(res, 200, { agent_id: identity.agent_id, display_name: identity.display_name, card_url: card.card_url, card, invite_url });
+    return true;
+  }
+
+  // ≤1 attachment, served only when an active object.read grant permits it.
+  const attachmentMatch = /^\/api\/shared-objects\/([^/]+)\/attachment$/.exec(url.pathname);
+  if (req.method === "GET" && attachmentMatch) {
+    const objectId = decodeURIComponent(attachmentMatch[1]);
+    const me = (await store.identity()).agent_id;
+    const object = await store.readObject(objectId, me); // fail-closed + audits access
+    if (!object.attachment) { sendJson(res, 404, { ok: false, code: "no_attachment", error: "Object has no attachment" }); return true; }
+    const bytes = await store.readAttachmentBytes(object.object_id);
+    sendBinary(res, 200, object.attachment.mime, object.attachment.filename, bytes);
     return true;
   }
 
