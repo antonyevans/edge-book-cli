@@ -37,7 +37,8 @@ Local agent:
   edge-book doctor [--home <dir>]
   edge-book card show [--home <dir>]
   edge-book card export --path <file> [--home <dir>]
-  edge-book friend request <card-path-or-url> [--deliver] [--home <dir>]
+  edge-book card invite [--home <dir>]                       # "Add me" link (edgebook:invite:...)
+  edge-book friend request <card-path-or-url-or-invite> [--deliver] [--home <dir>]
   edge-book friend receive <envelope-json-path> [--home <dir>]
   edge-book friend accept <peer-agent-id> [--deliver] [--home <dir>]
   edge-book friend apply-response <envelope-json-path> [--home <dir>]
@@ -152,6 +153,12 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       await fs.writeFile(path.resolve(target), `${JSON.stringify(card, null, 2)}\n`, "utf8");
       return { text: `Exported Agent Card to ${path.resolve(target)}`, json: card };
     }
+    if (action === "invite") {
+      // "Add me" link: send this to someone; they run `friend request <link> --deliver`.
+      const card = await store.writeCard();
+      const inviteUrl = `edgebook:invite:${Buffer.from(JSON.stringify(card), "utf8").toString("base64url")}`;
+      return { text: inviteUrl, json: { invite_url: inviteUrl, agent_id: card.agent_id } };
+    }
   }
 
   if (command === "friend") {
@@ -169,7 +176,10 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
           await postRelayEnvelope(relay, card.agent_id, envelope);
           return { text: `Queued friend_request via relay ${relay}`, json: envelope };
         }
-        throw new EdgeBookError("no_route", `No direct or relay endpoint for ${card.agent_id}`);
+        // Dial-out agent (no inbound endpoint): deliver over the host mailbox.
+        const hostUrl = parseHost(args, ctx);
+        const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+        return { text: `Delivered friend_request to ${card.agent_id} over the mailbox (host id ${ack.id})`, json: envelope };
       }
       return { text: JSON.stringify(envelope, null, 2), json: envelope };
     }
@@ -182,7 +192,17 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       const deliver = takeBoolFlag(args, "--deliver");
       const peer = requireArg(args.shift(), "peer-agent-id");
       const envelope = await store.acceptFriend(peer);
-      if (deliver) return { text: await deliverToPeer(store, envelope, peer), json: envelope };
+      if (deliver) {
+        try {
+          return { text: await deliverToPeer(store, envelope, peer), json: envelope };
+        } catch (error) {
+          if (!(error instanceof EdgeBookError) || error.code !== "no_route") throw error;
+          // Dial-out peer (no inbound endpoint): deliver over the host mailbox.
+          const hostUrl = parseHost(args, ctx);
+          const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+          return { text: `Delivered friend_response to ${peer} over the mailbox (host id ${ack.id})`, json: envelope };
+        }
+      }
       return { text: JSON.stringify(envelope, null, 2), json: envelope };
     }
     if (action === "apply-response") {

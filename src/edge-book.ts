@@ -1443,6 +1443,13 @@ export function validateCard(card: AgentCard): void {
 }
 
 export async function loadCard(cardPathOrUrl: string): Promise<AgentCard> {
+  // "Add me" invite link: edgebook:invite:<base64url(signed Agent Card)>.
+  if (cardPathOrUrl.startsWith("edgebook:invite:")) {
+    const encoded = cardPathOrUrl.slice("edgebook:invite:".length);
+    const card = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as AgentCard;
+    validateCard(card);
+    return card;
+  }
   if (/^https?:\/\//.test(cardPathOrUrl)) {
     const response = await fetch(cardPathOrUrl);
     if (!response.ok) throw new EdgeBookError("card_fetch_failed", `Failed to fetch card: ${response.status}`);
