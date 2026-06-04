@@ -585,6 +585,20 @@ export async function sendPairRegistration(options: DialoutClientOptions & { ttl
   return registration;
 }
 
+// Deliver a single signed envelope over the host mailbox using a transient
+// dial-out connection (connect → mailbox_send → wait ack → disconnect). Used by
+// the CLI `object share/revoke --deliver` and `friend ... --deliver` flows.
+export async function deliverEnvelopeViaMailbox(options: DialoutClientOptions & { envelope: MessageEnvelope }): Promise<{ id: string }> {
+  const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
+  await client.start();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  try {
+    return await client.sendEnvelope(options.envelope);
+  } finally {
+    await client.stop();
+  }
+}
+
 export async function sendSessionsRevoke(options: DialoutClientOptions): Promise<SessionsRevokeFrame> {
   const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
   await client.start();
