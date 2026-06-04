@@ -20,9 +20,14 @@ import { EdgeBookDialoutClient } from "../src/dialout.ts";
 import { EdgeBookStore } from "../src/edge-book.ts";
 
 const HOST_DIR = process.env.EDGE_BOOK_HOST_DIR || path.join(os.homedir(), "claude", "edge-book-host");
+// Remote mode: point at an already-running host (e.g. the deployed fly app)
+// instead of spawning one. Set EDGE_BOOK_REMOTE_BASE=https://edge-book-host.fly.dev.
+const REMOTE_BASE = process.env.EDGE_BOOK_REMOTE_BASE;
 const PORT = 20000 + crypto.randomInt(20000);
-const BASE = `http://127.0.0.1:${PORT}`;
-const WS = `ws://127.0.0.1:${PORT}/agent/ws`;
+const BASE = REMOTE_BASE || `http://127.0.0.1:${PORT}`;
+const WS = REMOTE_BASE
+  ? `${REMOTE_BASE.replace(/^http/, "ws")}/agent/ws`
+  : `ws://127.0.0.1:${PORT}/agent/ws`;
 
 function log(msg: string): void { console.log(`[e2e] ${msg}`); }
 async function sleep(ms: number): Promise<void> { await new Promise((r) => setTimeout(r, ms)); }
@@ -104,8 +109,13 @@ async function main(): Promise<void> {
   let host: ChildProcess | undefined;
   const clients: EdgeBookDialoutClient[] = [];
   try {
-    log(`starting host on :${PORT}`);
-    host = await startHost(hostData);
+    if (REMOTE_BASE) {
+      log(`using REMOTE host ${REMOTE_BASE} (no local host spawned)`);
+      await waitFor(async () => { try { return (await fetch(`${BASE}/healthz`)).ok; } catch { return false; } }, "remote host healthz");
+    } else {
+      log(`starting host on :${PORT}`);
+      host = await startHost(hostData);
+    }
 
     // Three real agents.
     const alice = new EdgeBookStore({ home: path.join(root, "alice") });
