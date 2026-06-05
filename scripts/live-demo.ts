@@ -57,11 +57,15 @@ async function main(): Promise<void> {
   console.log(` Object:    "${object.request.title}"`);
   console.log("========================================================\n");
 
+  const statusFile = path.join(os.tmpdir(), "edge-book-demo-status.txt");
   // Keep Bob connected and mint a fresh pairing code periodically.
   for (;;) {
     try {
       const reg = await bobClient.pair(5 * 60 * 1000);
       console.log(`[demo] PAIRING CODE: ${reg.code}   (valid 5 min — enter at ${BASE}/pair)`);
+      // Also write to a file (flushes immediately; stdout block-buffers when
+      // backgrounded to a file). Read this to get the current code.
+      await fs.writeFile(statusFile, `reader: ${BASE}/pair\nbob: ${bobId}\nobject: ${object.request.title}\ncode: ${reg.code}\nminted: ${ack.id}\n`);
     } catch (e) {
       log(`pair mint failed: ${e instanceof Error ? e.message : String(e)}`);
     }
