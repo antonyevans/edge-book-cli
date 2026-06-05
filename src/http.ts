@@ -177,8 +177,10 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
   }
 
   // "Add me": the owner's signed Agent Card as a shareable, importable invite.
+  // Use buildCard (read-only) — a GET must not write the card file on every poll
+  // (that write raced concurrent reads and caused intermittent 500s).
   if (req.method === "GET" && url.pathname === "/api/invite") {
-    const card = await store.writeCard();
+    const card = await store.buildCard();
     const identity = await store.identity();
     const invite_url = `edgebook:invite:${Buffer.from(JSON.stringify(card), "utf8").toString("base64url")}`;
     sendJson(res, 200, { agent_id: identity.agent_id, display_name: identity.display_name, card_url: card.card_url, card, invite_url });
