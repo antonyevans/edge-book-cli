@@ -66,6 +66,25 @@ export interface SessionsRevokeAck {
   channel_id?: string;
 }
 
+// Per-device session management (ea-claude-057).
+export interface DeviceInfo {
+  device_id: string;
+  label: string;
+  created_at: number;
+  last_seen_at: number;
+}
+export interface SessionsListAck {
+  type: "sessions_list_ok";
+  request_id?: string;
+  devices?: DeviceInfo[];
+}
+export interface SessionRevokeOneAck {
+  type: "session_revoke_one_ok";
+  request_id?: string;
+  device_id?: string;
+  revoked?: boolean;
+}
+
 export interface DialoutSocket {
   readyState?: number;
   send(data: string): void;
@@ -267,6 +286,12 @@ export class EdgeBookDialoutClient {
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }>();
+  // Generic request_id-keyed RPC waiters for sessions_list / session_revoke_one.
+  private pendingRpc = new Map<string, {
+    resolve: (frame: Record<string, unknown>) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
   private pendingMailboxSends = new Map<string, {
     resolve: (ack: { id: string }) => void;
     reject: (error: Error) => void;
@@ -314,6 +339,33 @@ export class EdgeBookDialoutClient {
     const frame = await createSessionsRevokeFrame(this.store);
     this.send(frame);
     return frame;
+  }
+
+  // List this agent's remembered devices on the host (ea-claude-057).
+  async listSessionsAndWait(timeoutMs = 5_000): Promise<DeviceInfo[]> {
+    const frame = await this.rpc("sessions_list", {}, "sessions_list_ok", timeoutMs);
+    return (frame as unknown as SessionsListAck).devices || [];
+  }
+
+  // Revoke ONE device by its public device_id (ea-claude-057).
+  async revokeOneSessionAndWait(device_id: string, timeoutMs = 5_000): Promise<boolean> {
+    const frame = await this.rpc("session_revoke_one", { device_id }, "session_revoke_one_ok", timeoutMs);
+    return Boolean((frame as unknown as SessionRevokeOneAck).revoked);
+  }
+
+  // Small request/response helper over the dial-out socket, correlated by
+  // request_id. `expect` documents the ack type; resolution is by request_id.
+  private async rpc(type: string, extra: Record<string, unknown>, expect: string, timeoutMs: number): Promise<Record<string, unknown>> {
+    const request_id = crypto.randomUUID();
+    const promise = new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingRpc.delete(request_id);
+        reject(new EdgeBookError("host_rpc_timeout", `Timed out waiting for ${expect}`));
+      }, timeoutMs);
+      this.pendingRpc.set(request_id, { resolve, reject, timer });
+    });
+    this.send({ type, request_id, ...extra });
+    return promise;
   }
 
   async revokeSessionsAndWait(timeoutMs = 5_000): Promise<{ frame: SessionsRevokeFrame; ack: SessionsRevokeAck }> {
@@ -476,6 +528,16 @@ export class EdgeBookDialoutClient {
       this.send({ type: "pong" });
       return;
     }
+    if ((frame as { type?: string }).type === "sessions_list_ok" || (frame as { type?: string }).type === "session_revoke_one_ok") {
+      const ack = frame as unknown as { request_id?: string };
+      const pending = this.pendingRpc.get(ack.request_id || "");
+      if (pending) {
+        clearTimeout(pending.timer);
+        this.pendingRpc.delete(ack.request_id || "");
+        pending.resolve(frame as unknown as Record<string, unknown>);
+      }
+      return;
+    }
     if ((frame as { type?: string }).type === "stand_down" || (frame as { type?: string }).type === "dialout_idle") {
       await this.standDown(frame as { type?: string; reason?: string; idle_ms?: number });
       return;
@@ -606,4 +668,20 @@ export async function sendSessionsRevoke(options: DialoutClientOptions): Promise
   const { frame, ack } = await client.revokeSessionsAndWait();
   await client.stop();
   return { ...frame, channel_id: ack.channel_id } as SessionsRevokeFrame & { channel_id?: string };
+}
+
+// List remembered devices via a transient dial-out connection (ea-claude-057).
+export async function listSessions(options: DialoutClientOptions): Promise<DeviceInfo[]> {
+  const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
+  await client.start();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  try { return await client.listSessionsAndWait(); } finally { await client.stop(); }
+}
+
+// Revoke ONE device by id via a transient dial-out connection (ea-claude-057).
+export async function revokeOneSession(options: DialoutClientOptions & { deviceId: string }): Promise<boolean> {
+  const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
+  await client.start();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  try { return await client.revokeOneSessionAndWait(options.deviceId); } finally { await client.stop(); }
 }

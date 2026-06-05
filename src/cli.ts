@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
+import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
 import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
@@ -31,7 +31,8 @@ Usage:
 Hosted reader:
   edge-book dialout [--host <ws-url>] [--home <dir>]
   edge-book pair [--host <ws-url>] [--ttl-ms <ms>] [--home <dir>]
-  edge-book sessions revoke [--host <ws-url>] [--home <dir>]
+  edge-book sessions list [--host <ws-url>] [--home <dir>]
+  edge-book sessions revoke [--device <id>] [--host <ws-url>] [--home <dir>]
 
 Local agent:
   edge-book doctor [--home <dir>]
@@ -358,8 +359,21 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
 
   if (command === "sessions") {
     const action = args.shift();
+    if (action === "list") {
+      const hostUrl = parseHost(args, ctx);
+      const devices = await listSessions({ home, host: hostUrl, socketFactory: ctx.socketFactory });
+      const lines = devices.length
+        ? devices.map((d) => `${d.device_id}  ${d.label}  (added ${new Date(d.created_at).toISOString()}, last seen ${new Date(d.last_seen_at).toISOString()})`).join("\n")
+        : "No remembered devices.";
+      return { text: lines, json: { devices } };
+    }
     if (action === "revoke") {
       const hostUrl = parseHost(args, ctx);
+      const deviceId = takeFlag(args, "--device");
+      if (deviceId) {
+        const revoked = await revokeOneSession({ home, host: hostUrl, socketFactory: ctx.socketFactory, deviceId });
+        return { text: revoked ? `Revoked device ${deviceId}` : `No device ${deviceId} found on your channel`, json: { device_id: deviceId, revoked } };
+      }
       const frame = await sendSessionsRevoke({ home, host: hostUrl, socketFactory: ctx.socketFactory });
       const channel = (frame as SessionsRevokeFrame & { channel_id?: string }).channel_id || "unknown-channel";
       return { text: `Received sessions_revoke_ok for request ${frame.request_id} on ${channel}`, json: frame };
