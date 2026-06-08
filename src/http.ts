@@ -168,6 +168,24 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
     return true;
   }
 
+  // spec-0021 post-taxonomy read-only endpoints
+  if (req.method === "GET" && url.pathname === "/api/signals") {
+    sendJson(res, 200, { signals: await store.signals() });
+    return true;
+  }
+  if (req.method === "GET" && url.pathname === "/api/attestations") {
+    sendJson(res, 200, { attestations: await store.attestations() });
+    return true;
+  }
+  if (req.method === "GET" && url.pathname === "/api/endorsements") {
+    sendJson(res, 200, { endorsements: await store.endorsements() });
+    return true;
+  }
+  if (req.method === "GET" && url.pathname === "/api/capabilities") {
+    sendJson(res, 200, { capabilities: await store.capabilities() });
+    return true;
+  }
+
   // Edge Book MVP reader surfaces (ea-claude-066/067).
   // "Shared with me": objects the owner may currently read (grant-gated). Each
   // carries its binding grant scope so the reader can show provenance.
