@@ -66,6 +66,8 @@ export interface AgentContactRecord {
   display_name: string;
   // The peer's human owner name, if their card shared it (opt-in on their side).
   owner_label?: string;
+  // The peer's advertised capabilities (from their card; absent if none / older card).
+  advertised_capabilities?: Array<{ name: string; version: string; summary: string; status: "active" | "deprecated" }>;
   card_url: string;
   known_endpoints: Array<{ mode: TransportMode; endpoint: string }>;
   public_keys: Array<{ id: string; type: "ed25519"; public_key_pem: string }>;
@@ -709,6 +711,7 @@ export class EdgeBookStore {
       // Carry the peer's shared human name (undefined if they didn't opt in, or
       // dropped on refresh if they turned sharing off).
       owner_label: card.owner_label,
+      advertised_capabilities: card.advertised_capabilities,
       card_url: card.card_url,
       known_endpoints: card.transports,
       public_keys: card.public_keys,
