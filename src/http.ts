@@ -189,6 +189,10 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
     sendJson(res, 200, { ephemeral: await store.ephemeralPosts() });
     return true;
   }
+  if (req.method === "GET" && url.pathname === "/api/received") {
+    sendJson(res, 200, await store.receivedByCategory());
+    return true;
+  }
   if (req.method === "GET" && url.pathname === "/api/answers") {
     sendJson(res, 200, { answers: await store.answers() });
     return true;

@@ -219,6 +219,9 @@ export interface Answer {
   signature: string;
 }
 
+// Received posts (from friends) — stored separately; never mutated by lifecycle/deregister.
+export type ReceivedPost = Signal | EphemeralPost | Answer | Endorsement;
+
 export interface CapabilityAdvertisement {
   capability_id: string;
   post_type: "capability_advertisement";
@@ -240,7 +243,7 @@ export interface ObjectRevokeBody {
 
 export interface MessageEnvelope {
   message_id: string;
-  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error" | "object_share" | "object_revoke";
+  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error" | "object_share" | "object_revoke" | "post_publish";
   from_agent_id: string;
   to_agent_id: string;
   relationship_id: string;
@@ -373,6 +376,7 @@ const SIGNALS_FILE = "signals.json";
 const CAPABILITIES_FILE = "capabilities.json";
 const EPHEMERAL_FILE = "ephemeral-posts.json";
 const ANSWERS_FILE = "answers.json";
+const RECEIVED_POSTS_FILE = "received-posts.json";
 
 const DEFAULT_SIGNAL_TTL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_EPHEMERAL_TTL_MS = 24 * 60 * 60 * 1000;
@@ -1093,6 +1097,19 @@ export class EdgeBookStore {
     return verifyPayload(signedPayload, signature, pub);
   }
 
+  // Verify an Endorsement signature. Endorsements have no lifecycle field.
+  async verifyEndorsement(e: Endorsement): Promise<boolean> {
+    const identity = await this.identity();
+    let pub = identity.agent_id === e.endorser_agent_id ? identity.public_key_pem : undefined;
+    if (!pub) {
+      const c = (await this.contacts())[e.endorser_agent_id];
+      pub = c?.public_keys?.[0]?.public_key_pem;
+    }
+    if (!pub) return false;
+    const { signature, ...rest } = e;
+    return verifyPayload(rest, signature, pub);
+  }
+
   // Class 3: Endorse — actor-owned reified edge, strongRef parent, evidence link (R5, R8)
   async endorsements(): Promise<Record<string, Endorsement>> {
     return readJson<Record<string, Endorsement>>(this.file(ENDORSEMENTS_FILE), {});
@@ -1566,6 +1583,123 @@ export class EdgeBookStore {
     }
   }
 
+  // ─── Received posts (peer posts delivered via mailbox) ──────────────────────
+
+  async receivedPosts(): Promise<Record<string, ReceivedPost>> {
+    return readJson<Record<string, ReceivedPost>>(this.file(RECEIVED_POSTS_FILE), {});
+  }
+
+  async saveReceivedPosts(posts: Record<string, ReceivedPost>): Promise<void> {
+    await writeJson(this.file(RECEIVED_POSTS_FILE), posts);
+  }
+
+  /** Grouped view for `/api/received` and the reader. */
+  async receivedByCategory(): Promise<{ signals: Record<string, Signal>; ephemeral: Record<string, EphemeralPost>; answers: Record<string, Answer>; endorsements: Record<string, Endorsement> }> {
+    const all = await this.receivedPosts();
+    const out: { signals: Record<string, Signal>; ephemeral: Record<string, EphemeralPost>; answers: Record<string, Answer>; endorsements: Record<string, Endorsement> } = {
+      signals: {},
+      ephemeral: {},
+      answers: {},
+      endorsements: {},
+    };
+    for (const id of Object.keys(all)) {
+      const p: any = all[id];
+      if (p.post_type === "signal") out.signals[id] = p;
+      else if (p.post_type === "answer") out.answers[id] = p;
+      else if (p.post_type === "endorse") out.endorsements[id] = p;
+      else out.ephemeral[id] = p; // query / share / coordinate / delegation_request
+    }
+    return out;
+  }
+
+  private async verifyReceivedPost(p: any): Promise<boolean> {
+    switch (p.post_type) {
+      case "signal": return this.verifySignal(p);
+      case "answer": return this.verifyAnswer(p);
+      case "endorse": return this.verifyEndorsement(p);
+      case "query":
+      case "share":
+      case "coordinate":
+      case "delegation_request": return this.verifyEphemeral(p);
+      default: return false;
+    }
+  }
+
+  private receivedPostId(p: any): string {
+    return p.signal_id || p.post_id || p.answer_id || p.endorse_id || "";
+  }
+
+  private receivedPostAuthor(p: any): string {
+    switch (p.post_type) {
+      case "answer": return p.answerer_agent_id ?? "";
+      case "endorse": return p.endorser_agent_id ?? "";
+      case "signal":
+      case "query":
+      case "share":
+      case "coordinate":
+      case "delegation_request": return p.from_agent ?? "";
+      default: return "";
+    }
+  }
+
+  /**
+   * Receive a `post_publish` envelope from a friend.
+   * Security order:
+   *   1. verifyEnvelope (recipient/expiry/replay/sender-key + envelope sig)
+   *   2. type guard: must be "post_publish"
+   *   3. sender must be a known contact with relationship_state === "friend"
+   *   4. inner post author must match envelope.from_agent_id
+   *   5. inner post signature must verify
+   * Only then store.
+   */
+  async receivePostPublish(envelope: MessageEnvelope): Promise<ReceivedPost> {
+    await this.verifyEnvelope(envelope);
+    if (envelope.type !== "post_publish") {
+      throw new EdgeBookError("wrong_message_type", "Expected post_publish envelope");
+    }
+    const contact = (await this.contacts())[envelope.from_agent_id];
+    if (!contact || contact.relationship_state !== "friend") {
+      throw new EdgeBookError("not_friend", "post_publish only accepted from friends");
+    }
+    const post = (envelope.body as any).post;
+    if (!post || !post.post_type) {
+      throw new EdgeBookError("malformed_post_publish", "missing or malformed post in envelope body");
+    }
+    if (this.receivedPostAuthor(post) !== envelope.from_agent_id) {
+      throw new EdgeBookError("author_mismatch", "post author does not match envelope sender");
+    }
+    const id = this.receivedPostId(post);
+    if (!id) {
+      throw new EdgeBookError("malformed_post_publish", "post missing id");
+    }
+    if (!(await this.verifyReceivedPost(post))) {
+      throw new EdgeBookError("invalid_signature", "inner post signature invalid");
+    }
+    const all = await this.receivedPosts();
+    const key = envelope.from_agent_id + ":" + id;
+    all[key] = post;
+    await this.saveReceivedPosts(all);
+    await this.audit("post.receive", envelope.from_agent_id, {
+      post_type: post.post_type,
+      id,
+    });
+    return post;
+  }
+
+  /** Build a signed `post_publish` envelope wrapping any post type. */
+  async signPostPublishEnvelope(input: { to_agent_id: string; post: ReceivedPost }): Promise<MessageEnvelope> {
+    const identity = await this.identity();
+    return this.signEnvelope({
+      type: "post_publish",
+      to_agent_id: input.to_agent_id,
+      relationship_id: relationshipId(identity.agent_id, input.to_agent_id),
+      capability_id: "",
+      ref: "",
+      transport: "direct",
+      body: { post: input.post } as unknown as Record<string, unknown>,
+    });
+  }
+
   async signEnvelope(input: Omit<MessageEnvelope, "message_id" | "from_agent_id" | "created_at" | "expires_at" | "signature">): Promise<MessageEnvelope> {
     const identity = await this.identity();
     const unsigned: Omit<MessageEnvelope, "signature"> = {
@@ -1612,6 +1746,7 @@ export class EdgeBookStore {
     if (envelope.type === "privileged_message") return this.receivePrivilegedMessage(envelope);
     if (envelope.type === "object_share") { await this.receiveObjectShare(envelope); return; }
     if (envelope.type === "object_revoke") { await this.receiveObjectRevoke(envelope); return; }
+    if (envelope.type === "post_publish") { await this.receivePostPublish(envelope); return; }
     throw new EdgeBookError("unsupported_envelope", `Unsupported envelope type: ${envelope.type}`);
   }
 

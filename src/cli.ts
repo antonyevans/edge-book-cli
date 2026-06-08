@@ -130,6 +130,24 @@ async function deliverToPeer(store: EdgeBookStore, envelope: Awaited<ReturnType<
   throw new EdgeBookError("no_route", `No direct or relay endpoint for ${peerAgentId}`);
 }
 
+/** Broadcast a signed post to all friends via the mailbox. Returns the number of deliveries attempted. */
+async function broadcastPost(
+  store: EdgeBookStore,
+  host: string,
+  socketFactory: CliContext["socketFactory"],
+  post: Parameters<EdgeBookStore["signPostPublishEnvelope"]>[0]["post"],
+): Promise<number> {
+  const contacts = await store.contacts();
+  const friends = Object.values(contacts).filter((c) => c.relationship_state === "friend");
+  let count = 0;
+  for (const f of friends) {
+    const envelope = await store.signPostPublishEnvelope({ to_agent_id: f.peer_agent_id, post });
+    await deliverEnvelopeViaMailbox({ home: store.home, host, socketFactory, envelope });
+    count++;
+  }
+  return count;
+}
+
 function serverAddress(server: { address(): string | net.AddressInfo | null }): string {
   const address = server.address();
   if (!address || typeof address === "string") return String(address);
@@ -463,23 +481,35 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   }
 
   if (command === "endorse") {
+    const deliver = takeBoolFlag(args, "--deliver");
+    const hostUrl = parseHost(args, ctx);
     const subject = requireArg(args.shift(), "<subject-agent-id>");
     const evAtt = takeFlag(args, "--evidence-attestation");
     const evTask = takeFlag(args, "--evidence-task");
-    const id = await store.createEndorsement({
+    const post = await store.createEndorsement({
       subject_agent_id: subject,
       parent: { uri: requireArg(takeFlag(args, "--parent-uri"), "--parent-uri"), hash: requireArg(takeFlag(args, "--parent-hash"), "--parent-hash") },
       ...(evAtt ? { evidence_ref: { uri: `edgebook:attestation:${evAtt}`, hash: evAtt } } : {}),
       ...(evTask ? { evidence_task_id: evTask } : {}),
       statement: requireArg(takeFlag(args, "--statement"), "--statement"),
     });
-    return { text: `Endorsement ${id.endorse_id}`, json: id };
+    if (deliver) {
+      const n = await broadcastPost(store, hostUrl, ctx.socketFactory, post);
+      return { text: `Endorsement ${post.endorse_id} — delivered to ${n} friend(s)`, json: { post, delivered: n } };
+    }
+    return { text: `Endorsement ${post.endorse_id}`, json: post };
   }
 
   if (command === "signal") {
+    const deliver = takeBoolFlag(args, "--deliver");
+    const hostUrl = parseHost(args, ctx);
     const ttl = takeFlag(args, "--ttl-ms");
-    const id = await store.createSignal({ body: requireArg(takeFlag(args, "--body"), "--body"), ttlMs: ttl ? Number(ttl) : undefined });
-    return { text: `Signal ${id.signal_id}`, json: id };
+    const post = await store.createSignal({ body: requireArg(takeFlag(args, "--body"), "--body"), ttlMs: ttl ? Number(ttl) : undefined });
+    if (deliver) {
+      const n = await broadcastPost(store, hostUrl, ctx.socketFactory, post);
+      return { text: `Signal ${post.signal_id} — delivered to ${n} friend(s)`, json: { post, delivered: n } };
+    }
+    return { text: `Signal ${post.signal_id}`, json: post };
   }
 
   if (command === "capability") {
@@ -506,16 +536,24 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   // ─── spec-0021 remaining post-taxonomy CLI commands ─────────────────────
 
   if (command === "query" || command === "share" || command === "coordinate" || command === "delegate") {
+    const deliver = takeBoolFlag(args, "--deliver");
+    const hostUrl = parseHost(args, ctx);
     const type = command === "delegate" ? "delegation_request" : command;
     const body = requireArg(takeFlag(args, "--body"), "--body");
     const to = takeFlag(args, "--to") || takeFlag(args, "--with");
     const ref = takeFlag(args, "--ref");
     const ttl = takeFlag(args, "--ttl-ms");
     const post = await store.createEphemeral(type as any, { body, subject_agent_id: to, ref, ttlMs: ttl ? Number(ttl) : undefined });
+    if (deliver) {
+      const n = await broadcastPost(store, hostUrl, ctx.socketFactory, post);
+      return { text: `${post.post_type} ${post.post_id} — delivered to ${n} friend(s)`, json: { post, delivered: n } };
+    }
     return { text: `${post.post_type} ${post.post_id}`, json: post };
   }
 
   if (command === "answer") {
+    const deliver = takeBoolFlag(args, "--deliver");
+    const hostUrl = parseHost(args, ctx);
     const queryId = requireArg(args.shift(), "<query-id>");
     const ephemeral = await store.ephemeralPosts();
     const query = ephemeral[queryId];
@@ -527,6 +565,10 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       parent: { uri: "edgebook:query:" + queryId, hash: contentHash(queryUnsigned) },
       body: requireArg(takeFlag(args, "--body"), "--body"),
     });
+    if (deliver) {
+      const n = await broadcastPost(store, hostUrl, ctx.socketFactory, ans);
+      return { text: `answer ${ans.answer_id} — delivered to ${n} friend(s)`, json: { post: ans, delivered: n } };
+    }
     return { text: `answer ${ans.answer_id}`, json: ans };
   }
 
