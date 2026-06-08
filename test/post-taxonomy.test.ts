@@ -1,16 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { contentHash, POST_TAXONOMY, classOf, EdgeBookStore } from "../src/edge-book.ts";
+import { contentHash, POST_TAXONOMY, classOf, EdgeBookStore, type PostType } from "../src/edge-book.ts";
 import { handleCli } from "../src/cli.ts";
 import { startEdgeBookServer } from "../src/http.ts";
 
 // Helper: reads a JSON file directly from store home (bypasses in-memory lifecycle recompute).
 async function readJsonDirect(store: EdgeBookStore, name: string) {
-  return JSON.parse(await readFile(path.join(store.home, name), "utf8"));
+  return JSON.parse(await fs.readFile(path.join(store.home, name), "utf8"));
 }
 
 async function tmpStore() {
@@ -151,6 +150,19 @@ test("deregister deprecates capabilities + expires signals but RETAINS endorseme
   assert.ok(ends[end.endorse_id]);                             // R7 retain Class 3
 });
 
+// ─── Task 8b: deregister re-signs deprecated capabilities (regression) ─────
+
+test("deregister re-signs deprecated capabilities so verifyCapability remains true (regression)", async () => {
+  const s = await tmpStore();
+  const cap = await s.advertiseCapability({ name: "signing_test", version: "1.0.0", summary: "checks re-sign on deregister" });
+  assert.equal(await s.verifyCapability(cap), true, "newly advertised capability should verify");
+  await s.deregister();
+  const all = await s.capabilities();
+  const deprecated = all[cap.capability_id];
+  assert.equal(deprecated.status, "deprecated");
+  assert.equal(await s.verifyCapability(deprecated), true, "deprecated capability must still verify after deregister");
+});
+
 // ─── Task 9: Conformance test ───────────────────────────────────────────────
 
 test("every shipped record's post_type is in the taxonomy and matches its class (R1/R2)", async () => {
@@ -166,11 +178,14 @@ test("every shipped record's post_type is in the taxonomy and matches its class 
     ...Object.values(await s.attestations()),
     ...Object.values(await s.endorsements()),
   ];
-  const classByFile = { capability_advertisement: 1, signal: 2, result_attestation: 4, endorse: 3 };
   for (const r of records as any[]) {
-    assert.ok(r.post_type in classByFile, `unknown type ${r.post_type}`);    // R1
-    assert.equal(classOf(r.post_type), (classByFile as any)[r.post_type]);   // R2
+    assert.ok(r.post_type in POST_TAXONOMY, `unknown type ${r.post_type}`);    // R1
+    assert.equal(classOf(r.post_type as PostType), POST_TAXONOMY[r.post_type as PostType]);   // R2
   }
+});
+
+test("classOf throws on unknown post type", () => {
+  assert.throws(() => classOf("not_a_type" as any), /taxonomy|unknown/i);
 });
 
 // ─── Task 10: CLI commands ──────────────────────────────────────────────────

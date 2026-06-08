@@ -163,7 +163,6 @@ export interface Endorsement {
   evidence_task_id?: string;        // R8: or a task id + outcome
   statement: string;
   created_at: string;
-  updated_at: string;
   signature: string;
 }
 
@@ -331,6 +330,8 @@ const ATTESTATIONS_FILE = "attestations.json";
 const ENDORSEMENTS_FILE = "endorsements.json";
 const SIGNALS_FILE = "signals.json";
 const CAPABILITIES_FILE = "capabilities.json";
+
+const DEFAULT_SIGNAL_TTL_MS = 6 * 60 * 60 * 1000;
 
 export function resolveHome(home?: string): string {
   if (home?.trim()) return path.resolve(home.trim());
@@ -914,6 +915,22 @@ export class EdgeBookStore {
     return readJson<Record<string, ResultAttestation>>(this.file(ATTESTATIONS_FILE), {});
   }
 
+  async saveAttestations(attestations: Record<string, ResultAttestation>): Promise<void> {
+    await writeJson(this.file(ATTESTATIONS_FILE), attestations);
+  }
+
+  async saveEndorsements(endorsements: Record<string, Endorsement>): Promise<void> {
+    await writeJson(this.file(ENDORSEMENTS_FILE), endorsements);
+  }
+
+  async saveSignals(signals: Record<string, Signal>): Promise<void> {
+    await writeJson(this.file(SIGNALS_FILE), signals);
+  }
+
+  async saveCapabilities(capabilities: Record<string, CapabilityAdvertisement>): Promise<void> {
+    await writeJson(this.file(CAPABILITIES_FILE), capabilities);
+  }
+
   async createAttestation(input: {
     subject_agent_id: string; task_ref: string;
     outcome: ResultAttestation["outcome"]; summary: string;
@@ -939,7 +956,7 @@ export class EdgeBookStore {
     const all = await this.attestations();
     if (!all[attestation_id]) {           // write-once: never rewrite in place (R6)
       all[attestation_id] = attestation;
-      await writeJson(this.file(ATTESTATIONS_FILE), all);
+      await this.saveAttestations(all);
       await this.audit("attestation.create", input.subject_agent_id, { attestation_id, task_ref: input.task_ref });
     }
     return all[attestation_id];
@@ -953,10 +970,22 @@ export class EdgeBookStore {
       pub = c?.public_keys?.[0]?.public_key_pem;
     }
     if (!pub) return false;
-    const { signature, ...rest } = att;
+    const { signature, ...signedPayload } = att;
     // integrity: id must equal hash of content (content excludes id+signature)
-    const { attestation_id, ...content } = rest;
+    const { attestation_id, ...content } = signedPayload;
     if (contentHash(content) !== attestation_id) return false;
+    return verifyPayload(signedPayload, signature, pub);
+  }
+
+  async verifyCapability(cap: CapabilityAdvertisement): Promise<boolean> {
+    const identity = await this.identity();
+    let pub = identity.agent_id === cap.agent_id ? identity.public_key_pem : undefined;
+    if (!pub) {
+      const c = (await this.contacts())[cap.agent_id];
+      pub = c?.public_keys?.[0]?.public_key_pem;
+    }
+    if (!pub) return false;
+    const { signature, ...rest } = cap;
     return verifyPayload(rest, signature, pub);
   }
 
@@ -989,12 +1018,12 @@ export class EdgeBookStore {
       ...(input.evidence_task_id ? { evidence_task_id: input.evidence_task_id } : {}),
       statement: input.statement,
       created_at: stamp,
-      updated_at: stamp,
     };
     const endorsement: Endorsement = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
     const all = await this.endorsements();
     all[endorse_id] = endorsement;
-    await writeJson(this.file(ENDORSEMENTS_FILE), all);
+    // evidence_ref/evidence_task_id is an open-world link — no referential-integrity check that the attestation exists locally.
+    await this.saveEndorsements(all);
     await this.audit("endorse.create", input.subject_agent_id, { endorse_id, parent: input.parent.uri });
     return endorsement;
   }
@@ -1015,16 +1044,16 @@ export class EdgeBookStore {
     const identity = await this.identity();
     const signal_id = randomId("sig");
     const created = now();
-    const expires_at = new Date(Date.now() + (input.ttlMs ?? 6 * 60 * 60 * 1000)).toISOString();
+    const expires_at = new Date(Date.now() + (input.ttlMs ?? DEFAULT_SIGNAL_TTL_MS)).toISOString();
     const unsigned = {
       signal_id, post_type: "signal" as const, schema: "edge-book/signal/0.1" as const,
       from_agent: identity.agent_id, body: input.body,
       lifecycle: "active" as const, created_at: created, expires_at,
     };
     const signal: Signal = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
-    const all = await readJson<Record<string, Signal>>(this.file(SIGNALS_FILE), {});
+    const all = await this.signals();
     all[signal_id] = signal;
-    await writeJson(this.file(SIGNALS_FILE), all);
+    await this.saveSignals(all);
     await this.audit("signal.create", identity.agent_id, { signal_id });
     return signal;
   }
@@ -1037,7 +1066,7 @@ export class EdgeBookStore {
         all[id].lifecycle = "expired"; changed = true;
       }
     }
-    if (changed) await writeJson(this.file(SIGNALS_FILE), all);
+    if (changed) await this.saveSignals(all);
   }
 
   // Class 1: Capability Advertisement — versioned, deprecate-not-delete (R3)
@@ -1058,7 +1087,7 @@ export class EdgeBookStore {
     const cap: CapabilityAdvertisement = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
     const all = await this.capabilities();
     all[capability_id] = cap;
-    await writeJson(this.file(CAPABILITIES_FILE), all);
+    await this.saveCapabilities(all);
     await this.audit("capability.advertise", identity.agent_id, { capability_id, name: input.name });
     return cap;
   }
@@ -1072,21 +1101,27 @@ export class EdgeBookStore {
     cap.updated_at = now();
     const { signature: _sig, ...rest } = cap;
     cap.signature = signPayload(rest, identity.private_key_pem);
-    await writeJson(this.file(CAPABILITIES_FILE), all);
+    await this.saveCapabilities(all);
     await this.audit("capability.deprecate", identity.agent_id, { capability_id: capabilityId });
     return cap;
   }
 
   // R7 cascade: deprecate Class 1, terminate open Class 2, RETAIN Class 3 + Class 4.
   async deregister(): Promise<void> {
+    const identity = await this.identity();
     const caps = await this.capabilities();
     for (const id of Object.keys(caps)) {
-      if (caps[id].status === "active") { caps[id].status = "deprecated"; caps[id].updated_at = now(); }
+      if (caps[id].status === "active") {
+        caps[id].status = "deprecated";
+        caps[id].updated_at = now();
+        const { signature: _sig, ...rest } = caps[id];
+        caps[id].signature = signPayload(rest, identity.private_key_pem);
+      }
     }
-    await writeJson(this.file(CAPABILITIES_FILE), caps);
+    await this.saveCapabilities(caps);
     const sigs = await readJson<Record<string, Signal>>(this.file(SIGNALS_FILE), {});
     for (const id of Object.keys(sigs)) sigs[id].lifecycle = "expired";
-    await writeJson(this.file(SIGNALS_FILE), sigs);
+    await this.saveSignals(sigs);
     // Endorsements (Class 3) and Attestations (Class 4) are evidence — left untouched.
     await this.audit("agent.deregister", (await this.identity()).agent_id, {});
   }
