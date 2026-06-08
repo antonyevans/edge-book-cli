@@ -185,6 +185,14 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
     sendJson(res, 200, { capabilities: await store.capabilities() });
     return true;
   }
+  if (req.method === "GET" && url.pathname === "/api/ephemeral") {
+    sendJson(res, 200, { ephemeral: await store.ephemeralPosts() });
+    return true;
+  }
+  if (req.method === "GET" && url.pathname === "/api/answers") {
+    sendJson(res, 200, { answers: await store.answers() });
+    return true;
+  }
 
   // Edge Book MVP reader surfaces (ea-claude-066/067).
   // "Shared with me": objects the owner may currently read (grant-gated). Each

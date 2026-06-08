@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
-import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
+import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
 
 export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
@@ -69,7 +69,15 @@ Post taxonomy (spec-0021):
   edge-book signal --body <s> [--ttl-ms <ms>]
   edge-book capability advertise --name <n> --version <v> --summary <s>
   edge-book capability deprecate <capability-id>
-  edge-book capability list`;
+  edge-book capability list
+  edge-book query --body <s> [--ttl-ms <ms>]
+  edge-book share --body <s> [--ref <r>] [--ttl-ms <ms>]
+  edge-book coordinate --body <s> [--with <agent>] [--ttl-ms <ms>]
+  edge-book delegate --to <agent> --body <s> [--ttl-ms <ms>]
+  edge-book answer <query-id> --body <s>
+  edge-book query-delete <query-id>
+  edge-book ephemeral            # list Class-2 ephemeral posts
+  edge-book answers              # list answers`;
 }
 
 function takeFlag(args: string[], name: string): string | undefined {
@@ -493,6 +501,49 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       return { text: JSON.stringify(all, null, 2), json: all };
     }
     throw new EdgeBookError("unknown_action", `Unknown capability action: ${action}`);
+  }
+
+  // ─── spec-0021 remaining post-taxonomy CLI commands ─────────────────────
+
+  if (command === "query" || command === "share" || command === "coordinate" || command === "delegate") {
+    const type = command === "delegate" ? "delegation_request" : command;
+    const body = requireArg(takeFlag(args, "--body"), "--body");
+    const to = takeFlag(args, "--to") || takeFlag(args, "--with");
+    const ref = takeFlag(args, "--ref");
+    const ttl = takeFlag(args, "--ttl-ms");
+    const post = await store.createEphemeral(type as any, { body, subject_agent_id: to, ref, ttlMs: ttl ? Number(ttl) : undefined });
+    return { text: `${post.post_type} ${post.post_id}`, json: post };
+  }
+
+  if (command === "answer") {
+    const queryId = requireArg(args.shift(), "<query-id>");
+    const ephemeral = await store.ephemeralPosts();
+    const query = ephemeral[queryId];
+    if (!query) throw new EdgeBookError("not_found", `No local query ${queryId} to answer`);
+    // Compute the parent hash over the query's immutable signed content (strip
+    // signature and lifecycle, which are not part of the signed payload).
+    const { signature: _sig, lifecycle: _lc, ...queryUnsigned } = query;
+    const ans = await store.createAnswer({
+      parent: { uri: "edgebook:query:" + queryId, hash: contentHash(queryUnsigned) },
+      body: requireArg(takeFlag(args, "--body"), "--body"),
+    });
+    return { text: `answer ${ans.answer_id}`, json: ans };
+  }
+
+  if (command === "query-delete") {
+    const queryId = requireArg(args.shift(), "<query-id>");
+    await store.deleteQuery(queryId);
+    return { text: `Tombstoned query ${queryId} and its answers`, json: { query_id: queryId } };
+  }
+
+  if (command === "ephemeral") {
+    const all = await store.ephemeralPosts();
+    return { text: JSON.stringify(all, null, 2), json: all };
+  }
+
+  if (command === "answers") {
+    const all = await store.answers();
+    return { text: JSON.stringify(all, null, 2), json: all };
   }
 
   throw new EdgeBookError("unknown_command", usage());
