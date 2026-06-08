@@ -1093,6 +1093,19 @@ export class EdgeBookStore {
     return verifyPayload(signedPayload, signature, pub);
   }
 
+  // Verify an Endorsement signature. Endorsements have no lifecycle field.
+  async verifyEndorsement(e: Endorsement): Promise<boolean> {
+    const identity = await this.identity();
+    let pub = identity.agent_id === e.endorser_agent_id ? identity.public_key_pem : undefined;
+    if (!pub) {
+      const c = (await this.contacts())[e.endorser_agent_id];
+      pub = c?.public_keys?.[0]?.public_key_pem;
+    }
+    if (!pub) return false;
+    const { signature, ...rest } = e;
+    return verifyPayload(rest, signature, pub);
+  }
+
   // Class 3: Endorse — actor-owned reified edge, strongRef parent, evidence link (R5, R8)
   async endorsements(): Promise<Record<string, Endorsement>> {
     return readJson<Record<string, Endorsement>>(this.file(ENDORSEMENTS_FILE), {});
