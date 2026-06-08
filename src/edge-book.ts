@@ -134,6 +134,64 @@ export interface ObjectShareBody {
   attachment_b64?: string; // inline attachment bytes for delivery (recipient stores locally)
 }
 
+// ─── spec-0021 post-type interfaces ─────────────────────────────────────────
+
+export interface ResultAttestation {
+  attestation_id: string;           // == contentHash(content); the proof (R6)
+  post_type: "result_attestation";
+  schema: "edge-book/result-attestation/0.1";
+  attestor_agent_id: string;
+  subject_agent_id: string;
+  task_ref: string;
+  outcome: "success" | "failure" | "partial";
+  summary: string;
+  evidence: Record<string, unknown>;
+  created_at: string;               // part of the addressed content; immutable
+  signature: string;                // over { ...content, attestation_id }
+}
+
+export interface StrongRef { uri: string; hash: string; } // AT Protocol-style reified ref
+
+export interface Endorsement {
+  endorse_id: string;
+  post_type: "endorse";
+  schema: "edge-book/endorse/0.1";
+  endorser_agent_id: string;        // actor-owned: always self (R5)
+  subject_agent_id: string;
+  parent: StrongRef;                // strongRef to the endorsed object (R5)
+  evidence_ref?: StrongRef;         // R8: link to a Result Attestation
+  evidence_task_id?: string;        // R8: or a task id + outcome
+  statement: string;
+  created_at: string;
+  signature: string;
+}
+
+export interface Signal {
+  signal_id: string;
+  post_type: "signal";
+  schema: "edge-book/signal/0.1";
+  from_agent: string;
+  body: string;
+  lifecycle: "active" | "stale" | "expired";  // R4
+  created_at: string;
+  expires_at: string;                          // soft TTL -> stale (R4)
+  signature: string;
+}
+
+export interface CapabilityAdvertisement {
+  capability_id: string;
+  post_type: "capability_advertisement";
+  schema: "edge-book/capability/0.1";
+  agent_id: string;
+  name: string;
+  version: string;                   // semantic version (R3)
+  summary: string;
+  status: "active" | "deprecated";   // deprecate, never hard-delete (R3)
+  created_at: string;
+  updated_at: string;
+  signature: string;
+}
+
 export interface ObjectRevokeBody {
   object_id: string;
   grant_id: string;
@@ -267,6 +325,14 @@ const FEED_FILE = "feed-items.json";
 const APPROVALS_FILE = "approvals.json";
 const CONTACT_MUTES_FILE = "contact-mutes.json";
 
+// spec-0021 new post-type storage files
+const ATTESTATIONS_FILE = "attestations.json";
+const ENDORSEMENTS_FILE = "endorsements.json";
+const SIGNALS_FILE = "signals.json";
+const CAPABILITIES_FILE = "capabilities.json";
+
+const DEFAULT_SIGNAL_TTL_MS = 6 * 60 * 60 * 1000;
+
 export function resolveHome(home?: string): string {
   if (home?.trim()) return path.resolve(home.trim());
   if (process.env.EDGE_BOOK_HOME?.trim()) return path.resolve(process.env.EDGE_BOOK_HOME.trim());
@@ -284,6 +350,30 @@ function randomId(prefix: string): string {
 function stableIdFromPublicKey(publicKeyPem: string): string {
   const digest = crypto.createHash("sha256").update(publicKeyPem).digest("base64url").slice(0, 32);
   return `did:openclaw:${digest}`;
+}
+
+// Content address: sha256 over the canonical (key-sorted) JSON, base64url.
+export function contentHash(value: unknown): string {
+  return crypto.createHash("sha256").update(canonicalize(value)).digest("base64url");
+}
+
+// spec-0021 closed taxonomy: the 10 post types -> their fixed structural class.
+export type PostType =
+  | "signal" | "query" | "answer" | "share" | "endorse" | "coordinate"
+  | "capability_advertisement" | "delegation_request" | "result_attestation" | "transaction";
+
+export const POST_TAXONOMY: Record<PostType, 1 | 2 | 3 | 4> = {
+  capability_advertisement: 1,
+  signal: 2, query: 2, share: 2, coordinate: 2, delegation_request: 2,
+  answer: 3, endorse: 3,
+  result_attestation: 4,
+  transaction: 3, // relational pre-settlement; settles to 4 (R-table hybrid)
+};
+
+export function classOf(type: PostType): 1 | 2 | 3 | 4 {
+  const c = POST_TAXONOMY[type];
+  if (!c) throw new EdgeBookError("unknown_post_type", `Not in closed taxonomy: ${type}`);
+  return c;
 }
 
 function canonicalize(value: unknown): string {
@@ -816,6 +906,224 @@ export class EdgeBookStore {
     await this.saveObjects(objects);
     await this.audit("object.create", identity.agent_id, { object_id, has_attachment: Boolean(attachment) });
     return object;
+  }
+
+  // ─── spec-0021 post-type store methods ──────────────────────────────────
+
+  // Class 4: Result Attestation — content-addressed, write-once (R6)
+  async attestations(): Promise<Record<string, ResultAttestation>> {
+    return readJson<Record<string, ResultAttestation>>(this.file(ATTESTATIONS_FILE), {});
+  }
+
+  async saveAttestations(attestations: Record<string, ResultAttestation>): Promise<void> {
+    await writeJson(this.file(ATTESTATIONS_FILE), attestations);
+  }
+
+  async saveEndorsements(endorsements: Record<string, Endorsement>): Promise<void> {
+    await writeJson(this.file(ENDORSEMENTS_FILE), endorsements);
+  }
+
+  async saveSignals(signals: Record<string, Signal>): Promise<void> {
+    await writeJson(this.file(SIGNALS_FILE), signals);
+  }
+
+  async saveCapabilities(capabilities: Record<string, CapabilityAdvertisement>): Promise<void> {
+    await writeJson(this.file(CAPABILITIES_FILE), capabilities);
+  }
+
+  async createAttestation(input: {
+    subject_agent_id: string; task_ref: string;
+    outcome: ResultAttestation["outcome"]; summary: string;
+    evidence?: Record<string, unknown>; created_at?: string;
+  }): Promise<ResultAttestation> {
+    const identity = await this.identity();
+    const content = {
+      post_type: "result_attestation" as const,
+      schema: "edge-book/result-attestation/0.1" as const,
+      attestor_agent_id: identity.agent_id,
+      subject_agent_id: input.subject_agent_id,
+      task_ref: input.task_ref,
+      outcome: input.outcome,
+      summary: input.summary,
+      evidence: input.evidence ?? {},
+      created_at: input.created_at ?? now(),
+    };
+    const attestation_id = contentHash(content);
+    const attestation: ResultAttestation = {
+      ...content, attestation_id,
+      signature: signPayload({ ...content, attestation_id }, identity.private_key_pem),
+    };
+    const all = await this.attestations();
+    if (!all[attestation_id]) {           // write-once: never rewrite in place (R6)
+      all[attestation_id] = attestation;
+      await this.saveAttestations(all);
+      await this.audit("attestation.create", input.subject_agent_id, { attestation_id, task_ref: input.task_ref });
+    }
+    return all[attestation_id];
+  }
+
+  async verifyAttestation(att: ResultAttestation): Promise<boolean> {
+    const identity = await this.identity();
+    let pub = identity.agent_id === att.attestor_agent_id ? identity.public_key_pem : undefined;
+    if (!pub) {
+      const c = (await this.contacts())[att.attestor_agent_id];
+      pub = c?.public_keys?.[0]?.public_key_pem;
+    }
+    if (!pub) return false;
+    const { signature, ...signedPayload } = att;
+    // integrity: id must equal hash of content (content excludes id+signature)
+    const { attestation_id, ...content } = signedPayload;
+    if (contentHash(content) !== attestation_id) return false;
+    return verifyPayload(signedPayload, signature, pub);
+  }
+
+  async verifyCapability(cap: CapabilityAdvertisement): Promise<boolean> {
+    const identity = await this.identity();
+    let pub = identity.agent_id === cap.agent_id ? identity.public_key_pem : undefined;
+    if (!pub) {
+      const c = (await this.contacts())[cap.agent_id];
+      pub = c?.public_keys?.[0]?.public_key_pem;
+    }
+    if (!pub) return false;
+    const { signature, ...rest } = cap;
+    return verifyPayload(rest, signature, pub);
+  }
+
+  // Class 3: Endorse — actor-owned reified edge, strongRef parent, evidence link (R5, R8)
+  async endorsements(): Promise<Record<string, Endorsement>> {
+    return readJson<Record<string, Endorsement>>(this.file(ENDORSEMENTS_FILE), {});
+  }
+
+  async createEndorsement(input: {
+    subject_agent_id: string; parent: StrongRef; statement: string;
+    evidence_ref?: StrongRef; evidence_task_id?: string;
+  }): Promise<Endorsement> {
+    if (!input.evidence_ref && !input.evidence_task_id) {
+      throw new EdgeBookError("missing_evidence", "Endorse requires an evidence link (Result Attestation ref or task id) — R8");
+    }
+    if (!input.parent?.uri || !input.parent?.hash) {
+      throw new EdgeBookError("missing_parent", "Endorse requires a strongRef parent (uri + hash) — R5");
+    }
+    const identity = await this.identity();
+    const endorse_id = randomId("end");
+    const stamp = now();
+    const unsigned = {
+      endorse_id,
+      post_type: "endorse" as const,
+      schema: "edge-book/endorse/0.1" as const,
+      endorser_agent_id: identity.agent_id,   // actor-owned (R5)
+      subject_agent_id: input.subject_agent_id,
+      parent: input.parent,
+      ...(input.evidence_ref ? { evidence_ref: input.evidence_ref } : {}),
+      ...(input.evidence_task_id ? { evidence_task_id: input.evidence_task_id } : {}),
+      statement: input.statement,
+      created_at: stamp,
+    };
+    const endorsement: Endorsement = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    const all = await this.endorsements();
+    all[endorse_id] = endorsement;
+    // evidence_ref/evidence_task_id is an open-world link — no referential-integrity check that the attestation exists locally.
+    await this.saveEndorsements(all);
+    await this.audit("endorse.create", input.subject_agent_id, { endorse_id, parent: input.parent.uri });
+    return endorsement;
+  }
+
+  // Class 2: Signal — ephemeral, lifecycle + TTL (R4)
+  private signalLifecycle(sig: Signal): Signal["lifecycle"] {
+    if (sig.lifecycle === "expired") return "expired";
+    return Date.parse(sig.expires_at) <= Date.now() ? "stale" : "active";
+  }
+
+  async signals(): Promise<Record<string, Signal>> {
+    const raw = await readJson<Record<string, Signal>>(this.file(SIGNALS_FILE), {});
+    for (const id of Object.keys(raw)) raw[id].lifecycle = this.signalLifecycle(raw[id]);
+    return raw;
+  }
+
+  async createSignal(input: { body: string; ttlMs?: number }): Promise<Signal> {
+    const identity = await this.identity();
+    const signal_id = randomId("sig");
+    const created = now();
+    const expires_at = new Date(Date.now() + (input.ttlMs ?? DEFAULT_SIGNAL_TTL_MS)).toISOString();
+    const unsigned = {
+      signal_id, post_type: "signal" as const, schema: "edge-book/signal/0.1" as const,
+      from_agent: identity.agent_id, body: input.body,
+      lifecycle: "active" as const, created_at: created, expires_at,
+    };
+    const signal: Signal = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    const all = await this.signals();
+    all[signal_id] = signal;
+    await this.saveSignals(all);
+    await this.audit("signal.create", identity.agent_id, { signal_id });
+    return signal;
+  }
+
+  async expireSignals(): Promise<void> {
+    const all = await readJson<Record<string, Signal>>(this.file(SIGNALS_FILE), {});
+    let changed = false;
+    for (const id of Object.keys(all)) {
+      if (all[id].lifecycle !== "expired" && Date.parse(all[id].expires_at) <= Date.now()) {
+        all[id].lifecycle = "expired"; changed = true;
+      }
+    }
+    if (changed) await this.saveSignals(all);
+  }
+
+  // Class 1: Capability Advertisement — versioned, deprecate-not-delete (R3)
+  async capabilities(): Promise<Record<string, CapabilityAdvertisement>> {
+    return readJson<Record<string, CapabilityAdvertisement>>(this.file(CAPABILITIES_FILE), {});
+  }
+
+  async advertiseCapability(input: { name: string; version: string; summary: string }): Promise<CapabilityAdvertisement> {
+    const identity = await this.identity();
+    const capability_id = randomId("cap");
+    const stamp = now();
+    const unsigned = {
+      capability_id, post_type: "capability_advertisement" as const,
+      schema: "edge-book/capability/0.1" as const, agent_id: identity.agent_id,
+      name: input.name, version: input.version, summary: input.summary,
+      status: "active" as const, created_at: stamp, updated_at: stamp,
+    };
+    const cap: CapabilityAdvertisement = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    const all = await this.capabilities();
+    all[capability_id] = cap;
+    await this.saveCapabilities(all);
+    await this.audit("capability.advertise", identity.agent_id, { capability_id, name: input.name });
+    return cap;
+  }
+
+  async deprecateCapability(capabilityId: string): Promise<CapabilityAdvertisement> {
+    const identity = await this.identity();
+    const all = await this.capabilities();
+    const cap = all[capabilityId];
+    if (!cap) throw new EdgeBookError("not_found", `No capability ${capabilityId}`);
+    cap.status = "deprecated";        // never delete (R3)
+    cap.updated_at = now();
+    const { signature: _sig, ...rest } = cap;
+    cap.signature = signPayload(rest, identity.private_key_pem);
+    await this.saveCapabilities(all);
+    await this.audit("capability.deprecate", identity.agent_id, { capability_id: capabilityId });
+    return cap;
+  }
+
+  // R7 cascade: deprecate Class 1, terminate open Class 2, RETAIN Class 3 + Class 4.
+  async deregister(): Promise<void> {
+    const identity = await this.identity();
+    const caps = await this.capabilities();
+    for (const id of Object.keys(caps)) {
+      if (caps[id].status === "active") {
+        caps[id].status = "deprecated";
+        caps[id].updated_at = now();
+        const { signature: _sig, ...rest } = caps[id];
+        caps[id].signature = signPayload(rest, identity.private_key_pem);
+      }
+    }
+    await this.saveCapabilities(caps);
+    const sigs = await readJson<Record<string, Signal>>(this.file(SIGNALS_FILE), {});
+    for (const id of Object.keys(sigs)) sigs[id].lifecycle = "expired";
+    await this.saveSignals(sigs);
+    // Endorsements (Class 3) and Attestations (Class 4) are evidence — left untouched.
+    await this.audit("agent.deregister", (await this.identity()).agent_id, {});
   }
 
   // Issue an `object.read` grant binding ONE object to ONE subject (revocable).
