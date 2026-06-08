@@ -418,6 +418,20 @@ export class EdgeBookStore {
     return identity;
   }
 
+  // Update profile fields on an existing identity without rotating keys, so the
+  // agent_id (and any pairing built on it) survives. `owner_label` is the human
+  // who owns the agent; `display_name` is the agent's own name.
+  async setProfile(input: { displayName?: string; ownerLabel?: string }): Promise<LocalIdentity> {
+    const identity = await this.identity();
+    if (input.displayName !== undefined && input.displayName !== "") identity.display_name = input.displayName;
+    if (input.ownerLabel !== undefined) identity.owner_label = input.ownerLabel;
+    identity.updated_at = now();
+    await writeJson(this.file(IDENTITY_FILE), identity, 0o600);
+    await this.writeCard();
+    await this.audit("identity.update", identity.agent_id, { display_name: identity.display_name, owner_label: identity.owner_label });
+    return identity;
+  }
+
   async config(): Promise<EdgeBookConfig> {
     return readJson<EdgeBookConfig>(this.file(CONFIG_FILE), {});
   }

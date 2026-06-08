@@ -83,6 +83,7 @@ function publicIdentity(identity: LocalIdentity): Record<string, string> {
     handle: identity.handle,
     name: identity.display_name,
     display_name: identity.display_name,
+    owner_label: identity.owner_label,
     public_key: compactPem(identity.public_key_pem)
   };
 }

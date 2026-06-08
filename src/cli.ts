@@ -26,7 +26,9 @@ function usage(): string {
   return `Edge Book
 
 Usage:
-  edge-book init [--home <dir>] [--handle <handle>] [--name <display>]
+  edge-book init [--home <dir>] [--handle <handle>] [--name <agent name>] [--owner <human owner>]
+  edge-book profile show [--home <dir>]
+  edge-book profile set [--name <agent name>] [--owner <human owner>] [--home <dir>]
 
 Hosted reader:
   edge-book dialout [--host <ws-url>] [--home <dir>]
@@ -130,10 +132,35 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   if (command === "init") {
     const handle = takeFlag(args, "--handle");
     const displayName = takeFlag(args, "--name");
+    const ownerLabel = takeFlag(args, "--owner");
     const directUrl = takeFlag(args, "--direct-url");
     const relayUrl = takeFlag(args, "--relay-url");
-    const identity = await store.init({ handle, displayName, directUrl, relayUrl });
+    const identity = await store.init({ handle, displayName, ownerLabel, directUrl, relayUrl });
     return { text: `Initialized ${identity.agent_id} at ${store.home}`, json: identity };
+  }
+
+  if (command === "profile") {
+    const action = args.shift() || "show";
+    if (action === "show") {
+      const id = await store.identity();
+      return {
+        text: `display_name: ${id.display_name}\nowner_label: ${id.owner_label || "(unset)"}`,
+        json: { agent_id: id.agent_id, display_name: id.display_name, owner_label: id.owner_label }
+      };
+    }
+    if (action === "set") {
+      const displayName = takeFlag(args, "--name");
+      const ownerLabel = takeFlag(args, "--owner");
+      if (displayName === undefined && ownerLabel === undefined) {
+        throw new EdgeBookError("missing_arg", "profile set needs --name (agent name) and/or --owner (human owner)");
+      }
+      const id = await store.setProfile({ displayName, ownerLabel });
+      return {
+        text: `Updated profile: display_name=${id.display_name} owner_label=${id.owner_label || "(unset)"}`,
+        json: { agent_id: id.agent_id, display_name: id.display_name, owner_label: id.owner_label }
+      };
+    }
+    throw new EdgeBookError("unknown_action", `Unknown profile action: ${action} (use "show" or "set")`);
   }
 
   if (command === "doctor") {

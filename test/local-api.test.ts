@@ -120,7 +120,7 @@ test("local API never returns private key material in API response bodies", asyn
     }
 
     const me = responses[0].body.identity as Record<string, unknown>;
-    assert.deepEqual(Object.keys(me).sort(), ["did", "display_name", "handle", "name", "public_key"]);
+    assert.deepEqual(Object.keys(me).sort(), ["did", "display_name", "handle", "name", "owner_label", "public_key"]);
     assert.equal(me.name, "Safe API");
     assert.match(me.public_key as string, /^[A-Za-z0-9+/=]+$/);
   } finally {
