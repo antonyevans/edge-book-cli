@@ -28,7 +28,8 @@ function usage(): string {
 Usage:
   edge-book init [--home <dir>] [--handle <handle>] [--name <agent name>] [--owner <human owner>]
   edge-book profile show [--home <dir>]
-  edge-book profile set [--name <agent name>] [--owner <human owner>] [--home <dir>]
+  edge-book profile set [--name <agent name>] [--owner <human owner>] [--share-owner | --no-share-owner] [--home <dir>]
+                                                            # owner name is private by default; --share-owner exposes it on your card
 
 Hosted reader:
   edge-book dialout [--host <ws-url>] [--home <dir>]
@@ -143,21 +144,27 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     const action = args.shift() || "show";
     if (action === "show") {
       const id = await store.identity();
+      const shared = id.share_owner_label ? "shared with contacts" : "private (default)";
       return {
-        text: `display_name: ${id.display_name}\nowner_label: ${id.owner_label || "(unset)"}`,
-        json: { agent_id: id.agent_id, display_name: id.display_name, owner_label: id.owner_label }
+        text: `display_name: ${id.display_name}\nowner_label: ${id.owner_label || "(unset)"}\nshare_owner_label: ${id.share_owner_label ? "true" : "false"} (${shared})`,
+        json: { agent_id: id.agent_id, display_name: id.display_name, owner_label: id.owner_label, share_owner_label: Boolean(id.share_owner_label) }
       };
     }
     if (action === "set") {
       const displayName = takeFlag(args, "--name");
       const ownerLabel = takeFlag(args, "--owner");
-      if (displayName === undefined && ownerLabel === undefined) {
-        throw new EdgeBookError("missing_arg", "profile set needs --name (agent name) and/or --owner (human owner)");
+      // Opt-in (default off): --share-owner exposes owner_label on your card;
+      // --no-share-owner turns it back off.
+      const shareOwner = takeBoolFlag(args, "--share-owner");
+      const noShareOwner = takeBoolFlag(args, "--no-share-owner");
+      const shareOwnerLabel = shareOwner ? true : (noShareOwner ? false : undefined);
+      if (displayName === undefined && ownerLabel === undefined && shareOwnerLabel === undefined) {
+        throw new EdgeBookError("missing_arg", "profile set needs --name (agent name), --owner (human owner), and/or --share-owner|--no-share-owner");
       }
-      const id = await store.setProfile({ displayName, ownerLabel });
+      const id = await store.setProfile({ displayName, ownerLabel, shareOwnerLabel });
       return {
-        text: `Updated profile: display_name=${id.display_name} owner_label=${id.owner_label || "(unset)"}`,
-        json: { agent_id: id.agent_id, display_name: id.display_name, owner_label: id.owner_label }
+        text: `Updated profile: display_name=${id.display_name} owner_label=${id.owner_label || "(unset)"} share_owner_label=${id.share_owner_label ? "true" : "false"}`,
+        json: { agent_id: id.agent_id, display_name: id.display_name, owner_label: id.owner_label, share_owner_label: Boolean(id.share_owner_label) }
       };
     }
     throw new EdgeBookError("unknown_action", `Unknown profile action: ${action} (use "show" or "set")`);

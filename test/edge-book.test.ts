@@ -253,3 +253,36 @@ test("feed privacy harness allows friend and denies non-friend revoked and block
     blockedRefresh: "blocked_peer"
   });
 });
+
+test("owner_label sharing is opt-in: off by default, rides the card when enabled, and lands in the contact", async () => {
+  // Owner (Alice) sets her human name but does NOT share it by default.
+  const aliceRoot = await tempRoot();
+  const alice = new EdgeBookStore({ home: aliceRoot });
+  await alice.init({ handle: "alice.openclaw.local", displayName: "Alice Agent" });
+  await alice.setProfile({ ownerLabel: "Alice Human" });
+
+  const privateCard = await alice.writeCard();
+  assert.equal(privateCard.owner_label, undefined, "owner_label must NOT be on the card by default");
+  validateCard(privateCard); // signature still valid
+
+  // Opt in -> owner_label now rides the (still valid) signed card.
+  await alice.setProfile({ shareOwnerLabel: true });
+  const sharedCard = await alice.writeCard();
+  assert.equal(sharedCard.owner_label, "Alice Human");
+  validateCard(sharedCard);
+
+  // A contact (Bob) who imports the shared card stores the human name.
+  const bobRoot = await tempRoot();
+  const bob = new EdgeBookStore({ home: bobRoot });
+  await bob.init({ handle: "bob.openclaw.local", displayName: "Bob Agent" });
+  const contact = await bob.upsertContactFromCard(sharedCard, "friend");
+  assert.equal(contact.owner_label, "Alice Human");
+  assert.equal(contact.display_name, "Alice Agent");
+
+  // Turning sharing back off drops it from the card and from a refreshed contact.
+  await alice.setProfile({ shareOwnerLabel: false });
+  const reCard = await alice.writeCard();
+  assert.equal(reCard.owner_label, undefined);
+  const reContact = await bob.upsertContactFromCard(reCard, "friend");
+  assert.equal(reContact.owner_label, undefined);
+});

@@ -28,6 +28,10 @@ export interface LocalIdentity {
   handle: string;
   display_name: string;
   owner_label: string;
+  // Opt-in (default off): when true, the human owner_label rides the published
+  // Agent Card so contacts can see it. Off = the agent acts as a privacy buffer
+  // and contacts only ever see the agent's display_name.
+  share_owner_label?: boolean;
   public_key_pem: string;
   private_key_pem: string;
   created_at: string;
@@ -39,6 +43,9 @@ export interface AgentCard {
   agent_id: string;
   handle: string;
   display_name: string;
+  // Present only when the owner opted in to sharing (share_owner_label). Absent
+  // cards mean "agent name only" — the default.
+  owner_label?: string;
   card_url: string;
   card_version: number;
   card_hash: string;
@@ -54,6 +61,8 @@ export interface AgentContactRecord {
   peer_agent_id: string;
   aliases: string[];
   display_name: string;
+  // The peer's human owner name, if their card shared it (opt-in on their side).
+  owner_label?: string;
   card_url: string;
   known_endpoints: Array<{ mode: TransportMode; endpoint: string }>;
   public_keys: Array<{ id: string; type: "ed25519"; public_key_pem: string }>;
@@ -421,10 +430,11 @@ export class EdgeBookStore {
   // Update profile fields on an existing identity without rotating keys, so the
   // agent_id (and any pairing built on it) survives. `owner_label` is the human
   // who owns the agent; `display_name` is the agent's own name.
-  async setProfile(input: { displayName?: string; ownerLabel?: string }): Promise<LocalIdentity> {
+  async setProfile(input: { displayName?: string; ownerLabel?: string; shareOwnerLabel?: boolean }): Promise<LocalIdentity> {
     const identity = await this.identity();
     if (input.displayName !== undefined && input.displayName !== "") identity.display_name = input.displayName;
     if (input.ownerLabel !== undefined) identity.owner_label = input.ownerLabel;
+    if (input.shareOwnerLabel !== undefined) identity.share_owner_label = input.shareOwnerLabel;
     identity.updated_at = now();
     await writeJson(this.file(IDENTITY_FILE), identity, 0o600);
     await this.writeCard();
@@ -456,6 +466,8 @@ export class EdgeBookStore {
       agent_id: identity.agent_id,
       handle: identity.handle,
       display_name: identity.display_name,
+      // Opt-in only: include the human owner name when the owner enabled sharing.
+      ...(identity.share_owner_label && identity.owner_label ? { owner_label: identity.owner_label } : {}),
       card_url: cardUrl || `file://${this.file(CARD_FILE)}`,
       card_version: 1,
       public_keys: [{ id: `${identity.agent_id}#main`, type: "ed25519", public_key_pem: identity.public_key_pem }],
@@ -545,6 +557,9 @@ export class EdgeBookStore {
       peer_agent_id: card.agent_id,
       aliases: Array.from(new Set([...(existing?.aliases ?? []), card.handle].filter(Boolean))),
       display_name: card.display_name,
+      // Carry the peer's shared human name (undefined if they didn't opt in, or
+      // dropped on refresh if they turned sharing off).
+      owner_label: card.owner_label,
       card_url: card.card_url,
       known_endpoints: card.transports,
       public_keys: card.public_keys,
