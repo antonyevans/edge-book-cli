@@ -178,6 +178,42 @@ export interface Signal {
   signature: string;
 }
 
+export type EphemeralType = "query" | "share" | "coordinate" | "delegation_request";
+
+export interface EphemeralPost {
+  post_id: string;
+  post_type: EphemeralType;
+  schema: "edge-book/ephemeral/0.1";
+  from_agent: string;
+  body: string;
+  subject_agent_id?: string;   // delegation_request target / coordinate counterpart
+  ref?: string;                // share reference
+  lifecycle: "active" | "stale" | "expired" | "cancelled" | "tombstoned";
+  created_at: string;
+  expires_at: string;
+  signature: string;
+}
+
+// Per-type TTL policy: hard => past-expiry is terminal "expired"; soft => "stale".
+export const EPHEMERAL_TTL_POLICY: Record<EphemeralType, { hard: boolean }> = {
+  query: { hard: true },
+  delegation_request: { hard: true },
+  share: { hard: false },
+  coordinate: { hard: false },
+};
+
+export interface Answer {
+  answer_id: string;
+  post_type: "answer";
+  schema: "edge-book/answer/0.1";
+  answerer_agent_id: string;   // actor-owned (R5)
+  parent: StrongRef;           // strongRef to the parent Query (R5)
+  body: string;
+  lifecycle: "active" | "tombstoned";
+  created_at: string;
+  signature: string;
+}
+
 export interface CapabilityAdvertisement {
   capability_id: string;
   post_type: "capability_advertisement";
@@ -330,8 +366,11 @@ const ATTESTATIONS_FILE = "attestations.json";
 const ENDORSEMENTS_FILE = "endorsements.json";
 const SIGNALS_FILE = "signals.json";
 const CAPABILITIES_FILE = "capabilities.json";
+const EPHEMERAL_FILE = "ephemeral-posts.json";
+const ANSWERS_FILE = "answers.json";
 
 const DEFAULT_SIGNAL_TTL_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_EPHEMERAL_TTL_MS = 24 * 60 * 60 * 1000;
 
 export function resolveHome(home?: string): string {
   if (home?.trim()) return path.resolve(home.trim());
@@ -467,6 +506,18 @@ async function readJsonl<T>(file: string): Promise<T[]> {
 
 function relationshipId(a: string, b: string): string {
   return `rel_${crypto.createHash("sha256").update([a, b].sort().join("|")).digest("base64url").slice(0, 24)}`;
+}
+
+// Shared Class-2 lifecycle: terminal states are preserved; otherwise past-expiry
+// becomes "expired" for hard-TTL types or "stale" for soft ones.
+export function computeLifecycle(
+  expiresAt: string,
+  hard: boolean,
+  current: string,
+): "active" | "stale" | "expired" | "cancelled" | "tombstoned" {
+  if (current === "expired" || current === "cancelled" || current === "tombstoned") return current as any;
+  if (Date.parse(expiresAt) <= Date.now()) return hard ? "expired" : "stale";
+  return "active";
 }
 
 export class EdgeBookStore {
@@ -821,6 +872,7 @@ export class EdgeBookStore {
     }
     const grant = await this.findUsableGrant(peerAgentId, scope);
     if (!grant) throw new EdgeBookError("missing_grant", `No active grant for ${scope}`);
+    await this.assertGrantSignature(grant);
     const envelope = await this.signEnvelope({
       type: "privileged_message",
       to_agent_id: peerAgentId,
@@ -849,6 +901,7 @@ export class EdgeBookStore {
     if (!grant || grant.status !== "active" || grant.subject_agent_id !== envelope.from_agent_id || !grant.scopes.includes("message.friend")) {
       throw new EdgeBookError("missing_grant", "Message does not carry an active grant issued to sender");
     }
+    await this.assertGrantSignature(grant);
     await appendJsonl(this.file(INBOX_FILE), envelope);
     await this.audit("message.receive", envelope.from_agent_id, { message_id: envelope.message_id });
   }
@@ -1030,8 +1083,7 @@ export class EdgeBookStore {
 
   // Class 2: Signal — ephemeral, lifecycle + TTL (R4)
   private signalLifecycle(sig: Signal): Signal["lifecycle"] {
-    if (sig.lifecycle === "expired") return "expired";
-    return Date.parse(sig.expires_at) <= Date.now() ? "stale" : "active";
+    return computeLifecycle(sig.expires_at, false, sig.lifecycle) as Signal["lifecycle"];
   }
 
   async signals(): Promise<Record<string, Signal>> {
@@ -1067,6 +1119,106 @@ export class EdgeBookStore {
       }
     }
     if (changed) await this.saveSignals(all);
+  }
+
+  // Generic Class-2 ephemeral store (query/share/coordinate/delegation_request, R2/R4)
+  async saveEphemeral(posts: Record<string, EphemeralPost>): Promise<void> {
+    await writeJson(this.file(EPHEMERAL_FILE), posts);
+  }
+
+  async ephemeralPosts(): Promise<Record<string, EphemeralPost>> {
+    const raw = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
+    for (const id of Object.keys(raw)) {
+      raw[id].lifecycle = computeLifecycle(raw[id].expires_at, EPHEMERAL_TTL_POLICY[raw[id].post_type].hard, raw[id].lifecycle);
+    }
+    return raw;
+  }
+
+  async createEphemeral(type: EphemeralType, input: { body: string; subject_agent_id?: string; ref?: string; ttlMs?: number }): Promise<EphemeralPost> {
+    if (!EPHEMERAL_TTL_POLICY[type]) throw new EdgeBookError("unknown_post_type", `Not an ephemeral Class-2 type: ${type}`);
+    const identity = await this.identity();
+    const post_id = randomId("eph");
+    const created = now();
+    const expires_at = new Date(Date.now() + (input.ttlMs ?? DEFAULT_EPHEMERAL_TTL_MS)).toISOString();
+    const unsigned = {
+      post_id, post_type: type, schema: "edge-book/ephemeral/0.1" as const,
+      from_agent: identity.agent_id, body: input.body,
+      ...(input.subject_agent_id ? { subject_agent_id: input.subject_agent_id } : {}),
+      ...(input.ref ? { ref: input.ref } : {}),
+      lifecycle: "active" as const, created_at: created, expires_at,
+    };
+    const post: EphemeralPost = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    const all = await this.ephemeralPosts();
+    all[post_id] = post;
+    await this.saveEphemeral(all);
+    await this.audit(type + ".create", input.subject_agent_id ?? identity.agent_id, { post_id });
+    return post;
+  }
+
+  async expireEphemeral(): Promise<void> {
+    const all = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
+    let changed = false;
+    for (const id of Object.keys(all)) {
+      const next = computeLifecycle(all[id].expires_at, EPHEMERAL_TTL_POLICY[all[id].post_type].hard, all[id].lifecycle);
+      if (next !== all[id].lifecycle) { all[id].lifecycle = next; changed = true; }
+    }
+    if (changed) await this.saveEphemeral(all);
+  }
+
+  async cancelEphemeral(postId: string): Promise<EphemeralPost> {
+    const all = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
+    const post = all[postId];
+    if (!post) throw new EdgeBookError("not_found", `No ephemeral post ${postId}`);
+    post.lifecycle = "cancelled";
+    await this.saveEphemeral(all);
+    await this.audit("ephemeral.cancel", post.from_agent, { post_id: postId });
+    return post;
+  }
+
+  // Class 3: Answer — actor-owned, strongRef to a Query (R5)
+  async saveAnswers(answers: Record<string, Answer>): Promise<void> {
+    await writeJson(this.file(ANSWERS_FILE), answers);
+  }
+
+  async answers(): Promise<Record<string, Answer>> {
+    return readJson<Record<string, Answer>>(this.file(ANSWERS_FILE), {});
+  }
+
+  async createAnswer(input: { parent: StrongRef; body: string }): Promise<Answer> {
+    if (!input.parent?.uri || !input.parent?.hash) {
+      throw new EdgeBookError("missing_parent", "Answer requires a strongRef parent (uri + hash) — R5");
+    }
+    const identity = await this.identity();
+    const answer_id = randomId("ans");
+    const unsigned = {
+      answer_id, post_type: "answer" as const, schema: "edge-book/answer/0.1" as const,
+      answerer_agent_id: identity.agent_id,   // actor-owned (R5)
+      parent: input.parent, body: input.body,
+      lifecycle: "active" as const, created_at: now(),
+    };
+    const answer: Answer = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    const all = await this.answers();
+    all[answer_id] = answer;
+    await this.saveAnswers(all);
+    await this.audit("answer.create", identity.agent_id, { answer_id, parent: input.parent.uri });
+    return answer;
+  }
+
+  // R7: deleting a Query tombstones (archives) it AND its Answers — never hard-drops.
+  async deleteQuery(queryId: string): Promise<void> {
+    const eph = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
+    const q = eph[queryId];
+    if (!q || q.post_type !== "query") throw new EdgeBookError("not_found", `No query ${queryId}`);
+    q.lifecycle = "tombstoned";
+    await this.saveEphemeral(eph);
+    const parentUri = "edgebook:query:" + queryId;
+    const ans = await this.answers();
+    let changed = false;
+    for (const id of Object.keys(ans)) {
+      if (ans[id].parent.uri === parentUri && ans[id].lifecycle !== "tombstoned") { ans[id].lifecycle = "tombstoned"; changed = true; }
+    }
+    if (changed) await this.saveAnswers(ans);
+    await this.audit("query.delete", q.from_agent, { query_id: queryId });
   }
 
   // Class 1: Capability Advertisement — versioned, deprecate-not-delete (R3)
@@ -1122,7 +1274,18 @@ export class EdgeBookStore {
     const sigs = await readJson<Record<string, Signal>>(this.file(SIGNALS_FILE), {});
     for (const id of Object.keys(sigs)) sigs[id].lifecycle = "expired";
     await this.saveSignals(sigs);
-    // Endorsements (Class 3) and Attestations (Class 4) are evidence — left untouched.
+    const eph = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
+    for (const id of Object.keys(eph)) {
+      const lc = eph[id].lifecycle;
+      if (lc === "expired" || lc === "cancelled" || lc === "tombstoned") continue;
+      const t = eph[id].post_type;
+      eph[id].lifecycle = (t === "query" || t === "delegation_request") ? "cancelled" : "expired";
+    }
+    await this.saveEphemeral(eph);
+    const ans = await readJson<Record<string, Answer>>(this.file(ANSWERS_FILE), {});
+    for (const id of Object.keys(ans)) if (ans[id].lifecycle !== "tombstoned") ans[id].lifecycle = "tombstoned";
+    await this.saveAnswers(ans);
+    // Endorsements (Class 3 evidence) + Attestations (Class 4) remain retained (untouched).
     await this.audit("agent.deregister", (await this.identity()).agent_id, {});
   }
 
@@ -1311,6 +1474,36 @@ export class EdgeBookStore {
       grant.scopes.includes(scope) &&
       (!grant.expires_at || Date.parse(grant.expires_at) > Date.now())
     );
+  }
+
+  // ea-openclaw-030 access check #6: a grant authorizes access only if its
+  // issuer signature verifies against the issuer's accepted public key. Grants
+  // are signed on issue (signPayload) but must be re-verified on use so that a
+  // grant tampered after signing, or presented independently of its issuing
+  // envelope, fails closed. Resolves the issuer key from local identity when
+  // self-issued, else from the issuer's contact record.
+  async verifyGrantSignature(grant: CapabilityGrant): Promise<boolean> {
+    if (!grant.signature) return false;
+    const identity = await this.identity();
+    let publicKey: string | undefined;
+    if (grant.issuer_agent_id === identity.agent_id) {
+      publicKey = identity.public_key_pem;
+    } else {
+      const contacts = await this.contacts();
+      publicKey = contacts[grant.issuer_agent_id]?.public_keys?.[0]?.public_key_pem;
+    }
+    if (!publicKey) return false;
+    return verifyPayload(withoutSignature(grant), grant.signature, publicKey);
+  }
+
+  // Throwing guard used by every friend-gated access path so the signature
+  // check lives in exactly one place (ea-openclaw-031: build the grant-check
+  // primitive once, have all sites consume it).
+  async assertGrantSignature(grant: CapabilityGrant): Promise<void> {
+    if (!(await this.verifyGrantSignature(grant))) {
+      await this.audit("grant.denied", grant.issuer_agent_id, { grant_id: grant.grant_id, reason: "invalid_grant_signature" });
+      throw new EdgeBookError("invalid_grant_signature", "Grant signature does not verify against the issuer key");
+    }
   }
 
   async signEnvelope(input: Omit<MessageEnvelope, "message_id" | "from_agent_id" | "created_at" | "expires_at" | "signature">): Promise<MessageEnvelope> {
@@ -1665,6 +1858,7 @@ export class EdgeBookStore {
       (!candidate.expires_at || Date.parse(candidate.expires_at) > Date.now())
     );
     if (!grant) throw new EdgeBookError("missing_grant", "No active feed.read.friends grant for peer");
+    await this.assertGrantSignature(grant);
     const posts = Object.values(await this.posts());
     return posts
       .filter((post) => post.visibility === "friends" && ["published", "edited"].includes(post.status))
