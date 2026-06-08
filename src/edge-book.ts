@@ -51,6 +51,9 @@ export interface AgentCard {
   card_hash: string;
   public_keys: Array<{ id: string; type: "ed25519"; public_key_pem: string }>;
   capabilities: string[];
+  // spec-0021 R3: the agent's structured Capability Advertisements, carried on the
+  // card so contacts can discover them. Public by design. Absent on older cards.
+  advertised_capabilities?: Array<{ name: string; version: string; summary: string; status: "active" | "deprecated" }>;
   transports: Array<{ mode: TransportMode; endpoint: string }>;
   refresh_after: string;
   expires_at: string;
@@ -604,6 +607,8 @@ export class EdgeBookStore {
     const transports: AgentCard["transports"] = [{ mode: "local", endpoint: this.home }];
     if (config.direct_url) transports.push({ mode: "direct", endpoint: config.direct_url });
     if (config.relay_url) transports.push({ mode: "relay", endpoint: config.relay_url });
+    const caps = Object.values(await this.capabilities())
+      .map((c) => ({ name: c.name, version: c.version, summary: c.summary, status: c.status }));
     const unsigned: Omit<AgentCard, "card_hash" | "signature"> = {
       schema: "openclaw-agent-card/0.1",
       agent_id: identity.agent_id,
@@ -615,6 +620,7 @@ export class EdgeBookStore {
       card_version: 1,
       public_keys: [{ id: `${identity.agent_id}#main`, type: "ed25519", public_key_pem: identity.public_key_pem }],
       capabilities: ["friend_request", "friend_gated_message", "feed_read_friends"],
+      ...(caps.length ? { advertised_capabilities: caps } : {}),
       transports,
       refresh_after: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
       expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
