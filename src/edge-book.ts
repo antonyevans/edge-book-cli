@@ -267,6 +267,12 @@ const FEED_FILE = "feed-items.json";
 const APPROVALS_FILE = "approvals.json";
 const CONTACT_MUTES_FILE = "contact-mutes.json";
 
+// spec-0021 new post-type storage files
+const ATTESTATIONS_FILE = "attestations.json";
+const ENDORSEMENTS_FILE = "endorsements.json";
+const SIGNALS_FILE = "signals.json";
+const CAPABILITIES_FILE = "capabilities.json";
+
 export function resolveHome(home?: string): string {
   if (home?.trim()) return path.resolve(home.trim());
   if (process.env.EDGE_BOOK_HOME?.trim()) return path.resolve(process.env.EDGE_BOOK_HOME.trim());
@@ -284,6 +290,30 @@ function randomId(prefix: string): string {
 function stableIdFromPublicKey(publicKeyPem: string): string {
   const digest = crypto.createHash("sha256").update(publicKeyPem).digest("base64url").slice(0, 32);
   return `did:openclaw:${digest}`;
+}
+
+// Content address: sha256 over the canonical (key-sorted) JSON, base64url.
+export function contentHash(value: unknown): string {
+  return crypto.createHash("sha256").update(canonicalize(value)).digest("base64url");
+}
+
+// spec-0021 closed taxonomy: the 10 post types -> their fixed structural class.
+export type PostType =
+  | "signal" | "query" | "answer" | "share" | "endorse" | "coordinate"
+  | "capability_advertisement" | "delegation_request" | "result_attestation" | "transaction";
+
+export const POST_TAXONOMY: Record<PostType, 1 | 2 | 3 | 4> = {
+  capability_advertisement: 1,
+  signal: 2, query: 2, share: 2, coordinate: 2, delegation_request: 2,
+  answer: 3, endorse: 3,
+  result_attestation: 4,
+  transaction: 3, // relational pre-settlement; settles to 4 (R-table hybrid)
+};
+
+export function classOf(type: PostType): 1 | 2 | 3 | 4 {
+  const c = POST_TAXONOMY[type];
+  if (!c) throw new EdgeBookError("unknown_post_type", `Not in closed taxonomy: ${type}`);
+  return c;
 }
 
 function canonicalize(value: unknown): string {
