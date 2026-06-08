@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
-import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
+import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
 
 export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
@@ -517,8 +517,14 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
 
   if (command === "answer") {
     const queryId = requireArg(args.shift(), "<query-id>");
+    const ephemeral = await store.ephemeralPosts();
+    const query = ephemeral[queryId];
+    if (!query) throw new EdgeBookError("not_found", `No local query ${queryId} to answer`);
+    // Compute the parent hash over the query's immutable signed content (strip
+    // signature and lifecycle, which are not part of the signed payload).
+    const { signature: _sig, lifecycle: _lc, ...queryUnsigned } = query;
     const ans = await store.createAnswer({
-      parent: { uri: "edgebook:query:" + queryId, hash: queryId },
+      parent: { uri: "edgebook:query:" + queryId, hash: contentHash(queryUnsigned) },
       body: requireArg(takeFlag(args, "--body"), "--body"),
     });
     return { text: `answer ${ans.answer_id}`, json: ans };

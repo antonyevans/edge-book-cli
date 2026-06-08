@@ -3,7 +3,7 @@ import test from "node:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { EdgeBookStore, computeLifecycle, classOf } from "../src/edge-book.ts";
+import { EdgeBookStore, computeLifecycle, classOf, contentHash } from "../src/edge-book.ts";
 import type { PostType } from "../src/edge-book.ts";
 import { handleCli } from "../src/cli.ts";
 import { startEdgeBookServer } from "../src/http.ts";
@@ -119,6 +119,59 @@ test("CLI: query/share/coordinate/delegate/answer/query-delete round-trip", asyn
 test("R1/R2 conformance: all 5 new types resolve and store in their declared class", () => {
   for (const t of ["query", "share", "coordinate", "delegation_request"] as PostType[]) assert.equal(classOf(t), 2);
   assert.equal(classOf("answer"), 3);
+});
+
+// ── FIX 1 regression: lifecycle mutation must NOT invalidate the signature ──
+
+test("verifyEphemeral: signature stays valid after cancelEphemeral (regression)", async () => {
+  const s = await tmp();
+  const q = await s.createEphemeral("query", { body: "will I still verify?" });
+  assert.ok(await s.verifyEphemeral(q), "should verify immediately after creation");
+  await s.cancelEphemeral(q.post_id);
+  const after = (await s.ephemeralPosts())[q.post_id];
+  assert.equal(after.lifecycle, "cancelled");
+  assert.ok(await s.verifyEphemeral(after), "should still verify after lifecycle transition");
+});
+
+test("verifyAnswer: signature stays valid after deleteQuery tombstones the answer (regression)", async () => {
+  const s = await tmp();
+  const q = await s.createEphemeral("query", { body: "q" });
+  const ans = await s.createAnswer({ parent: { uri: "edgebook:query:" + q.post_id, hash: "placeholder" }, body: "my answer" });
+  assert.ok(await s.verifyAnswer(ans), "should verify immediately after creation");
+  await s.deleteQuery(q.post_id);
+  const after = (await s.answers())[ans.answer_id];
+  assert.equal(after.lifecycle, "tombstoned");
+  assert.ok(await s.verifyAnswer(after), "should still verify after tombstone transition");
+});
+
+test("verifySignal: signature stays valid after expireSignals (regression)", async () => {
+  const s = await tmp();
+  const sig = await s.createSignal({ body: "hello world", ttlMs: 1 });
+  assert.ok(await s.verifySignal(sig), "should verify immediately after creation");
+  await new Promise((r) => setTimeout(r, 5));
+  await s.expireSignals();
+  const after = (await s.signals())[sig.signal_id];
+  assert.equal(after.lifecycle, "expired");
+  assert.ok(await s.verifySignal(after), "should still verify after expire transition");
+});
+
+// ── FIX 2 regression: CLI answer must use the query's content hash ──
+
+test("CLI answer: parent.hash equals contentHash of the query's signed content (regression)", async () => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "eb-rem-hash-"));
+  await handleCli(["init", "--home", home, "--name", "A"]);
+  const q = await handleCli(["query", "--home", home, "--body", "test query"]);
+  const qid = (q.json as any).post_id;
+  const ans = await handleCli(["answer", qid, "--home", home, "--body", "test answer"]);
+  const ansJson = ans.json as any;
+  // The hash must NOT equal the queryId
+  assert.notEqual(ansJson.parent.hash, qid, "parent.hash must be the content hash, not the query id");
+  // Verify it equals the actual content hash of the query's unsigned content
+  const s = new EdgeBookStore({ home });
+  const queryPost = (await s.ephemeralPosts())[qid];
+  const { signature: _sig, lifecycle: _lc, ...queryUnsigned } = queryPost;
+  const expectedHash = contentHash(queryUnsigned);
+  assert.equal(ansJson.parent.hash, expectedHash, "parent.hash must match contentHash of query's immutable content");
 });
 
 test("API exposes /api/ephemeral and /api/answers (401 without auth = route is wired)", async () => {

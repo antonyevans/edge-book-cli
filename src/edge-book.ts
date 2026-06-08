@@ -515,7 +515,9 @@ export function computeLifecycle(
   hard: boolean,
   current: string,
 ): "active" | "stale" | "expired" | "cancelled" | "tombstoned" {
-  if (current === "expired" || current === "cancelled" || current === "tombstoned") return current as any;
+  if (current === "expired" || current === "cancelled" || current === "tombstoned") {
+    return current as "expired" | "cancelled" | "tombstoned";
+  }
   if (Date.parse(expiresAt) <= Date.now()) return hard ? "expired" : "stale";
   return "active";
 }
@@ -1042,6 +1044,46 @@ export class EdgeBookStore {
     return verifyPayload(rest, signature, pub);
   }
 
+  // Verify an EphemeralPost signature. lifecycle is NOT part of the signed payload
+  // (it is mutable local metadata), so strip both signature and lifecycle before verify.
+  async verifyEphemeral(post: EphemeralPost): Promise<boolean> {
+    const identity = await this.identity();
+    let pub = identity.agent_id === post.from_agent ? identity.public_key_pem : undefined;
+    if (!pub) {
+      const c = (await this.contacts())[post.from_agent];
+      pub = c?.public_keys?.[0]?.public_key_pem;
+    }
+    if (!pub) return false;
+    const { signature, lifecycle: _lc, ...signedPayload } = post;
+    return verifyPayload(signedPayload, signature, pub);
+  }
+
+  // Verify an Answer signature. lifecycle is NOT part of the signed payload.
+  async verifyAnswer(ans: Answer): Promise<boolean> {
+    const identity = await this.identity();
+    let pub = identity.agent_id === ans.answerer_agent_id ? identity.public_key_pem : undefined;
+    if (!pub) {
+      const c = (await this.contacts())[ans.answerer_agent_id];
+      pub = c?.public_keys?.[0]?.public_key_pem;
+    }
+    if (!pub) return false;
+    const { signature, lifecycle: _lc, ...signedPayload } = ans;
+    return verifyPayload(signedPayload, signature, pub);
+  }
+
+  // Verify a Signal signature. lifecycle is NOT part of the signed payload.
+  async verifySignal(sig: Signal): Promise<boolean> {
+    const identity = await this.identity();
+    let pub = identity.agent_id === sig.from_agent ? identity.public_key_pem : undefined;
+    if (!pub) {
+      const c = (await this.contacts())[sig.from_agent];
+      pub = c?.public_keys?.[0]?.public_key_pem;
+    }
+    if (!pub) return false;
+    const { signature, lifecycle: _lc, ...signedPayload } = sig;
+    return verifyPayload(signedPayload, signature, pub);
+  }
+
   // Class 3: Endorse — actor-owned reified edge, strongRef parent, evidence link (R5, R8)
   async endorsements(): Promise<Record<string, Endorsement>> {
     return readJson<Record<string, Endorsement>>(this.file(ENDORSEMENTS_FILE), {});
@@ -1097,12 +1139,14 @@ export class EdgeBookStore {
     const signal_id = randomId("sig");
     const created = now();
     const expires_at = new Date(Date.now() + (input.ttlMs ?? DEFAULT_SIGNAL_TTL_MS)).toISOString();
+    // lifecycle is mutable local metadata — excluded from the signed payload so
+    // expireSignals() can advance it without invalidating the signature.
     const unsigned = {
       signal_id, post_type: "signal" as const, schema: "edge-book/signal/0.1" as const,
       from_agent: identity.agent_id, body: input.body,
-      lifecycle: "active" as const, created_at: created, expires_at,
+      created_at: created, expires_at,
     };
-    const signal: Signal = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    const signal: Signal = { ...unsigned, lifecycle: "active" as const, signature: signPayload(unsigned, identity.private_key_pem) };
     const all = await this.signals();
     all[signal_id] = signal;
     await this.saveSignals(all);
@@ -1140,18 +1184,21 @@ export class EdgeBookStore {
     const post_id = randomId("eph");
     const created = now();
     const expires_at = new Date(Date.now() + (input.ttlMs ?? DEFAULT_EPHEMERAL_TTL_MS)).toISOString();
+    // lifecycle is mutable local metadata — excluded from the signed payload so
+    // cancel/expire transitions do not invalidate the signature.
     const unsigned = {
       post_id, post_type: type, schema: "edge-book/ephemeral/0.1" as const,
       from_agent: identity.agent_id, body: input.body,
       ...(input.subject_agent_id ? { subject_agent_id: input.subject_agent_id } : {}),
       ...(input.ref ? { ref: input.ref } : {}),
-      lifecycle: "active" as const, created_at: created, expires_at,
+      created_at: created, expires_at,
     };
-    const post: EphemeralPost = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    const post: EphemeralPost = { ...unsigned, lifecycle: "active" as const, signature: signPayload(unsigned, identity.private_key_pem) };
     const all = await this.ephemeralPosts();
     all[post_id] = post;
     await this.saveEphemeral(all);
-    await this.audit(type + ".create", input.subject_agent_id ?? identity.agent_id, { post_id });
+    // actor is always identity.agent_id; subject_agent_id goes in details if relevant
+    await this.audit(type + ".create", identity.agent_id, { post_id, ...(input.subject_agent_id ? { subject_agent_id: input.subject_agent_id } : {}) });
     return post;
   }
 
@@ -1190,13 +1237,15 @@ export class EdgeBookStore {
     }
     const identity = await this.identity();
     const answer_id = randomId("ans");
+    // lifecycle is mutable local metadata — excluded from the signed payload so
+    // deleteQuery tombstone transitions do not invalidate the signature.
     const unsigned = {
       answer_id, post_type: "answer" as const, schema: "edge-book/answer/0.1" as const,
       answerer_agent_id: identity.agent_id,   // actor-owned (R5)
       parent: input.parent, body: input.body,
-      lifecycle: "active" as const, created_at: now(),
+      created_at: now(),
     };
-    const answer: Answer = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    const answer: Answer = { ...unsigned, lifecycle: "active" as const, signature: signPayload(unsigned, identity.private_key_pem) };
     const all = await this.answers();
     all[answer_id] = answer;
     await this.saveAnswers(all);
@@ -1272,7 +1321,9 @@ export class EdgeBookStore {
     }
     await this.saveCapabilities(caps);
     const sigs = await readJson<Record<string, Signal>>(this.file(SIGNALS_FILE), {});
-    for (const id of Object.keys(sigs)) sigs[id].lifecycle = "expired";
+    for (const id of Object.keys(sigs)) {
+      if (sigs[id].lifecycle !== "expired") sigs[id].lifecycle = "expired";
+    }
     await this.saveSignals(sigs);
     const eph = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
     for (const id of Object.keys(eph)) {
