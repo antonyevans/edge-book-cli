@@ -61,7 +61,15 @@ Local agent:
   edge-book inbox pull --relay <url> [--home <dir>]
   edge-book serve --host <host> --port <port> [--home <dir>]
   edge-book relay serve --host <host> --port <port> --store <dir>
-  edge-book harness two-agent`;
+  edge-book harness two-agent
+
+Post taxonomy (spec-0021):
+  edge-book attest --subject <id> --task <ref> --outcome <success|failure|partial> --summary <s>
+  edge-book endorse <subject-agent-id> --parent-uri <uri> --parent-hash <h> (--evidence-attestation <id> | --evidence-task <id>) --statement <s>
+  edge-book signal --body <s> [--ttl-ms <ms>]
+  edge-book capability advertise --name <n> --version <v> --summary <s>
+  edge-book capability deprecate <capability-id>
+  edge-book capability list`;
 }
 
 function takeFlag(args: string[], name: string): string | undefined {
@@ -432,6 +440,59 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       const result = await runTwoAgentHarness();
       return { text: `PASS two-agent harness\n${JSON.stringify(result, null, 2)}`, json: result };
     }
+  }
+
+  // ─── spec-0021 post-taxonomy CLI commands ────────────────────────────────
+
+  if (command === "attest") {
+    const id = await store.createAttestation({
+      subject_agent_id: requireArg(takeFlag(args, "--subject"), "--subject"),
+      task_ref: requireArg(takeFlag(args, "--task"), "--task"),
+      outcome: (takeFlag(args, "--outcome") ?? "success") as "success" | "failure" | "partial",
+      summary: requireArg(takeFlag(args, "--summary"), "--summary"),
+    });
+    return { text: `Attestation ${id.attestation_id}`, json: id };
+  }
+
+  if (command === "endorse") {
+    const subject = requireArg(args.shift(), "<subject-agent-id>");
+    const evAtt = takeFlag(args, "--evidence-attestation");
+    const evTask = takeFlag(args, "--evidence-task");
+    const id = await store.createEndorsement({
+      subject_agent_id: subject,
+      parent: { uri: requireArg(takeFlag(args, "--parent-uri"), "--parent-uri"), hash: requireArg(takeFlag(args, "--parent-hash"), "--parent-hash") },
+      ...(evAtt ? { evidence_ref: { uri: `edgebook:attestation:${evAtt}`, hash: evAtt } } : {}),
+      ...(evTask ? { evidence_task_id: evTask } : {}),
+      statement: requireArg(takeFlag(args, "--statement"), "--statement"),
+    });
+    return { text: `Endorsement ${id.endorse_id}`, json: id };
+  }
+
+  if (command === "signal") {
+    const ttl = takeFlag(args, "--ttl-ms");
+    const id = await store.createSignal({ body: requireArg(takeFlag(args, "--body"), "--body"), ttlMs: ttl ? Number(ttl) : undefined });
+    return { text: `Signal ${id.signal_id}`, json: id };
+  }
+
+  if (command === "capability") {
+    const action = args.shift() || "list";
+    if (action === "advertise") {
+      const id = await store.advertiseCapability({
+        name: requireArg(takeFlag(args, "--name"), "--name"),
+        version: requireArg(takeFlag(args, "--version"), "--version"),
+        summary: requireArg(takeFlag(args, "--summary"), "--summary"),
+      });
+      return { text: `Capability ${id.capability_id}`, json: id };
+    }
+    if (action === "deprecate") {
+      const id = await store.deprecateCapability(requireArg(args.shift(), "<capability-id>"));
+      return { text: `Deprecated ${id.capability_id}`, json: id };
+    }
+    if (action === "list") {
+      const all = await store.capabilities();
+      return { text: JSON.stringify(all, null, 2), json: all };
+    }
+    throw new EdgeBookError("unknown_action", `Unknown capability action: ${action}`);
   }
 
   throw new EdgeBookError("unknown_command", usage());
