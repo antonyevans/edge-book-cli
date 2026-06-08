@@ -219,3 +219,100 @@ test("/api/received rejects unauthenticated", async () => {
     await closeServer(server);
   }
 });
+
+// ─── Fix 1 regression: relayed post from a non-friend author is rejected ────
+
+test("relayed post from a non-friend author is rejected (author binding)", async () => {
+  // Alice and Bob are friends; Carol and Alice are friends; Carol is NOT Bob's friend.
+  const alice = await tmp("alice");
+  const bob = await tmp("bob");
+  const carol = await tmp("carol");
+
+  // Bob <-> Alice: friends
+  await alice.upsertContactFromCard(await bob.buildCard(), "friend");
+  await bob.upsertContactFromCard(await alice.buildCard(), "friend");
+
+  // Carol <-> Alice: friends (so Alice knows Carol's key for verification)
+  await alice.upsertContactFromCard(await carol.buildCard(), "friend");
+  await carol.upsertContactFromCard(await alice.buildCard(), "friend");
+
+  // Bob does NOT know Carol (she's not in his contacts as a friend)
+  await bob.upsertContactFromCard(await carol.buildCard(), "none");
+
+  // Carol creates a genuine Answer (signed by Carol, answerer_agent_id = carol)
+  const carolId = (await carol.identity()).agent_id;
+  const aliceId = (await alice.identity()).agent_id;
+
+  const carolAnswer = await carol.createAnswer({
+    parent: { uri: "edgebook:query:x", hash: "abc" },
+    body: "carol's answer",
+  });
+
+  // Alice crafts a post_publish envelope to Bob wrapping Carol's answer,
+  // but injects from_agent: aliceId to make it look like Alice authored it.
+  // The answerer_agent_id remains carolId (Carol's signature is over carolId).
+  const injectedPost = { ...carolAnswer, from_agent: aliceId };
+  const env = await alice.signPostPublishEnvelope({
+    to_agent_id: (await bob.identity()).agent_id,
+    post: injectedPost as any,
+  });
+
+  // Bob must REJECT this: the per-type author (answerer_agent_id = carol) does not
+  // match the envelope sender (alice), so the author binding check must fire.
+  await assert.rejects(
+    () => bob.receivePostPublish(env),
+    /author|mismatch/i,
+    "should reject when answerer_agent_id does not match envelope sender",
+  );
+});
+
+// ─── Fix 3: unknown post_type rejected; blocked sender rejected ──────────────
+
+test("unknown post_type in friend envelope is rejected", async () => {
+  const alice = await tmp("alice");
+  const bob = await tmp("bob");
+  await alice.upsertContactFromCard(await bob.buildCard(), "friend");
+  await bob.upsertContactFromCard(await alice.buildCard(), "friend");
+
+  // Build a post with an unknown type
+  const fakePost = {
+    post_id: "post_fake_001",
+    post_type: "future_type",
+    from_agent: (await alice.identity()).agent_id,
+    body: "unknown type payload",
+    created_at: new Date().toISOString(),
+    signature: "invalidsig",
+  };
+
+  const env = await alice.signPostPublishEnvelope({
+    to_agent_id: (await bob.identity()).agent_id,
+    post: fakePost as any,
+  });
+
+  await assert.rejects(
+    () => bob.receivePostPublish(env),
+    /signature|invalid|author|mismatch/i,
+    "unknown post_type should be rejected (verifyReceivedPost returns false or author mismatch)",
+  );
+});
+
+test("blocked sender is rejected with /friend/i", async () => {
+  const alice = await tmp("alice");
+  const bob = await tmp("bob");
+
+  // Bob knows Alice but has blocked her
+  await alice.upsertContactFromCard(await bob.buildCard(), "friend");
+  await bob.upsertContactFromCard(await alice.buildCard(), "blocked");
+
+  const sig = await alice.createSignal({ body: "from blocked alice" });
+  const env = await alice.signPostPublishEnvelope({
+    to_agent_id: (await bob.identity()).agent_id,
+    post: sig,
+  });
+
+  await assert.rejects(
+    () => bob.receivePostPublish(env),
+    /friend/i,
+    "blocked sender should be rejected with a friend-gate error",
+  );
+});

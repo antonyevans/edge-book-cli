@@ -1626,11 +1626,20 @@ export class EdgeBookStore {
   }
 
   private receivedPostId(p: any): string {
-    return p.signal_id ?? p.answer_id ?? p.endorse_id ?? p.post_id ?? randomId("recv");
+    return p.signal_id || p.post_id || p.answer_id || p.endorse_id || "";
   }
 
   private receivedPostAuthor(p: any): string {
-    return p.from_agent ?? p.answerer_agent_id ?? p.endorser_agent_id ?? "";
+    switch (p.post_type) {
+      case "answer": return p.answerer_agent_id ?? "";
+      case "endorse": return p.endorser_agent_id ?? "";
+      case "signal":
+      case "query":
+      case "share":
+      case "coordinate":
+      case "delegation_request": return p.from_agent ?? "";
+      default: return "";
+    }
   }
 
   /**
@@ -1659,16 +1668,20 @@ export class EdgeBookStore {
     if (this.receivedPostAuthor(post) !== envelope.from_agent_id) {
       throw new EdgeBookError("author_mismatch", "post author does not match envelope sender");
     }
+    const id = this.receivedPostId(post);
+    if (!id) {
+      throw new EdgeBookError("malformed_post_publish", "post missing id");
+    }
     if (!(await this.verifyReceivedPost(post))) {
       throw new EdgeBookError("invalid_signature", "inner post signature invalid");
     }
     const all = await this.receivedPosts();
-    const key = envelope.from_agent_id + ":" + this.receivedPostId(post);
+    const key = envelope.from_agent_id + ":" + id;
     all[key] = post;
     await this.saveReceivedPosts(all);
     await this.audit("post.receive", envelope.from_agent_id, {
       post_type: post.post_type,
-      id: this.receivedPostId(post),
+      id,
     });
     return post;
   }
