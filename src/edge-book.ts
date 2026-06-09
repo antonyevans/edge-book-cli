@@ -285,7 +285,7 @@ export interface ObjectRevokeBody {
 
 export interface MessageEnvelope {
   message_id: string;
-  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error" | "object_share" | "object_revoke" | "post_publish";
+  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error" | "object_share" | "object_revoke" | "post_publish" | "profile_share";
   from_agent_id: string;
   to_agent_id: string;
   relationship_id: string;
@@ -307,7 +307,12 @@ export interface FriendResponseBody {
   accepted: boolean;
   card: AgentCard;
   grant?: CapabilityGrant;
+  profile?: FriendProfile; // accepter's friend profile (only when accepted)
   reason: string;
+}
+
+export interface ProfileShareBody {
+  profile: FriendProfile;
 }
 
 export type EdgeBookVisibility = "private" | "friends" | "public_if_enabled";
