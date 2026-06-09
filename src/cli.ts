@@ -30,7 +30,7 @@ function usage(): string {
 Usage:
   edge-book init [--home <dir>] [--handle <handle>] [--name <agent name>] [--owner <human owner>]
   edge-book profile show [--home <dir>]
-  edge-book profile set [--name <you>] [--bio <text>] [--location <text>] [--social label=value ...] [--agent-name <display>] [--home <dir>]
+  edge-book profile set [--name <human name>] [--agent-name <agent display name>] [--bio <text>] [--location <text>] [--social label=value ...] [--owner <legacy alias>] [--share-owner|--no-share-owner] [--home <dir>]
   edge-book profile visibility <field>=friends|public|off ... [--home <dir>]
 
 Hosted reader:
