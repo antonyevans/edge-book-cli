@@ -391,7 +391,7 @@ function now(): string {
   return new Date().toISOString();
 }
 
-function randomId(prefix: string): string {
+export function randomId(prefix: string): string {
   return `${prefix}_${crypto.randomBytes(16).toString("base64url")}`;
 }
 
@@ -450,7 +450,7 @@ async function ensureHome(home: string): Promise<void> {
   await chmodBestEffort(home, 0o700);
 }
 
-async function readJson<T>(file: string, fallback: T): Promise<T> {
+export async function readJson<T>(file: string, fallback: T): Promise<T> {
   try {
     return JSON.parse(await fs.readFile(file, "utf8")) as T;
   } catch (error) {
@@ -473,7 +473,7 @@ async function chmodBestEffort(file: string, mode: number): Promise<void> {
   }
 }
 
-async function writeJson(file: string, value: unknown, mode?: number): Promise<void> {
+export async function writeJson(file: string, value: unknown, mode?: number): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   // Atomic write: a concurrent reader (the host proxies many /api/* calls at
   // once) must never observe a half-written file. Write a unique temp then
