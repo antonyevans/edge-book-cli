@@ -45,6 +45,32 @@ test("accepted/other states never appear as pending", async () => {
   assert.deepEqual(await bob.pendingFriendRequests(), []);
 });
 
+test("re-sent friend request re-surfaces after notified_at was stamped", async () => {
+  // Regression: stale notified_at must NOT permanently suppress a second request.
+  // Lifecycle: Alice requests → Bob notified → Bob revokes → Alice re-requests →
+  // Bob must see length 1 again.
+  const { alice, bob } = await pair();
+  const aliceCard = await alice.writeCard();
+  const bobCard = await bob.writeCard();
+
+  // Step 1 — first request: Bob sees it as pending (length 1)
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+  assert.equal((await bob.pendingFriendRequests()).length, 1, "first request is pending");
+
+  // Step 2 — Bob marks notified: no longer pending (length 0)
+  await bob.markFriendRequestNotified(aliceCard.agent_id);
+  assert.equal((await bob.pendingFriendRequests()).length, 0, "marked as notified — not pending");
+
+  // Step 3 — Bob revokes the relationship (simulates relationship returning to non-friend)
+  await bob.revoke(aliceCard.agent_id);
+
+  // Step 4 — Alice sends a fresh request (createFriendRequest produces a new message_id each call)
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+
+  // Step 5 — The stale notified_at must be gone; Bob must be re-notified
+  assert.equal((await bob.pendingFriendRequests()).length, 1, "re-sent request re-surfaces after notified_at cleared");
+});
+
 import { handleCli } from "../src/cli.ts";
 
 test("CLI friend pending --json lists, mark-notified dedups", async () => {

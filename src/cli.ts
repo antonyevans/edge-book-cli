@@ -446,7 +446,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
         agent_id: c.peer_agent_id,
         display_name: c.display_name,
         note: "", // note isn't persisted on the contact; read from inbox if needed
-        received_at: c.created_at,
+        contact_created_at: c.created_at,
       }));
       const text = json.length
         ? json.map((p) => `${p.agent_id}  ${p.display_name}`).join("\n")
@@ -461,6 +461,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     if (action === "notify-config") {
       const on = takeBoolFlag(args, "--on");
       const off = takeBoolFlag(args, "--off");
+      if (on && off) throw new EdgeBookError("bad_flags", "notify-config takes either --on or --off, not both");
       if (!on && !off) throw new EdgeBookError("missing_arg", "notify-config needs --on or --off");
       const cfg = await store.updateConfig({ notify_on_friend_request: on ? true : false });
       return { text: `notify_on_friend_request = ${cfg.notify_on_friend_request}`, json: cfg };

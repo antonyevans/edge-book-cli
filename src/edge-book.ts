@@ -917,7 +917,10 @@ export class EdgeBookStore {
       owner_label: card.owner_label,
       // Preserve a previously-received friend profile across card refreshes.
       ...(existing?.friend_profile ? { friend_profile: existing.friend_profile } : {}),
-      ...(existing?.notified_at ? { notified_at: existing.notified_at } : {}),
+      // When transitioning INTO request_received (a fresh inbound request), clear
+      // any stale notified_at so the human is re-notified. For all other state
+      // changes (card refreshes, accept, etc.) carry the stamp forward as before.
+      ...(state !== "request_received" && existing?.notified_at ? { notified_at: existing.notified_at } : {}),
       advertised_capabilities: card.advertised_capabilities,
       card_url: card.card_url,
       known_endpoints: card.transports,
