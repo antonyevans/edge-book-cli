@@ -1026,9 +1026,31 @@ export class EdgeBookStore {
     });
   }
 
+  private async enforceInboundRate(peerAgentId: string): Promise<void> {
+    const config = await this.config();
+    const windowMs = config.inbound_window_ms ?? 3_600_000;
+    const maxPeer = config.inbound_max_per_peer ?? 5;
+    const maxGlobal = config.inbound_max_global ?? 60;
+    const cutoff = Date.now() - windowMs;
+    const all = await readJson<Record<string, number[]>>(this.file(INBOUND_RATE_FILE), {});
+    for (const k of Object.keys(all)) {
+      all[k] = all[k].filter((t) => t > cutoff);
+      if (!all[k].length) delete all[k];
+    }
+    const peerCount = (all[peerAgentId] ?? []).length;
+    const globalCount = Object.values(all).reduce((n, arr) => n + arr.length, 0);
+    if (peerCount >= maxPeer || globalCount >= maxGlobal) {
+      await this.audit("inbound.rate_limited", peerAgentId, { peerCount, globalCount });
+      throw new EdgeBookError("rate_limited", "Inbound request rate limit exceeded");
+    }
+    all[peerAgentId] = [...(all[peerAgentId] ?? []), Date.now()];
+    await writeJson(this.file(INBOUND_RATE_FILE), all);
+  }
+
   async receiveFriendRequest(envelope: MessageEnvelope): Promise<AgentContactRecord> {
     await this.verifyEnvelope(envelope);
     if (envelope.type !== "friend_request") throw new EdgeBookError("wrong_message_type", "Expected friend_request envelope");
+    await this.enforceInboundRate(envelope.from_agent_id);
     const body = envelope.body as unknown as FriendRequestBody;
     validateCard(body.card);
     if (body.card.agent_id !== envelope.from_agent_id) throw new EdgeBookError("agent_id_mismatch", "Friend request card does not match sender");
@@ -1865,6 +1887,7 @@ export class EdgeBookStore {
   async receiveObjectShare(envelope: MessageEnvelope): Promise<SharedObject> {
     await this.verifyEnvelope(envelope);
     if (envelope.type !== "object_share") throw new EdgeBookError("wrong_message_type", "Expected object_share envelope");
+    await this.enforceInboundRate(envelope.from_agent_id);
     const identity = await this.identity();
     const body = envelope.body as unknown as ObjectShareBody;
     const { object, grant } = body;
