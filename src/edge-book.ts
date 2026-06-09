@@ -2915,6 +2915,12 @@ export class EdgeBookStore {
 
 export function validateCard(card: AgentCard): void {
   if (card.schema !== "openclaw-agent-card/0.1") throw new EdgeBookError("invalid_card", "Unsupported Agent Card schema");
+  if (card.expires_at) {
+    const exp = Date.parse(card.expires_at);
+    if (!Number.isNaN(exp) && exp <= Date.now()) {
+      throw new EdgeBookError("card_expired", "Card/invite expired — ask the peer for a fresh handle or invite");
+    }
+  }
   if (!card.agent_id || !card.public_keys?.[0]?.public_key_pem) throw new EdgeBookError("invalid_card", "Agent Card is missing identity key");
   const expectedId = stableIdFromPublicKey(card.public_keys[0].public_key_pem);
   if (card.agent_id !== expectedId) throw new EdgeBookError("invalid_card", "Agent Card agent_id does not match public key");
