@@ -58,3 +58,43 @@ test("receiveProfileShare stores a newer profile and ignores a stale one", async
   // hard; instead re-receive the same share — replay guard rejects it).
   await assert.rejects(() => alice.receiveProfileShare(share), /replay/i);
 });
+
+test("applyFriendResponse returns a profile_share the requester must deliver back", async () => {
+  const { alice, bob } = await twoAgents();
+  const aliceCard = await alice.writeCard();
+  const bobCard = await bob.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+  const accept = await bob.acceptFriend(aliceCard.agent_id);
+  const followUp = await alice.applyFriendResponse(accept);
+  assert.ok(followUp, "expected a follow-up envelope");
+  assert.equal(followUp!.type, "profile_share");
+  assert.equal(followUp!.to_agent_id, bobCard.agent_id);
+  // Bob receives Alice's profile.
+  await bob.receiveProfileShare(followUp!);
+  assert.equal((await bob.contacts())[aliceCard.agent_id].friend_profile?.name, "Alice");
+});
+
+test("full loop: both sides hold each other's friend profile; request leaked nothing", async () => {
+  const { alice, bob } = await twoAgents();
+  const aliceCard = await alice.writeCard();
+  const bobCard = await bob.writeCard();
+  const request = await alice.createFriendRequest(bobCard);
+  // The request body is a friend_request with a card ONLY — no friend profile.
+  assert.equal((request.body as any).profile, undefined);
+  await bob.receiveFriendRequest(request);
+  const accept = await bob.acceptFriend(aliceCard.agent_id);
+  const followUp = await alice.applyFriendResponse(accept);
+  await bob.receiveProfileShare(followUp!);
+  assert.equal((await alice.contacts())[bobCard.agent_id].friend_profile?.name, "Bob");
+  assert.equal((await bob.contacts())[aliceCard.agent_id].friend_profile?.name, "Alice");
+});
+
+test("receiveEnvelope surfaces a profile_share follow-up for a friend_response", async () => {
+  const { alice, bob } = await twoAgents();
+  const aliceCard = await alice.writeCard();
+  const bobCard = await bob.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+  const accept = await bob.acceptFriend(aliceCard.agent_id);
+  const result = await alice.receiveEnvelope(accept);
+  assert.ok(result && (result as MessageEnvelope).type === "profile_share");
+});
