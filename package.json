@@ -12,7 +12,10 @@
     "test": "node --test test/*.test.ts",
     "harness": "node bin/edge-book.js harness two-agent",
     "harness:e2e": "node scripts/convergence-e2e.ts",
-    "prepublishOnly": "npm run build",
+    "prepare": "git config core.hooksPath .githooks || true",
+    "prepublishOnly": "npm run sync-readme:check && npm run build",
+    "sync-readme": "tsx scripts/sync-readme.ts",
+    "sync-readme:check": "tsx scripts/sync-readme.ts --check",
     "smoke": "node scripts/smoke-2agent.ts",
     "smoke:host": "node scripts/smoke-2agent.ts --host"
   },
@@ -52,6 +55,7 @@
   "devDependencies": {
     "@types/ws": "^8.18.1",
     "tsup": "^8.5.1",
+    "tsx": "^4.22.4",
     "typescript": "^6.0.3"
   },
   "dependencies": {

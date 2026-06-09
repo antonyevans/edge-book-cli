@@ -1,0 +1,7 @@
+#!/bin/sh
+# Auto-sync the README command reference from src/commands-doc.ts on commit.
+if [ -x node_modules/.bin/tsx ]; then
+  node_modules/.bin/tsx scripts/sync-readme.ts || { echo "edge-book: sync-readme failed"; exit 1; }
+  git add README.md
+fi
+exit 0

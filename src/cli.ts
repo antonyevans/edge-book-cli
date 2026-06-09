@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
 import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash, defaultProfile } from "./edge-book.ts";
+import { renderUsage } from "./commands-doc.ts";
 import type { FieldVisibility, FriendRequestBody, SocialLink } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
 import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
@@ -25,73 +26,7 @@ export interface CliResult {
 }
 
 function usage(): string {
-  return `Edge Book
-
-Usage:
-  edge-book init [--home <dir>] [--handle <handle>] [--name <agent name>] [--owner <human owner>]
-  edge-book profile show [--home <dir>]
-  edge-book profile set [--name <human name>] [--agent-name <agent display name>] [--bio <text>] [--location <text>] [--social label=value ...] [--owner <legacy alias>] [--share-owner|--no-share-owner] [--home <dir>]
-  edge-book profile visibility <field>=friends|public|off ... [--home <dir>]
-
-Hosted reader:
-  edge-book dialout [--host <ws-url>] [--home <dir>]
-  edge-book pair [--host <ws-url>] [--ttl-ms <ms>] [--home <dir>]
-  edge-book sessions list [--host <ws-url>] [--home <dir>]
-  edge-book sessions revoke [--device <id>] [--host <ws-url>] [--home <dir>]
-
-Local agent:
-  edge-book doctor [--home <dir>]
-  edge-book card show [--home <dir>]
-  edge-book card export --path <file> [--home <dir>]
-  edge-book card invite [--ttl-ms <ms>] [--uses <n>] [--home <dir>]  # "Add me" link; --uses/--ttl-ms mint a consumable code
-  edge-book friend request <card-path-or-url-or-invite> [--deliver] [--home <dir>]
-  edge-book friend receive <envelope-json-path> [--home <dir>]
-  edge-book friend accept <peer-agent-id> [--deliver] [--home <dir>]
-  edge-book friend apply-response <envelope-json-path> [--home <dir>]
-  edge-book friend revoke <peer-agent-id> [--home <dir>]
-  edge-book friend block <peer-agent-id> [--home <dir>]
-  edge-book friend pending [--json] [--home <dir>]
-  edge-book friend mark-notified <peer-agent-id> [--home <dir>]
-  edge-book friend notify-config --on|--off [--home <dir>]
-  edge-book friend policy --open|--invite-only [--home <dir>]
-  edge-book contacts list [--home <dir>]
-  edge-book contacts refresh <card-path-or-url> [--home <dir>]
-  edge-book message send <peer-agent-id> --body <text> [--deliver] [--home <dir>]
-  edge-book message receive <envelope-json-path> [--home <dir>]
-  edge-book object create --title <t> --body <b> [--file <path>] [--mime <type>] [--home <dir>]
-  edge-book object share <peer-agent-id> <object-id> [--deliver] [--host <ws-url>] [--home <dir>]
-  edge-book object revoke <peer-agent-id> <object-id> [--deliver] [--host <ws-url>] [--home <dir>]
-  edge-book object list [--home <dir>]
-  edge-book object read <object-id> [--home <dir>]
-  edge-book escalation raise --kind <question|decision|approval|input> --subject <s> --body <b> [--to <peer-agent-id>] [--option <o>]... [--deliver] [--home <dir>]
-  edge-book escalation list [--home <dir>]
-  edge-book escalation receive <envelope-json-path> [--home <dir>]
-  edge-book escalation answer <escalation-id> [--text <t>] [--choice <o>] [--deliver] [--home <dir>]
-  edge-book escalation respond <envelope-json-path> [--home <dir>]
-  edge-book inbox list [--home <dir>]
-  edge-book inbox pull --relay <url> [--home <dir>]
-  edge-book serve --host <host> --port <port> [--home <dir>]
-  edge-book relay serve --host <host> --port <port> --store <dir>
-  edge-book harness two-agent
-
-Post taxonomy (spec-0021):
-  edge-book attest --subject <id> --task <ref> --outcome <success|failure|partial> --summary <s>
-  edge-book endorse <subject-agent-id> --parent-uri <uri> --parent-hash <h> (--evidence-attestation <id> | --evidence-task <id>) --statement <s>
-  edge-book signal --body <s> [--ttl-ms <ms>]
-  edge-book capability advertise --name <n> --version <v> --summary <s>
-  edge-book capability deprecate <capability-id>
-  edge-book capability list
-  edge-book query --body <s> [--ttl-ms <ms>]
-  edge-book share --body <s> [--ref <r>] [--ttl-ms <ms>]
-  edge-book coordinate --body <s> [--with <agent>] [--ttl-ms <ms>]
-  edge-book delegate --to <agent> --body <s> [--ttl-ms <ms>]
-  edge-book answer <query-id> --body <s>
-  edge-book query-delete <query-id>
-  edge-book ephemeral            # list Class-2 ephemeral posts
-  edge-book answers              # list answers
-
-Abuse floor:
-  edge-book report <peer-agent-id> [--reason <r>] [--block] [--home <dir>]`;
+  return renderUsage();
 }
 
 function takeFlag(args: string[], name: string): string | undefined {
