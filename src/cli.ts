@@ -5,7 +5,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
-import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash } from "./edge-book.ts";
+import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash, defaultProfile } from "./edge-book.ts";
+import type { FieldVisibility, SocialLink } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
 import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
 
@@ -109,6 +110,20 @@ function takeBoolFlag(args: string[], name: string): boolean {
   return true;
 }
 
+// Collect every `--social label=value` occurrence (repeatable), removing them.
+function takeRepeatedKV(args: string[], flag: string): Array<{ label: string; value: string }> {
+  const out: Array<{ label: string; value: string }> = [];
+  let idx: number;
+  while ((idx = args.indexOf(flag)) !== -1) {
+    const raw = args[idx + 1] ?? "";
+    args.splice(idx, 2);
+    const eq = raw.indexOf("=");
+    if (eq === -1) throw new EdgeBookError("bad_social", `--social expects label=value, got "${raw}"`);
+    out.push({ label: raw.slice(0, eq), value: raw.slice(eq + 1) });
+  }
+  return out;
+}
+
 async function readEnvelope(filePath: string) {
   return JSON.parse(await fs.readFile(path.resolve(filePath), "utf8"));
 }
@@ -187,30 +202,56 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     const action = args.shift() || "show";
     if (action === "show") {
       const id = await store.identity();
-      const shared = id.share_owner_label ? "shared with contacts" : "private (default)";
+      const p = defaultProfile(id);
       return {
-        text: `display_name: ${id.display_name}\nowner_label: ${id.owner_label || "(unset)"}\nshare_owner_label: ${id.share_owner_label ? "true" : "false"} (${shared})`,
-        json: { agent_id: id.agent_id, display_name: id.display_name, owner_label: id.owner_label, share_owner_label: Boolean(id.share_owner_label) }
+        text:
+          `display_name: ${id.display_name}\n` +
+          `name: ${p.name || "(unset)"}\n` +
+          `bio: ${p.bio || "(unset)"}\n` +
+          `location: ${p.location || "(unset)"}\n` +
+          `socials: ${(p.socials ?? []).map((s) => `${s.label}=${s.value}`).join(", ") || "(none)"}\n` +
+          `visibility: ${JSON.stringify(p.visibility ?? {})}`,
+        json: { agent_id: id.agent_id, display_name: id.display_name, name: p.name, bio: p.bio, location: p.location, socials: p.socials ?? [], visibility: p.visibility ?? {} },
       };
     }
     if (action === "set") {
-      const displayName = takeFlag(args, "--name");
+      const displayName = takeFlag(args, "--agent-name");
+      const name = takeFlag(args, "--name");
+      const bio = takeFlag(args, "--bio");
+      const location = takeFlag(args, "--location");
+      const socialsKV = takeRepeatedKV(args, "--social");
+      // Legacy aliases kept working.
       const ownerLabel = takeFlag(args, "--owner");
-      // Opt-in (default off): --share-owner exposes owner_label on your card;
-      // --no-share-owner turns it back off.
       const shareOwner = takeBoolFlag(args, "--share-owner");
       const noShareOwner = takeBoolFlag(args, "--no-share-owner");
       const shareOwnerLabel = shareOwner ? true : (noShareOwner ? false : undefined);
-      if (displayName === undefined && ownerLabel === undefined && shareOwnerLabel === undefined) {
-        throw new EdgeBookError("missing_arg", "profile set needs --name (agent name), --owner (human owner), and/or --share-owner|--no-share-owner");
-      }
-      const id = await store.setProfile({ displayName, ownerLabel, shareOwnerLabel });
-      return {
-        text: `Updated profile: display_name=${id.display_name} owner_label=${id.owner_label || "(unset)"} share_owner_label=${id.share_owner_label ? "true" : "false"}`,
-        json: { agent_id: id.agent_id, display_name: id.display_name, owner_label: id.owner_label, share_owner_label: Boolean(id.share_owner_label) }
-      };
+      const id = await store.setProfile({
+        displayName,
+        name,
+        bio,
+        location,
+        socials: socialsKV.length ? socialsKV : undefined,
+        ownerLabel,
+        shareOwnerLabel,
+      });
+      const p = defaultProfile(id);
+      return { text: `Updated profile (v${p.profile_version}): name=${p.name || "(unset)"}`, json: { agent_id: id.agent_id, name: p.name, profile_version: p.profile_version } };
     }
-    throw new EdgeBookError("unknown_action", `Unknown profile action: ${action} (use "show" or "set")`);
+    if (action === "visibility") {
+      const pairs = args.splice(0).map((tok) => {
+        const eq = tok.indexOf("=");
+        if (eq === -1) throw new EdgeBookError("bad_visibility", `expected field=friends|public|off, got "${tok}"`);
+        const field = tok.slice(0, eq);
+        const vis = tok.slice(eq + 1) as FieldVisibility;
+        if (!["friends", "public", "off"].includes(vis)) throw new EdgeBookError("bad_visibility", `bad visibility "${vis}" for ${field}`);
+        return [field, vis] as const;
+      });
+      if (!pairs.length) throw new EdgeBookError("missing_arg", "profile visibility needs at least one field=friends|public|off");
+      const id = await store.setProfile({ visibility: Object.fromEntries(pairs) });
+      const p = defaultProfile(id);
+      return { text: `Updated visibility: ${JSON.stringify(p.visibility ?? {})}`, json: { visibility: p.visibility ?? {} } };
+    }
+    throw new EdgeBookError("unknown_action", `Unknown profile action: ${action} (use "show", "set", or "visibility")`);
   }
 
   if (command === "doctor") {
