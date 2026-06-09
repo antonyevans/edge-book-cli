@@ -24,6 +24,15 @@ export interface EdgeBookConfig {
   // Default ON (treat undefined as true). When false, pendingFriendRequests()
   // returns [] so the notifier cron stays silent.
   notify_on_friend_request?: boolean;
+  // Abuse floor. open_friend_requests default true (treat undefined as true):
+  // accept unsolicited friend requests. false => invite-only (drop unsolicited
+  // requests that carry no valid invite code and have no prior relationship).
+  open_friend_requests?: boolean;
+  // Inbound throttle (per peer and global) for friend_request + object_share.
+  // Defaults applied in code when unset.
+  inbound_max_per_peer?: number;   // default 5
+  inbound_max_global?: number;     // default 60
+  inbound_window_ms?: number;      // default 3600000 (1h)
 }
 
 export interface LocalIdentity {
@@ -307,6 +316,24 @@ export interface MessageEnvelope {
 export interface FriendRequestBody {
   card: AgentCard;
   note: string;
+  invite_code?: string; // present when the requester used an invite link carrying a code
+}
+
+export interface ReportRecord {
+  report_id: string;
+  peer_agent_id: string;
+  reason: string;
+  blocked: boolean;
+  created_at: string;
+  audit_refs: string[];
+}
+
+export interface InviteCode {
+  code: string;
+  created_at: string;
+  expires_at: string; // "" = no expiry
+  max_uses: number;   // 0 = unlimited
+  uses: number;
 }
 
 export interface FriendResponseBody {
@@ -467,6 +494,9 @@ const FEED_FILE = "feed-items.json";
 const APPROVALS_FILE = "approvals.json";
 const ESCALATIONS_FILE = "escalations.json";
 const CONTACT_MUTES_FILE = "contact-mutes.json";
+const REPORTS_FILE = "reports.json";
+const INVITE_CODES_FILE = "invite-codes.json";
+const INBOUND_RATE_FILE = "inbound-rate.json";
 
 // spec-0021 new post-type storage files
 const ATTESTATIONS_FILE = "attestations.json";
@@ -786,6 +816,10 @@ export class EdgeBookStore {
     if (input.direct_url !== undefined) next.direct_url = input.direct_url;
     if (input.relay_url !== undefined) next.relay_url = input.relay_url;
     if (input.notify_on_friend_request !== undefined) next.notify_on_friend_request = input.notify_on_friend_request;
+    if (input.open_friend_requests !== undefined) next.open_friend_requests = input.open_friend_requests;
+    if (input.inbound_max_per_peer !== undefined) next.inbound_max_per_peer = input.inbound_max_per_peer;
+    if (input.inbound_max_global !== undefined) next.inbound_max_global = input.inbound_max_global;
+    if (input.inbound_window_ms !== undefined) next.inbound_window_ms = input.inbound_window_ms;
     await writeJson(this.file(CONFIG_FILE), next);
     return next;
   }
