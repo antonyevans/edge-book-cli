@@ -3,8 +3,8 @@
 // opportunity) to a verified Agent Card or an approval-required candidate.
 // Trust ALWAYS flows from validateCard — Index never asserts an agent_id.
 // Spec: tasks/ea/ea-openclaw-030-.../authoring-spec.md (+ 2026-06-08 addendum).
-import { loadCard, readJson, writeJson, randomId } from "./edge-book.ts";
-import type { AgentCard, EdgeBookStore } from "./edge-book.ts";
+import { loadCard, readJson, writeJson, randomId, EdgeBookError } from "./edge-book.ts";
+import type { AgentCard, EdgeBookStore, MessageEnvelope } from "./edge-book.ts";
 
 export type ResolverStatus = "resolved" | "candidates" | "approval_required" | "not_found";
 export type ProvenanceSource = "local" | "card_file" | "card_url" | "invite" | "registry" | "index";
@@ -221,6 +221,25 @@ export async function resolveTarget(store: EdgeBookStore, target: string, opts: 
     return result;
   }
   return { status: "not_found", next_action: "(no match — check the target)" };
+}
+
+export async function promoteCandidate(store: EdgeBookStore, candidateId: string, note = ""): Promise<MessageEnvelope> {
+  const candidate = await getCandidate(store, candidateId);
+  if (!candidate) throw new EdgeBookError("unknown_candidate", `No candidate ${candidateId}`);
+  if (!candidate.card_url) {
+    await store.audit("candidate.denied", "", { candidate_id: candidateId, reason: "no_card_url" });
+    throw new EdgeBookError("candidate_not_resolvable", "Candidate has no card_url to verify; cannot promote");
+  }
+  const card = await loadCard(candidate.card_url); // validateCard runs inside; throws on forgery
+  const envelope = await store.createFriendRequest(card, note);
+  const map = await readJson<Record<string, Candidate>>(store.file(CANDIDATES_FILE), {});
+  if (map[candidateId]) {
+    map[candidateId].approved = true;
+    map[candidateId].agent_id = card.agent_id;
+    await writeJson(store.file(CANDIDATES_FILE), map);
+  }
+  await store.audit("candidate.promoted", card.agent_id, { candidate_id: candidateId });
+  return envelope;
 }
 
 export type RegistryLookup = (handle: string) => Promise<string | null>; // returns a loadCard-able target
