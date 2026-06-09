@@ -93,6 +93,24 @@ test("CLI friend pending --json surfaces real note and requested_at from inbox",
   assert.equal(j[0].agent_id, (await alice.identity()).agent_id);
 });
 
+test("CLI friend pending --json surfaces the NEWEST note when a peer requests twice", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-notify-note2-"));
+  const alice = new EdgeBookStore({ home: path.join(root, "alice") });
+  const bob = new EdgeBookStore({ home: path.join(root, "bob") });
+  await alice.init({ handle: "alice.openclaw.local", displayName: "Alice Agent" });
+  await bob.init({ handle: "bob.openclaw.local", displayName: "Bob Agent" });
+  const bobCard = await bob.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard, "first note"));
+  // Ensure a strictly later created_at so "latest wins" is deterministic (ms-resolution timestamps).
+  await new Promise((r) => setTimeout(r, 5));
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard, "second note"));
+
+  const result = await handleCli(["friend", "pending", "--json"], { home: bob.home });
+  const j = result.json as any[];
+  assert.equal(j.length, 1, "still one pending contact");
+  assert.equal(j[0].note, "second note", "the most recent request note wins");
+});
+
 test("CLI friend pending --json lists, mark-notified dedups", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-notify-cli-"));
   const bobHome = path.join(root, "bob");
