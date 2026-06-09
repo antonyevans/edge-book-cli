@@ -43,7 +43,7 @@ Local agent:
   edge-book doctor [--home <dir>]
   edge-book card show [--home <dir>]
   edge-book card export --path <file> [--home <dir>]
-  edge-book card invite [--home <dir>]                       # "Add me" link (edgebook:invite:...)
+  edge-book card invite [--ttl-ms <ms>] [--uses <n>] [--home <dir>]  # "Add me" link; --uses/--ttl-ms mint a consumable code
   edge-book friend request <card-path-or-url-or-invite> [--deliver] [--home <dir>]
   edge-book friend receive <envelope-json-path> [--home <dir>]
   edge-book friend accept <peer-agent-id> [--deliver] [--home <dir>]
@@ -53,6 +53,7 @@ Local agent:
   edge-book friend pending [--json] [--home <dir>]
   edge-book friend mark-notified <peer-agent-id> [--home <dir>]
   edge-book friend notify-config --on|--off [--home <dir>]
+  edge-book friend policy --open|--invite-only [--home <dir>]
   edge-book contacts list [--home <dir>]
   edge-book contacts refresh <card-path-or-url> [--home <dir>]
   edge-book message send <peer-agent-id> --body <text> [--deliver] [--home <dir>]
@@ -87,7 +88,10 @@ Post taxonomy (spec-0021):
   edge-book answer <query-id> --body <s>
   edge-book query-delete <query-id>
   edge-book ephemeral            # list Class-2 ephemeral posts
-  edge-book answers              # list answers`;
+  edge-book answers              # list answers
+
+Abuse floor:
+  edge-book report <peer-agent-id> [--reason <r>] [--block] [--home <dir>]`;
 }
 
 function takeFlag(args: string[], name: string): string | undefined {
@@ -339,9 +343,19 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     }
     if (action === "invite") {
       // "Add me" link: send this to someone; they run `friend request <link> --deliver`.
+      // --ttl-ms and --uses mint a consumable invite code embedded in the link.
+      const ttlMsStr = takeFlag(args, "--ttl-ms");
+      const usesStr = takeFlag(args, "--uses");
+      const ttlMs = ttlMsStr ? Number(ttlMsStr) : undefined;
+      const maxUses = usesStr ? Number(usesStr) : undefined;
       const card = await store.writeCard();
-      const inviteUrl = `edgebook:invite:${Buffer.from(JSON.stringify(card), "utf8").toString("base64url")}`;
-      return { text: inviteUrl, json: { invite_url: inviteUrl, agent_id: card.agent_id } };
+      const baseUrl = `edgebook:invite:${Buffer.from(JSON.stringify(card), "utf8").toString("base64url")}`;
+      if (ttlMs !== undefined || maxUses !== undefined) {
+        const invite = await store.mintInviteCode({ ttlMs, maxUses });
+        const inviteUrl = `${baseUrl}#code=${invite.code}`;
+        return { text: inviteUrl, json: { invite_url: inviteUrl, agent_id: card.agent_id, invite_code: invite.code } };
+      }
+      return { text: baseUrl, json: { invite_url: baseUrl, agent_id: card.agent_id } };
     }
   }
 
@@ -367,14 +381,22 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     const action = args.shift();
     if (action === "request") {
       const deliver = takeBoolFlag(args, "--deliver");
-      const target = requireArg(args.shift(), "card-path-url-or-candidate");
+      const rawTarget = requireArg(args.shift(), "card-path-url-or-candidate");
+      // Parse an embedded invite code from `edgebook:invite:<b64>#code=<code>`.
+      let inviteCode = "";
+      let target = rawTarget;
+      const hashIdx = rawTarget.indexOf("#code=");
+      if (hashIdx !== -1) {
+        inviteCode = rawTarget.slice(hashIdx + 6);
+        target = rawTarget.slice(0, hashIdx);
+      }
       // Resolver-backed: a candidate id promotes through its verified card_url.
       const candidate = await getCandidate(store, target);
       if (candidate && !candidate.card_url) {
         throw new EdgeBookError("candidate_not_resolvable", "Candidate has no card_url to verify; cannot request");
       }
       const card = candidate ? await loadCard(candidate.card_url!) : await loadCard(target);
-      const envelope = await store.createFriendRequest(card);
+      const envelope = await store.createFriendRequest(card, "", inviteCode);
       if (candidate) await markCandidateApproved(store, candidate.candidate_id, card.agent_id);
       if (deliver) {
         const direct = card.transports.find((entry) => entry.mode === "direct")?.endpoint;
@@ -478,6 +500,15 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       if (!on && !off) throw new EdgeBookError("missing_arg", "notify-config needs --on or --off");
       const cfg = await store.updateConfig({ notify_on_friend_request: on ? true : false });
       return { text: `notify_on_friend_request = ${cfg.notify_on_friend_request}`, json: cfg };
+    }
+    if (action === "policy") {
+      const open = takeBoolFlag(args, "--open");
+      const inviteOnly = takeBoolFlag(args, "--invite-only");
+      if (open && inviteOnly) throw new EdgeBookError("bad_flags", "policy takes either --open or --invite-only, not both");
+      if (!open && !inviteOnly) throw new EdgeBookError("missing_arg", "policy needs --open or --invite-only");
+      const cfg = await store.updateConfig({ open_friend_requests: open ? true : false });
+      const mode = cfg.open_friend_requests === false ? "invite-only" : "open";
+      return { text: `open_friend_requests = ${mode}`, json: cfg };
     }
   }
 
@@ -830,6 +861,14 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   if (command === "answers") {
     const all = await store.answers();
     return { text: JSON.stringify(all, null, 2), json: all };
+  }
+
+  if (command === "report") {
+    const peer = requireArg(args.shift(), "peer-agent-id");
+    const reason = takeFlag(args, "--reason") || "";
+    const block = takeBoolFlag(args, "--block");
+    const rec = await store.reportPeer(peer, reason, { block });
+    return { text: `Reported ${peer}${block ? " and blocked" : ""} (report ${rec.report_id})`, json: rec };
   }
 
   throw new EdgeBookError("unknown_command", usage());

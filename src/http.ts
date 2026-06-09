@@ -237,6 +237,14 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
     return true;
   }
 
+  const contactReportMatch = /^\/api\/contacts\/([^/]+)\/report$/.exec(url.pathname);
+  if (req.method === "POST" && contactReportMatch) {
+    const body = await readJsonBody<{ reason?: string; block?: boolean }>(req);
+    const report = await store.reportPeer(decodeURIComponent(contactReportMatch[1]), body.reason || "", { block: Boolean(body.block) });
+    sendJson(res, 200, { report });
+    return true;
+  }
+
   const messagesMatch = /^\/api\/messages\/([^/]+)$/.exec(url.pathname);
   if (req.method === "GET" && messagesMatch) {
     const peerId = decodeURIComponent(messagesMatch[1]);
@@ -1305,7 +1313,7 @@ function dashboardHtml(): string {
       if (state.view === "contacts") {
         html = values(state.contacts).map((contact) => item(contact.display_name || "Unnamed contact", contact.aliases?.[0] || contact.card_url || peerEndpointLabel(contact), [
           state.mutes[contact.peer_agent_id] ? "muted" : "active",
-        ], contact, contact.relationship_state === "blocked" ? "risk" : "", state.mutes[contact.peer_agent_id] ? "" : action("Mute", "contact-mute", contact.peer_agent_id), [
+        ], contact, contact.relationship_state === "blocked" ? "risk" : "", (state.mutes[contact.peer_agent_id] ? "" : action("Mute", "contact-mute", contact.peer_agent_id)) + action("Report", "contact-report", contact.peer_agent_id, "risk"), [
           ["relationship", labelize(contact.relationship_state)],
           ["grants", (contact.capability_grants || []).length],
           ["endpoint", (contact.known_endpoints || []).length ? "known" : "missing"],
@@ -1427,6 +1435,11 @@ function dashboardHtml(): string {
         if (name === "feed-read") await postJson("/api/feed/" + encodeURIComponent(id) + "/read");
         if (name === "feed-hide") await postJson("/api/feed/" + encodeURIComponent(id) + "/hide", { reason: prompt("Reason", "hidden by owner") || "" });
         if (name === "contact-mute") await postJson("/api/contacts/" + encodeURIComponent(id) + "/mute", { reason: prompt("Reason", "muted by owner") || "" });
+        if (name === "contact-report") {
+          const reason = prompt("Reason for report", "") || "";
+          const blockStr = prompt("Also block this contact? (yes/no)", "no") || "no";
+          await postJson("/api/contacts/" + encodeURIComponent(id) + "/report", { reason, block: blockStr.trim().toLowerCase() === "yes" });
+        }
         if (name === "post-approve") await postJson("/api/posts/" + encodeURIComponent(id) + "/approve");
         if (name === "post-edit") {
           const current = state.posts[id] || {};

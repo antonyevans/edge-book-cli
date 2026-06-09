@@ -24,6 +24,15 @@ export interface EdgeBookConfig {
   // Default ON (treat undefined as true). When false, pendingFriendRequests()
   // returns [] so the notifier cron stays silent.
   notify_on_friend_request?: boolean;
+  // Abuse floor. open_friend_requests default true (treat undefined as true):
+  // accept unsolicited friend requests. false => invite-only (drop unsolicited
+  // requests that carry no valid invite code and have no prior relationship).
+  open_friend_requests?: boolean;
+  // Inbound throttle (per peer and global) for friend_request + object_share.
+  // Defaults applied in code when unset.
+  inbound_max_per_peer?: number;   // default 5
+  inbound_max_global?: number;     // default 60
+  inbound_window_ms?: number;      // default 3600000 (1h)
 }
 
 export interface LocalIdentity {
@@ -307,6 +316,24 @@ export interface MessageEnvelope {
 export interface FriendRequestBody {
   card: AgentCard;
   note: string;
+  invite_code?: string; // present when the requester used an invite link carrying a code
+}
+
+export interface ReportRecord {
+  report_id: string;
+  peer_agent_id: string;
+  reason: string;
+  blocked: boolean;
+  created_at: string;
+  audit_refs: string[];
+}
+
+export interface InviteCode {
+  code: string;
+  created_at: string;
+  expires_at: string; // "" = no expiry
+  max_uses: number;   // 0 = unlimited
+  uses: number;
 }
 
 export interface FriendResponseBody {
@@ -467,6 +494,9 @@ const FEED_FILE = "feed-items.json";
 const APPROVALS_FILE = "approvals.json";
 const ESCALATIONS_FILE = "escalations.json";
 const CONTACT_MUTES_FILE = "contact-mutes.json";
+const REPORTS_FILE = "reports.json";
+const INVITE_CODES_FILE = "invite-codes.json";
+const INBOUND_RATE_FILE = "inbound-rate.json";
 
 // spec-0021 new post-type storage files
 const ATTESTATIONS_FILE = "attestations.json";
@@ -786,6 +816,10 @@ export class EdgeBookStore {
     if (input.direct_url !== undefined) next.direct_url = input.direct_url;
     if (input.relay_url !== undefined) next.relay_url = input.relay_url;
     if (input.notify_on_friend_request !== undefined) next.notify_on_friend_request = input.notify_on_friend_request;
+    if (input.open_friend_requests !== undefined) next.open_friend_requests = input.open_friend_requests;
+    if (input.inbound_max_per_peer !== undefined) next.inbound_max_per_peer = input.inbound_max_per_peer;
+    if (input.inbound_max_global !== undefined) next.inbound_max_global = input.inbound_max_global;
+    if (input.inbound_window_ms !== undefined) next.inbound_window_ms = input.inbound_window_ms;
     await writeJson(this.file(CONFIG_FILE), next);
     return next;
   }
@@ -973,7 +1007,7 @@ export class EdgeBookStore {
     return event;
   }
 
-  async createFriendRequest(targetCard: AgentCard, note = ""): Promise<MessageEnvelope> {
+  async createFriendRequest(targetCard: AgentCard, note = "", inviteCode = ""): Promise<MessageEnvelope> {
     const identity = await this.identity();
     validateCard(targetCard);
     const existing = (await this.contacts())[targetCard.agent_id];
@@ -981,6 +1015,7 @@ export class EdgeBookStore {
     await this.upsertContactFromCard(targetCard, "request_sent");
     await this.setRelationship(targetCard.agent_id, "request_sent", "FriendRequest", note);
     const card = await this.writeCard();
+    const body: FriendRequestBody = { card, note, ...(inviteCode ? { invite_code: inviteCode } : {}) };
     return this.signEnvelope({
       type: "friend_request",
       to_agent_id: targetCard.agent_id,
@@ -988,16 +1023,66 @@ export class EdgeBookStore {
       capability_id: "",
       ref: "",
       transport: "local",
-      body: { card, note } satisfies FriendRequestBody
+      body: body as unknown as Record<string, unknown>
     });
+  }
+
+  // NOTE — concurrency + sybil-defense assumptions (v1):
+  // The GLOBAL cap (inbound_max_global) is the real sybil defense: it limits total
+  // inbound load regardless of how many distinct identities an attacker mints.
+  // The per-peer cap only slows a single persistent identity; it provides weaker
+  // protection because `from_agent_id` is attacker-mintable (any key can be generated).
+  //
+  // The rate file is read-modify-write.  This is safe under the assumption that the
+  // receive loop is effectively serial for a single-owner edge agent (one active
+  // session at a time).  Concurrent receives — e.g. two simultaneous HTTP deliveries
+  // on a multi-machine deployment — could undercount hits, allowing bursts past the
+  // cap.  A shared atomic lock or external counter store is the follow-up (ea-claude-090).
+  private async enforceInboundRate(peerAgentId: string): Promise<void> {
+    const config = await this.config();
+    const windowMs = config.inbound_window_ms ?? 3_600_000;
+    const maxPeer = config.inbound_max_per_peer ?? 5;
+    const maxGlobal = config.inbound_max_global ?? 60;
+    const cutoff = Date.now() - windowMs;
+    const all = await readJson<Record<string, number[]>>(this.file(INBOUND_RATE_FILE), {});
+    for (const k of Object.keys(all)) {
+      all[k] = all[k].filter((t) => t > cutoff);
+      if (!all[k].length) delete all[k];
+    }
+    const peerCount = (all[peerAgentId] ?? []).length;
+    const globalCount = Object.values(all).reduce((n, arr) => n + arr.length, 0);
+    if (peerCount >= maxPeer || globalCount >= maxGlobal) {
+      await this.audit("inbound.rate_limited", peerAgentId, { peerCount, globalCount });
+      throw new EdgeBookError("rate_limited", "Inbound request rate limit exceeded");
+    }
+    all[peerAgentId] = [...(all[peerAgentId] ?? []), Date.now()];
+    await writeJson(this.file(INBOUND_RATE_FILE), all);
   }
 
   async receiveFriendRequest(envelope: MessageEnvelope): Promise<AgentContactRecord> {
     await this.verifyEnvelope(envelope);
     if (envelope.type !== "friend_request") throw new EdgeBookError("wrong_message_type", "Expected friend_request envelope");
+    await this.enforceInboundRate(envelope.from_agent_id);
     const body = envelope.body as unknown as FriendRequestBody;
     validateCard(body.card);
     if (body.card.agent_id !== envelope.from_agent_id) throw new EdgeBookError("agent_id_mismatch", "Friend request card does not match sender");
+    // Invite-only gate: when open_friend_requests is explicitly false, require either
+    // a prior solicited/active relationship or a valid invite code.
+    // Only "request_sent" (we reached out first, so their reply is expected) and
+    // "friend" (already connected) bypass the code requirement.  States like
+    // "rejected", "revoked", and "blocked" are NOT a bypass — those peers must
+    // supply a fresh invite code just like a cold stranger would.
+    if ((await this.config()).open_friend_requests === false) {
+      const ALLOWED_INVITE_BYPASS: RelationshipState[] = ["request_sent", "friend"];
+      const known = (await this.contacts())[envelope.from_agent_id]?.relationship_state;
+      const allowed =
+        (known !== undefined && ALLOWED_INVITE_BYPASS.includes(known)) ||
+        (body.invite_code ? await this.consumeInviteCode(body.invite_code) : false);
+      if (!allowed) {
+        await this.audit("inbound.unsolicited_dropped", envelope.from_agent_id, {});
+        throw new EdgeBookError("unsolicited_dropped", "Invite-only: unsolicited request without a valid invite code");
+      }
+    }
     const contact = await this.upsertContactFromCard(body.card, "request_received");
     await this.setRelationship(envelope.from_agent_id, "request_received", "FriendRequest", body.note);
     await appendJsonl(this.file(INBOX_FILE), envelope);
@@ -1195,6 +1280,75 @@ export class EdgeBookStore {
 
   async block(peerAgentId: string): Promise<void> {
     await this.setRelationship(peerAgentId, "blocked", "Block", "blocked");
+  }
+
+  async reports(): Promise<ReportRecord[]> {
+    return readJson<ReportRecord[]>(this.file(REPORTS_FILE), []);
+  }
+
+  async inviteCodes(): Promise<InviteCode[]> {
+    return readJson<InviteCode[]>(this.file(INVITE_CODES_FILE), []);
+  }
+
+  async mintInviteCode(opts: { ttlMs?: number; maxUses?: number } = {}): Promise<InviteCode> {
+    const invite: InviteCode = {
+      code: randomId("invite"),
+      created_at: now(),
+      expires_at: opts.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : "",
+      max_uses: opts.maxUses ?? 0,
+      uses: 0,
+    };
+    const codes = await this.inviteCodes();
+    codes.push(invite);
+    await writeJson(this.file(INVITE_CODES_FILE), codes);
+    return invite;
+  }
+
+  // NOTE — serial-receive assumption (v1):
+  // consumeInviteCode is read-modify-write.  Under concurrent receives, two requests
+  // carrying the same single-use code could both read uses=0, both pass the max_uses
+  // check, and both increment — effectively spending the code twice.  This is safe for
+  // a single-owner serial receive loop; a locking primitive is needed for concurrent
+  // multi-machine deployments (ties to the same ea-claude-090 follow-up).
+  private async consumeInviteCode(code: string): Promise<boolean> {
+    const codes = await this.inviteCodes();
+    const idx = codes.findIndex((c) => c.code === code);
+    if (idx === -1) return false;
+    const invite = codes[idx];
+    // Check expiry
+    if (invite.expires_at && new Date(invite.expires_at) < new Date()) return false;
+    // Check max_uses (0 = unlimited)
+    if (invite.max_uses > 0 && invite.uses >= invite.max_uses) return false;
+    invite.uses += 1;
+    codes[idx] = invite;
+    await writeJson(this.file(INVITE_CODES_FILE), codes);
+    return true;
+  }
+
+  async reportPeer(peerAgentId: string, reason = "", opts: { block?: boolean } = {}): Promise<ReportRecord> {
+    const auditRef = await this.audit("peer.reported", peerAgentId, { reason, block: Boolean(opts.block) });
+    // Attempt the block before building the record so rec.blocked reflects
+    // whether a block ACTUALLY happened (contact must exist for block() to fire).
+    let actuallyBlocked = false;
+    if (opts.block) {
+      const contacts = await this.contacts();
+      if (contacts[peerAgentId]) {
+        await this.block(peerAgentId);
+        actuallyBlocked = true;
+      }
+    }
+    const rec: ReportRecord = {
+      report_id: randomId("report"),
+      peer_agent_id: peerAgentId,
+      reason,
+      blocked: actuallyBlocked,
+      created_at: now(),
+      audit_refs: [auditRef],
+    };
+    const existingReports = await readJson<ReportRecord[]>(this.file(REPORTS_FILE), []);
+    existingReports.push(rec);
+    await writeJson(this.file(REPORTS_FILE), existingReports);
+    return rec;
   }
 
   async issueGrant(subjectAgentId: string, scopes: string[], expiresAt = ""): Promise<CapabilityGrant> {
@@ -1831,6 +1985,7 @@ export class EdgeBookStore {
   async receiveObjectShare(envelope: MessageEnvelope): Promise<SharedObject> {
     await this.verifyEnvelope(envelope);
     if (envelope.type !== "object_share") throw new EdgeBookError("wrong_message_type", "Expected object_share envelope");
+    await this.enforceInboundRate(envelope.from_agent_id);
     const identity = await this.identity();
     const body = envelope.body as unknown as ObjectShareBody;
     const { object, grant } = body;
