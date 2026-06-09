@@ -280,7 +280,24 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       const p = defaultProfile(id);
       return { text: `Updated visibility: ${JSON.stringify(p.visibility ?? {})}`, json: { visibility: p.visibility ?? {} } };
     }
-    throw new EdgeBookError("unknown_action", `Unknown profile action: ${action} (use "show", "set", or "visibility")`);
+    if (action === "broadcast") {
+      const deliver = takeBoolFlag(args, "--deliver");
+      const envelopes = await store.broadcastProfileEnvelopes();
+      if (deliver) {
+        const hostUrl = parseHost(args, ctx);
+        for (const envelope of envelopes) {
+          try {
+            await deliverToPeer(store, envelope, envelope.to_agent_id);
+          } catch (error) {
+            if (!(error instanceof EdgeBookError) || error.code !== "no_route") throw error;
+            await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+          }
+        }
+        return { text: `Broadcast profile to ${envelopes.length} friend(s)`, json: { count: envelopes.length } };
+      }
+      return { text: `Built ${envelopes.length} profile_share envelope(s)`, json: { envelopes } };
+    }
+    throw new EdgeBookError("unknown_action", `Unknown profile action: ${action} (use "show", "set", "visibility", or "broadcast")`);
   }
 
   if (command === "doctor") {

@@ -98,3 +98,16 @@ test("receiveEnvelope surfaces a profile_share follow-up for a friend_response",
   const result = await alice.receiveEnvelope(accept);
   assert.ok(result && (result as MessageEnvelope).type === "profile_share");
 });
+
+test("broadcastProfileEnvelopes targets every current friend", async () => {
+  const { alice, bob } = await twoAgents();
+  const aliceCard = await alice.writeCard();
+  const bobCard = await bob.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+  await bob.receiveProfileShare((await alice.applyFriendResponse(await bob.acceptFriend(aliceCard.agent_id)))!);
+  await alice.setProfile({ bio: "edited" });
+  const envs = await alice.broadcastProfileEnvelopes();
+  assert.equal(envs.length, 1);
+  assert.equal(envs[0].to_agent_id, bobCard.agent_id);
+  assert.equal(envs[0].type, "profile_share");
+});
