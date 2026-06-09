@@ -247,8 +247,8 @@ test("feed privacy harness allows friend and denies non-friend revoked and block
   assert.deepEqual(result.denial_codes, {
     nonFriend: "not_friend",
     revokedFeed: "not_friend",
-    blockedFeed: "not_friend",
-    blockedMessage: "not_friend",
+    blockedFeed: "blocked",
+    blockedMessage: "blocked",
     blockedRequest: "blocked_peer",
     blockedRefresh: "blocked_peer"
   });

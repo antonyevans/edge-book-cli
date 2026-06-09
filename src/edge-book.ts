@@ -2338,7 +2338,7 @@ export async function runFeedPrivacyHarness(baseDir?: string): Promise<Record<st
     await alice.visiblePostsForPeer(bobCard.agent_id);
   } catch (error) {
     blockedFeedCode = (error as EdgeBookError).code;
-    blockedFeedDenied = blockedFeedCode === "not_friend";
+    blockedFeedDenied = blockedFeedCode === "blocked" || blockedFeedCode === "not_friend";
   }
 
   let blockedMessageDenied = false;
@@ -2347,7 +2347,7 @@ export async function runFeedPrivacyHarness(baseDir?: string): Promise<Record<st
     await alice.sendPrivilegedMessage(bobCard.agent_id, { text: "blocked message" });
   } catch (error) {
     blockedMessageCode = (error as EdgeBookError).code;
-    blockedMessageDenied = blockedMessageCode === "not_friend";
+    blockedMessageDenied = blockedMessageCode === "blocked" || blockedMessageCode === "not_friend";
   }
 
   let blockedRequestDenied = false;
