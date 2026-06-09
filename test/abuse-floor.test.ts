@@ -14,6 +14,19 @@ async function pair() {
   return { alice, bob };
 }
 
+test("reportPeer records evidence and can auto-block", async () => {
+  const { alice, bob } = await pair();
+  const aliceId = (await alice.identity()).agent_id;
+  const bobCard = await bob.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+  const rec = await bob.reportPeer(aliceId, "spam", { block: true });
+  assert.equal(rec.peer_agent_id, aliceId);
+  assert.equal(rec.reason, "spam");
+  assert.equal(rec.blocked, true);
+  assert.equal((await bob.reports()).length, 1);
+  assert.equal((await bob.contacts())[aliceId].relationship_state, "blocked");
+});
+
 test("inbound friend_request throttle drops a per-peer flood with rate_limited", async () => {
   const { alice, bob } = await pair();
   const bobCard = await bob.writeCard();

@@ -87,7 +87,10 @@ Post taxonomy (spec-0021):
   edge-book answer <query-id> --body <s>
   edge-book query-delete <query-id>
   edge-book ephemeral            # list Class-2 ephemeral posts
-  edge-book answers              # list answers`;
+  edge-book answers              # list answers
+
+Abuse floor:
+  edge-book report <peer-agent-id> [--reason <r>] [--block] [--home <dir>]`;
 }
 
 function takeFlag(args: string[], name: string): string | undefined {
@@ -830,6 +833,14 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   if (command === "answers") {
     const all = await store.answers();
     return { text: JSON.stringify(all, null, 2), json: all };
+  }
+
+  if (command === "report") {
+    const peer = requireArg(args.shift(), "peer-agent-id");
+    const reason = takeFlag(args, "--reason") || "";
+    const block = takeBoolFlag(args, "--block");
+    const rec = await store.reportPeer(peer, reason, { block });
+    return { text: `Reported ${peer}${block ? " and blocked" : ""} (report ${rec.report_id})`, json: rec };
   }
 
   throw new EdgeBookError("unknown_command", usage());

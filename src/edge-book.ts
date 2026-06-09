@@ -1253,6 +1253,31 @@ export class EdgeBookStore {
     await this.setRelationship(peerAgentId, "blocked", "Block", "blocked");
   }
 
+  async reports(): Promise<ReportRecord[]> {
+    return readJson<ReportRecord[]>(this.file(REPORTS_FILE), []);
+  }
+
+  async reportPeer(peerAgentId: string, reason = "", opts: { block?: boolean } = {}): Promise<ReportRecord> {
+    const auditRef = await this.audit("peer.reported", peerAgentId, { reason, block: Boolean(opts.block) });
+    const rec: ReportRecord = {
+      report_id: randomId("report"),
+      peer_agent_id: peerAgentId,
+      reason,
+      blocked: Boolean(opts.block),
+      created_at: now(),
+      audit_refs: [auditRef],
+    };
+    const existingReports = await readJson<ReportRecord[]>(this.file(REPORTS_FILE), []);
+    existingReports.push(rec);
+    await writeJson(this.file(REPORTS_FILE), existingReports);
+    if (opts.block) {
+      // block() is a no-op-safe state set; guard if the contact is unknown.
+      const contacts = await this.contacts();
+      if (contacts[peerAgentId]) await this.block(peerAgentId);
+    }
+    return rec;
+  }
+
   async issueGrant(subjectAgentId: string, scopes: string[], expiresAt = ""): Promise<CapabilityGrant> {
     const identity = await this.identity();
     const unsigned: Omit<CapabilityGrant, "signature"> = {
