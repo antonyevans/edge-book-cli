@@ -277,8 +277,9 @@ export function makeRegistryProvider(lookup: RegistryLookup): ResolverProvider {
       let card;
       try {
         card = await loadCard(cardTarget); // validateCard inside (sig + expiry)
-      } catch {
-        return null;
+      } catch (e) {
+        if (e instanceof EdgeBookError && e.code === "card_fetch_failed") return null; // genuine registry miss → fall through
+        throw e; // invalid_card / card_expired → surface the forgery loudly
       }
       return {
         kind: "card",
