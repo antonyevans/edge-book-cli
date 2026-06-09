@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import crypto from "node:crypto";
 import { EdgeBookStore, slugifyHandle, isValidHandle, validateCard } from "../src/edge-book.ts";
+import { shouldClaimHandle } from "../src/dialout.ts";
 
 function canon(v: unknown): string {
   if (v === null || typeof v !== "object") return JSON.stringify(v);
@@ -62,4 +63,12 @@ test("buildHandleClaim produces a relay-verifiable claim", async () => {
 test("buildHandleClaim throws if handle is still the default", async () => {
   const s = await store();
   await assert.rejects(() => s.buildHandleClaim(), /invalid_handle/);
+});
+
+test("shouldClaimHandle skips default/empty, sends for a real handle", () => {
+  assert.equal(shouldClaimHandle("agent.openclaw.local"), false);
+  assert.equal(shouldClaimHandle(""), false);
+  assert.equal(shouldClaimHandle(undefined), false);
+  assert.equal(shouldClaimHandle("antony-evans"), true);
+  assert.equal(shouldClaimHandle("Bad Handle"), false);
 });
