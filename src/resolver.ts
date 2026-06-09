@@ -3,6 +3,7 @@
 // opportunity) to a verified Agent Card or an approval-required candidate.
 // Trust ALWAYS flows from validateCard — Index never asserts an agent_id.
 // Spec: tasks/ea/ea-openclaw-030-.../authoring-spec.md (+ 2026-06-08 addendum).
+import { loadCard } from "./edge-book.ts";
 import type { AgentCard, EdgeBookStore } from "./edge-book.ts";
 
 export type ResolverStatus = "resolved" | "candidates" | "approval_required" | "not_found";
@@ -88,3 +89,26 @@ export const localContactProvider: ResolverProvider = {
     };
   },
 };
+
+function cardProvider(name: string, source: ProvenanceSource, match: (t: string) => boolean): ResolverProvider {
+  return {
+    name,
+    priority: 90,
+    async resolve(_store, target) {
+      if (!match(target)) return null;
+      const card = await loadCard(target); // validateCard runs inside; throws on forgery
+      return {
+        kind: "card",
+        card,
+        agent_id: card.agent_id,
+        provenance: { source, confidence: "high", display_name: card.handle, reason: `${source} card verified` },
+      };
+    },
+  };
+}
+
+export const inviteProvider = cardProvider("invite", "invite", (t) => t.startsWith("edgebook:invite:"));
+export const cardUrlProvider = cardProvider("card_url", "card_url", (t) => /^https?:\/\//.test(t));
+export const cardFileProvider = cardProvider("card_file", "card_file", (t) =>
+  t.startsWith("file://") || t.startsWith("/") || t.startsWith("./") || t.endsWith(".json")
+);
