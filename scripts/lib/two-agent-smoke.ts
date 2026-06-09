@@ -110,6 +110,8 @@ export async function runSmoke(opts: SmokeOptions): Promise<SmokeResult> {
   const alice = await createAgent(dirs.alice, "alice.smoke.local");
   const bob = await createAgent(dirs.bob, "bob.smoke.local");
   const carol = await createAgent(dirs.carol, "carol.smoke.local");
+  await alice.store.setProfile({ name: "Alice", bio: "Alice bio", socials: [{ label: "telegram", value: "@alice" }] });
+  await bob.store.setProfile({ name: "Bob", bio: "Bob bio" });
   const ctx: SmokeContext = {
     alice: alice.store, bob: bob.store, carol: carol.store,
     aliceCard: alice.card, bobCard: bob.card, carolCard: carol.card,
@@ -138,6 +140,20 @@ export async function runSmoke(opts: SmokeOptions): Promise<SmokeResult> {
       const bf = await relationship(bob.store, alice.card.agent_id);
       if (af !== "friend" || bf !== "friend") throw new Error(`states a=${af} b=${bf}`);
       return "both friend";
+    });
+
+    await step(`profile: bidirectional friend profile exchange (via ${transport.name})`, async () => {
+      // Alice applies the accepted friend_response and gets back a follow-up profile_share to deliver.
+      const followUpEnv = await alice.store.buildProfileShareEnvelope(bob.card.agent_id);
+      await transport.deliver(alice, bob, followUpEnv, async () => {
+        const contact = (await bob.store.contacts())[alice.card.agent_id];
+        return Boolean(contact?.friend_profile?.name);
+      });
+      const aliceSeesBob = (await alice.store.contacts())[bob.card.agent_id].friend_profile?.name === "Bob";
+      const bobSeesAlice = (await bob.store.contacts())[alice.card.agent_id].friend_profile?.name === "Alice";
+      if (!aliceSeesBob) throw new Error("alice does not see Bob's friend profile");
+      if (!bobSeesAlice) throw new Error("bob does not see Alice's friend profile");
+      return `bidirectional: alice sees Bob=${aliceSeesBob}, bob sees Alice=${bobSeesAlice}`;
     });
 
     if (opts.hooks?.afterFriend) await opts.hooks.afterFriend(ctx);

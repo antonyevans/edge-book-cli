@@ -2470,6 +2470,8 @@ export async function runTwoAgentHarness(baseDir?: string): Promise<Record<strin
   const bob = new EdgeBookStore({ home: path.join(root, "bob") });
   await alice.init({ handle: "alice.openclaw.local", displayName: "Alice Agent", ownerLabel: "Alice" });
   await bob.init({ handle: "bob.openclaw.local", displayName: "Bob Agent", ownerLabel: "Bob" });
+  await alice.setProfile({ name: "Alice", bio: "Alice bio", socials: [{ label: "telegram", value: "@alice" }] });
+  await bob.setProfile({ name: "Bob", bio: "Bob bio" });
   const aliceCard = await alice.writeCard();
   const bobCard = await bob.writeCard();
 
@@ -2484,7 +2486,8 @@ export async function runTwoAgentHarness(baseDir?: string): Promise<Record<strin
 
   await bob.receiveFriendRequest(request);
   const accept = await bob.acceptFriend(aliceCard.agent_id);
-  await alice.applyFriendResponse(accept);
+  const aliceFollowUp = await alice.applyFriendResponse(accept);
+  if (aliceFollowUp) await bob.receiveProfileShare(aliceFollowUp);
   const message = await alice.sendPrivilegedMessage(bobCard.agent_id, { text: "hello Bob" });
   await bob.receivePrivilegedMessage(message);
 
@@ -2517,13 +2520,17 @@ export async function runTwoAgentHarness(baseDir?: string): Promise<Record<strin
   const aliceContacts = await alice.contacts();
   const bobAudit = await bob.auditEvents();
 
+  const aliceSeesBob = (await alice.contacts())[bobCard.agent_id].friend_profile?.name === "Bob";
+  const bobSeesAlice = (await bob.contacts())[aliceCard.agent_id].friend_profile?.name === "Alice";
+
   const assertions = {
     deniedBeforeAccept,
     replayDenied,
     revokedDenied,
     blockedDenied,
     aliceHasBobContact: Boolean(aliceContacts[bobCard.agent_id]),
-    bobAuditWritten: bobAudit.length > 0
+    bobAuditWritten: bobAudit.length > 0,
+    profileExchange: aliceSeesBob && bobSeesAlice,
   };
   const passed = Object.values(assertions).every(Boolean);
   if (!passed) throw new EdgeBookError("harness_failed", `Harness failed: ${JSON.stringify(assertions)}`);
