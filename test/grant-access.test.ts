@@ -76,3 +76,13 @@ test("feed read still works with an intact self-issued grant", async () => {
   await alice.issueGrant(bobCard.agent_id, ["feed.read.friends"]);
   await assert.doesNotReject(() => alice.visiblePostsForPeer(bobCard.agent_id));
 });
+
+test("message send is denied with an explicit blocked error after blocking the peer", async () => {
+  const root = await tempRoot();
+  const { alice, bobCard } = await befriend(root);
+  await alice.block(bobCard.agent_id);
+  await assert.rejects(
+    () => alice.sendPrivilegedMessage(bobCard.agent_id, { text: "after block" }),
+    (error) => error instanceof EdgeBookError && error.code === "blocked"
+  );
+});

@@ -882,6 +882,7 @@ export class EdgeBookStore {
     const contacts = await this.contacts();
     const contact = contacts[peerAgentId];
     if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
+    if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked", `Peer ${peerAgentId} is blocked`);
     if (contact.relationship_state !== "friend") {
       throw new EdgeBookError("not_friend", `Cannot send friend-gated message to relationship_state=${contact.relationship_state}`);
     }
@@ -2043,6 +2044,7 @@ export class EdgeBookStore {
     const contacts = await this.contacts();
     const contact = contacts[peerAgentId];
     if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
+    if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked", `Peer ${peerAgentId} is blocked`);
     if (contact.relationship_state !== "friend") throw new EdgeBookError("not_friend", `Feed denied for relationship_state=${contact.relationship_state}`);
     const grants = await this.grants();
     const grant = Object.values(grants).find((candidate) =>
