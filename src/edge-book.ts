@@ -32,10 +32,47 @@ export interface LocalIdentity {
   // Agent Card so contacts can see it. Off = the agent acts as a privacy buffer
   // and contacts only ever see the agent's display_name.
   share_owner_label?: boolean;
+  // Two-tier profile. Absent on legacy identities (migrated on read via
+  // defaultProfile()). owner_label/share_owner_label remain for migration only.
+  profile?: IdentityProfile;
   public_key_pem: string;
   private_key_pem: string;
   created_at: string;
   updated_at: string;
+}
+
+export type FieldVisibility = "friends" | "public" | "off";
+
+export interface SocialLink {
+  label: string; // open vocabulary: telegram | twitter | linkedin | facebook | github | website | ...
+  value: string; // handle or URL
+}
+
+export interface IdentityProfile {
+  name?: string;
+  bio?: string;
+  location?: string;
+  socials?: SocialLink[];
+  // Per-field visibility. Field keys: "name" | "bio" | "location" and per-social
+  // by its label, plus "*" as the socials default. Absent => "friends".
+  // Reserved field names (name/bio/location) must not be used as social labels.
+  visibility?: Record<string, FieldVisibility>;
+  // Bumped on every edit; receivers apply the newest profile (last-writer-wins).
+  profile_version?: number;
+}
+
+// A friend-only, separately-signed profile payload. Shared only between confirmed
+// friends (never on the public card / friend_request).
+export interface FriendProfile {
+  schema: "openclaw-friend-profile/0.1";
+  agent_id: string; // MUST equal the sharer's card agent_id
+  profile_version: number;
+  name?: string;
+  bio?: string;
+  location?: string;
+  socials?: SocialLink[];
+  issued_at: string;
+  signature: string; // ed25519 over withoutSignature(profile)
 }
 
 export interface AgentCard {
@@ -46,6 +83,9 @@ export interface AgentCard {
   // Present only when the owner opted in to sharing (share_owner_label). Absent
   // cards mean "agent name only" — the default.
   owner_label?: string;
+  // Profile fields the owner promoted to public visibility (rides the card).
+  // name is ALSO mirrored to owner_label above for back-compat with older readers.
+  public_profile?: { name?: string; bio?: string; location?: string; socials?: SocialLink[] };
   card_url: string;
   card_version: number;
   card_hash: string;
@@ -66,6 +106,8 @@ export interface AgentContactRecord {
   display_name: string;
   // The peer's human owner name, if their card shared it (opt-in on their side).
   owner_label?: string;
+  // The latest FriendProfile this peer shared with us (only present once friends).
+  friend_profile?: FriendProfile;
   // The peer's advertised capabilities (from their card; absent if none / older card).
   advertised_capabilities?: Array<{ name: string; version: string; summary: string; status: "active" | "deprecated" }>;
   card_url: string;
