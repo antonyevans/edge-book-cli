@@ -21,6 +21,9 @@ export interface EdgeBookOptions {
 export interface EdgeBookConfig {
   direct_url?: string;
   relay_url?: string;
+  // Default ON (treat undefined as true). When false, pendingFriendRequests()
+  // returns [] so the notifier cron stays silent.
+  notify_on_friend_request?: boolean;
 }
 
 export interface LocalIdentity {
@@ -767,6 +770,7 @@ export class EdgeBookStore {
     const next: EdgeBookConfig = { ...current };
     if (input.direct_url !== undefined) next.direct_url = input.direct_url;
     if (input.relay_url !== undefined) next.relay_url = input.relay_url;
+    if (input.notify_on_friend_request !== undefined) next.notify_on_friend_request = input.notify_on_friend_request;
     await writeJson(this.file(CONFIG_FILE), next);
     return next;
   }
