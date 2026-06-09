@@ -524,6 +524,17 @@ export function randomId(prefix: string): string {
   return `${prefix}_${crypto.randomBytes(16).toString("base64url")}`;
 }
 
+// Human-handle slug rules. MUST match the host's isValidSlug in
+// edge-book-host/src/handles.ts (same regex + reserved set).
+const HANDLE_SLUG = /^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/;
+const RESERVED_HANDLES = new Set(["add", "healthz", "metrics", "agent", "api", "handle", "auth"]);
+export function isValidHandle(handle: string): boolean {
+  return HANDLE_SLUG.test(handle) && !RESERVED_HANDLES.has(handle);
+}
+export function slugifyHandle(input: string): string {
+  return input.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
+}
+
 function stableIdFromPublicKey(publicKeyPem: string): string {
   const digest = crypto.createHash("sha256").update(publicKeyPem).digest("base64url").slice(0, 32);
   return `did:openclaw:${digest}`;
@@ -803,6 +814,20 @@ export class EdgeBookStore {
     await writeJson(this.file(IDENTITY_FILE), identity, 0o600);
     await this.writeCard();
     await this.audit("identity.update", identity.agent_id, { display_name: identity.display_name, profile_version: profile.profile_version });
+    return identity;
+  }
+
+  // Set a user-chosen unique handle. Re-signs the card; does NOT rotate keys.
+  async setHandle(handle: string): Promise<LocalIdentity> {
+    if (!isValidHandle(handle)) {
+      throw new EdgeBookError("invalid_handle", `invalid_handle: must be 3-30 chars [a-z0-9-], not reserved: ${handle}`);
+    }
+    const identity = await this.identity();
+    identity.handle = handle;
+    identity.updated_at = now();
+    await writeJson(this.file(IDENTITY_FILE), identity, 0o600);
+    await this.writeCard();
+    await this.audit("identity.set_handle", identity.agent_id, { handle });
     return identity;
   }
 
