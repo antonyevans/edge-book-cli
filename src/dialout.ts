@@ -599,6 +599,28 @@ export class EdgeBookDialoutClient {
     await this.options.onStandDown?.(frame);
   }
 
+  // If an API response carries a routed-back `response_envelope` (the escalation
+  // answer endpoint sets it for remote-origin escalations), deliver it over the
+  // mailbox. Best-effort: swallow + audit relay errors so the human's answer, which
+  // is already saved, still returns 200.
+  private async maybeRelayEscalationResponse(status: number, bodyBuffer: Buffer): Promise<void> {
+    if (status < 200 || status >= 300) return;
+    let envelope: MessageEnvelope | undefined;
+    try {
+      const body = JSON.parse(bodyBuffer.toString("utf8")) as { response_envelope?: MessageEnvelope | null };
+      if (body && body.response_envelope) envelope = body.response_envelope;
+    } catch {
+      return; // non-JSON or unparseable — nothing to relay
+    }
+    if (!envelope) return;
+    try {
+      await this.sendEnvelope(envelope);
+      await this.store.audit("escalation.relay", envelope.to_agent_id, { message_id: envelope.message_id, ref: envelope.ref });
+    } catch (error) {
+      await this.store.audit("escalation.relay_failed", envelope.to_agent_id, { ref: envelope.ref, error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   async handleApiRequest(frame: DialoutApiRequest): Promise<DialoutApiResponse> {
     try {
       if (!this.localApi) {
@@ -616,6 +638,12 @@ export class EdgeBookDialoutClient {
         body: requestBody(frame, method)
       });
       const bodyBuffer = Buffer.from(await response.arrayBuffer());
+      // Auto-relay: when the owner answers a *remote* escalation in the reader, the
+      // answer endpoint returns a signed `response_envelope` addressed to the agent
+      // that raised it. We hold the live channel, so route it back over the mailbox
+      // (ea-claude-094). Best-effort — the answer is already persisted locally, so a
+      // relay failure must not fail the human's request.
+      await this.maybeRelayEscalationResponse(response.status, bodyBuffer);
       return {
         type: "api_response",
         id: frame.id || frame.request_id || "",

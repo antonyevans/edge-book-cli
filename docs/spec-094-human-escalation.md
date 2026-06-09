@@ -129,10 +129,13 @@ Escalations tab. **D3** `expireEscalations()` → `expired`; default TTL 7d (mai
 **D4** remote raise gated on friend-state + `escalation.raise` grant, fail closed (added
 to the default friend grant). **D5** friend-request left parallel (not refactored).
 
-Known follow-up: the reader answering a *remote* escalation returns the
-`response_envelope` but does not itself deliver it over the mailbox — delivery is the
-agent harness's job (the CLI `answer --deliver` path does deliver). Wiring host-side
-auto-relay on reader-answer is the next increment.
+**Host-side auto-relay (done):** when the owner answers a *remote* escalation in the
+reader, the dial-out client (`src/dialout.ts`, `handleApiRequest`) detects the
+`response_envelope` in the answer body and delivers it over the live channel via
+`sendEnvelope` — best-effort, with `escalation.relay` / `escalation.relay_failed`
+audit events. The answer is persisted before the relay attempt, so a relay failure
+never fails the human's request. Covered by `test/dialout-escalation-relay.test.ts`.
+The CLI `answer --deliver` remains the manual/local-serve delivery path.
 
 ## Open decisions (as originally posed — now resolved above)
 
