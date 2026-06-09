@@ -5,7 +5,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
-import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash } from "./edge-book.ts";
+import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash, defaultProfile } from "./edge-book.ts";
+import type { FieldVisibility, SocialLink } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
 import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
 
@@ -29,8 +30,8 @@ function usage(): string {
 Usage:
   edge-book init [--home <dir>] [--handle <handle>] [--name <agent name>] [--owner <human owner>]
   edge-book profile show [--home <dir>]
-  edge-book profile set [--name <agent name>] [--owner <human owner>] [--share-owner | --no-share-owner] [--home <dir>]
-                                                            # owner name is private by default; --share-owner exposes it on your card
+  edge-book profile set [--name <you>] [--bio <text>] [--location <text>] [--social label=value ...] [--agent-name <display>] [--home <dir>]
+  edge-book profile visibility <field>=friends|public|off ... [--home <dir>]
 
 Hosted reader:
   edge-book dialout [--host <ws-url>] [--home <dir>]
@@ -109,6 +110,20 @@ function takeBoolFlag(args: string[], name: string): boolean {
   return true;
 }
 
+// Collect every `--social label=value` occurrence (repeatable), removing them.
+function takeRepeatedKV(args: string[], flag: string): Array<{ label: string; value: string }> {
+  const out: Array<{ label: string; value: string }> = [];
+  let idx: number;
+  while ((idx = args.indexOf(flag)) !== -1) {
+    const raw = args[idx + 1] ?? "";
+    args.splice(idx, 2);
+    const eq = raw.indexOf("=");
+    if (eq === -1) throw new EdgeBookError("bad_social", `--social expects label=value, got "${raw}"`);
+    out.push({ label: raw.slice(0, eq), value: raw.slice(eq + 1) });
+  }
+  return out;
+}
+
 async function readEnvelope(filePath: string) {
   return JSON.parse(await fs.readFile(path.resolve(filePath), "utf8"));
 }
@@ -175,11 +190,11 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     const identity = await store.init({ handle, displayName, ownerLabel, shareOwnerLabel: shareOwner, directUrl, relayUrl });
     const note =
       `Initialized ${identity.agent_id} at ${store.home}\n\n` +
-      `Naming & privacy — two separate, separately-permissioned names:\n` +
-      `  • agent name (display_name): "${identity.display_name}" — always on your card; this is what contacts see.\n` +
-      `  • your name  (owner_label): ${identity.owner_label ? `"${identity.owner_label}"` : "(unset)"} — ` +
-      `${identity.share_owner_label ? "SHARED with contacts" : "private by default; contacts never see it unless you opt in"}.\n` +
-      `Change either: edge-book profile set --name <agent> --owner <you> [--share-owner|--no-share-owner]`;
+      `Two-tier profile:\n` +
+      `  • agent name (display_name): "${identity.display_name}" — always public on your card.\n` +
+      `  • your profile (name, bio, location, socials): default visible to FRIENDS only, hidden on the public card.\n` +
+      `Set it: edge-book profile set --name "<you>" --bio "..." --social telegram=@you\n` +
+      `Tune visibility: edge-book profile visibility bio=off telegram=public name=public`;
     return { text: note, json: identity };
   }
 
@@ -187,30 +202,102 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     const action = args.shift() || "show";
     if (action === "show") {
       const id = await store.identity();
-      const shared = id.share_owner_label ? "shared with contacts" : "private (default)";
+      const p = defaultProfile(id);
       return {
-        text: `display_name: ${id.display_name}\nowner_label: ${id.owner_label || "(unset)"}\nshare_owner_label: ${id.share_owner_label ? "true" : "false"} (${shared})`,
-        json: { agent_id: id.agent_id, display_name: id.display_name, owner_label: id.owner_label, share_owner_label: Boolean(id.share_owner_label) }
+        text:
+          `display_name: ${id.display_name}\n` +
+          `name: ${p.name || "(unset)"}\n` +
+          `bio: ${p.bio || "(unset)"}\n` +
+          `location: ${p.location || "(unset)"}\n` +
+          `socials: ${(p.socials ?? []).map((s) => `${s.label}=${s.value}`).join(", ") || "(none)"}\n` +
+          `visibility: ${JSON.stringify(p.visibility ?? {})}`,
+        json: { agent_id: id.agent_id, display_name: id.display_name, name: p.name, bio: p.bio, location: p.location, socials: p.socials ?? [], visibility: p.visibility ?? {} },
       };
     }
     if (action === "set") {
-      const displayName = takeFlag(args, "--name");
+      const displayName = takeFlag(args, "--agent-name");
+      const name = takeFlag(args, "--name");
+      const bio = takeFlag(args, "--bio");
+      const location = takeFlag(args, "--location");
+      const socialsKV = takeRepeatedKV(args, "--social");
+      // Legacy aliases kept working.
       const ownerLabel = takeFlag(args, "--owner");
-      // Opt-in (default off): --share-owner exposes owner_label on your card;
-      // --no-share-owner turns it back off.
       const shareOwner = takeBoolFlag(args, "--share-owner");
       const noShareOwner = takeBoolFlag(args, "--no-share-owner");
       const shareOwnerLabel = shareOwner ? true : (noShareOwner ? false : undefined);
-      if (displayName === undefined && ownerLabel === undefined && shareOwnerLabel === undefined) {
-        throw new EdgeBookError("missing_arg", "profile set needs --name (agent name), --owner (human owner), and/or --share-owner|--no-share-owner");
+      // Guard: at least one meaningful flag must be present.
+      if (
+        displayName === undefined &&
+        name === undefined &&
+        bio === undefined &&
+        location === undefined &&
+        socialsKV.length === 0 &&
+        ownerLabel === undefined &&
+        shareOwnerLabel === undefined
+      ) {
+        throw new EdgeBookError(
+          "missing_arg",
+          "profile set needs at least one of --name/--agent-name/--bio/--location/--social/--owner/--share-owner",
+        );
       }
-      const id = await store.setProfile({ displayName, ownerLabel, shareOwnerLabel });
-      return {
-        text: `Updated profile: display_name=${id.display_name} owner_label=${id.owner_label || "(unset)"} share_owner_label=${id.share_owner_label ? "true" : "false"}`,
-        json: { agent_id: id.agent_id, display_name: id.display_name, owner_label: id.owner_label, share_owner_label: Boolean(id.share_owner_label) }
-      };
+      const id = await store.setProfile({
+        displayName,
+        name,
+        bio,
+        location,
+        socials: socialsKV.length ? socialsKV : undefined,
+        ownerLabel,
+        shareOwnerLabel,
+      });
+      const p = defaultProfile(id);
+      return { text: `Updated profile (v${p.profile_version}): name=${p.name || "(unset)"}`, json: { agent_id: id.agent_id, name: p.name, profile_version: p.profile_version } };
     }
-    throw new EdgeBookError("unknown_action", `Unknown profile action: ${action} (use "show" or "set")`);
+    if (action === "visibility") {
+      const pairs = args.splice(0).map((tok) => {
+        const eq = tok.indexOf("=");
+        if (eq === -1) throw new EdgeBookError("bad_visibility", `expected field=friends|public|off, got "${tok}"`);
+        const field = tok.slice(0, eq);
+        const vis = tok.slice(eq + 1) as FieldVisibility;
+        if (!["friends", "public", "off"].includes(vis)) throw new EdgeBookError("bad_visibility", `bad visibility "${vis}" for ${field}`);
+        return [field, vis] as const;
+      });
+      if (!pairs.length) throw new EdgeBookError("missing_arg", "profile visibility needs at least one field=friends|public|off");
+      // Validate keys: must be a known field, "*", or an existing social label.
+      const KNOWN_FIELDS = new Set(["name", "bio", "location", "*"]);
+      const currentId = await store.identity();
+      const currentProfile = defaultProfile(currentId);
+      const socialLabels = new Set((currentProfile.socials ?? []).map((s) => s.label));
+      for (const [field] of pairs) {
+        if (!KNOWN_FIELDS.has(field) && !socialLabels.has(field)) {
+          const known = [...KNOWN_FIELDS, ...socialLabels].join(", ");
+          throw new EdgeBookError(
+            "unknown_visibility_field",
+            `Unknown profile field/social '${field}'; known: name, bio, location, *, plus your social labels${socialLabels.size ? ` (${[...socialLabels].join(", ")})` : ""}`,
+          );
+        }
+      }
+      const id = await store.setProfile({ visibility: Object.fromEntries(pairs) });
+      const p = defaultProfile(id);
+      return { text: `Updated visibility: ${JSON.stringify(p.visibility ?? {})}`, json: { visibility: p.visibility ?? {} } };
+    }
+    if (action === "broadcast") {
+      const deliver = takeBoolFlag(args, "--deliver");
+      const envelopes = await store.broadcastProfileEnvelopes();
+      if (deliver) {
+        const hostUrl = parseHost(args, ctx);
+        for (const envelope of envelopes) {
+          try {
+            await deliverToPeer(store, envelope, envelope.to_agent_id);
+          } catch (error) {
+            if (!(error instanceof EdgeBookError) || error.code !== "no_route") throw error;
+            await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+          }
+        }
+        return { text: `Broadcast profile to ${envelopes.length} friend(s)`, json: { count: envelopes.length } };
+      }
+      return { text: `Built ${envelopes.length} profile_share envelope(s)`, json: { envelopes } };
+    }
+    throw new EdgeBookError("unknown_action", `Unknown profile action: ${action} (use "show", "set", "visibility", or "broadcast")`);
   }
 
   if (command === "doctor") {
@@ -308,9 +395,21 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       return { text: JSON.stringify(envelope, null, 2), json: envelope };
     }
     if (action === "apply-response") {
+      const deliver = takeBoolFlag(args, "--deliver");
       const source = requireArg(args.shift(), "envelope-json-path");
-      await store.applyFriendResponse(await readEnvelope(source));
-      return { text: `Applied friend response from ${path.resolve(source)}` };
+      const followUp = await store.applyFriendResponse(await readEnvelope(source));
+      if (!followUp) return { text: `Applied friend response from ${path.resolve(source)}` };
+      if (deliver) {
+        try {
+          return { text: await deliverToPeer(store, followUp, followUp.to_agent_id), json: followUp };
+        } catch (error) {
+          if (!(error instanceof EdgeBookError) || error.code !== "no_route") throw error;
+          const hostUrl = parseHost(args, ctx);
+          const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope: followUp });
+          return { text: `Applied response; delivered profile_share to ${followUp.to_agent_id} over the mailbox (host id ${ack.id})`, json: followUp };
+        }
+      }
+      return { text: `Applied friend response; deliver this profile_share to ${followUp.to_agent_id}`, json: followUp };
     }
     if (action === "revoke") {
       const peer = requireArg(args.shift(), "peer-agent-id");

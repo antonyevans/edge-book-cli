@@ -32,10 +32,47 @@ export interface LocalIdentity {
   // Agent Card so contacts can see it. Off = the agent acts as a privacy buffer
   // and contacts only ever see the agent's display_name.
   share_owner_label?: boolean;
+  // Two-tier profile. Absent on legacy identities (migrated on read via
+  // defaultProfile()). owner_label/share_owner_label remain for migration only.
+  profile?: IdentityProfile;
   public_key_pem: string;
   private_key_pem: string;
   created_at: string;
   updated_at: string;
+}
+
+export type FieldVisibility = "friends" | "public" | "off";
+
+export interface SocialLink {
+  label: string; // open vocabulary: telegram | twitter | linkedin | facebook | github | website | ...
+  value: string; // handle or URL
+}
+
+export interface IdentityProfile {
+  name?: string;
+  bio?: string;
+  location?: string;
+  socials?: SocialLink[];
+  // Per-field visibility. Field keys: "name" | "bio" | "location" and per-social
+  // by its label, plus "*" as the socials default. Absent => "friends".
+  // Reserved field names (name/bio/location) must not be used as social labels.
+  visibility?: Record<string, FieldVisibility>;
+  // Bumped on every edit; receivers apply the newest profile (last-writer-wins).
+  profile_version?: number;
+}
+
+// A friend-only, separately-signed profile payload. Shared only between confirmed
+// friends (never on the public card / friend_request).
+export interface FriendProfile {
+  schema: "openclaw-friend-profile/0.1";
+  agent_id: string; // MUST equal the sharer's card agent_id
+  profile_version: number;
+  name?: string;
+  bio?: string;
+  location?: string;
+  socials?: SocialLink[];
+  issued_at: string;
+  signature: string; // ed25519 over withoutSignature(profile)
 }
 
 export interface AgentCard {
@@ -46,6 +83,9 @@ export interface AgentCard {
   // Present only when the owner opted in to sharing (share_owner_label). Absent
   // cards mean "agent name only" — the default.
   owner_label?: string;
+  // Profile fields the owner promoted to public visibility (rides the card).
+  // name is ALSO mirrored to owner_label above for back-compat with older readers.
+  public_profile?: { name?: string; bio?: string; location?: string; socials?: SocialLink[] };
   card_url: string;
   card_version: number;
   card_hash: string;
@@ -66,6 +106,8 @@ export interface AgentContactRecord {
   display_name: string;
   // The peer's human owner name, if their card shared it (opt-in on their side).
   owner_label?: string;
+  // The latest FriendProfile this peer shared with us (only present once friends).
+  friend_profile?: FriendProfile;
   // The peer's advertised capabilities (from their card; absent if none / older card).
   advertised_capabilities?: Array<{ name: string; version: string; summary: string; status: "active" | "deprecated" }>;
   card_url: string;
@@ -243,7 +285,7 @@ export interface ObjectRevokeBody {
 
 export interface MessageEnvelope {
   message_id: string;
-  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error" | "object_share" | "object_revoke" | "post_publish";
+  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error" | "object_share" | "object_revoke" | "post_publish" | "profile_share";
   from_agent_id: string;
   to_agent_id: string;
   relationship_id: string;
@@ -265,7 +307,12 @@ export interface FriendResponseBody {
   accepted: boolean;
   card: AgentCard;
   grant?: CapabilityGrant;
+  profile?: FriendProfile; // accepter's friend profile (only when accepted)
   reason: string;
+}
+
+export interface ProfileShareBody {
+  profile: FriendProfile;
 }
 
 export type EdgeBookVisibility = "private" | "friends" | "public_if_enabled";
@@ -517,6 +564,31 @@ function relationshipId(a: string, b: string): string {
   return `rel_${crypto.createHash("sha256").update([a, b].sort().join("|")).digest("base64url").slice(0, 24)}`;
 }
 
+// Resolve the effective profile for an identity, migrating legacy
+// owner_label/share_owner_label when identity.profile is absent. Pure: callers
+// persist the result via setProfile when the user next edits (no write-on-read).
+export function defaultProfile(identity: LocalIdentity): IdentityProfile {
+  if (identity.profile) return identity.profile;
+  const visibility: Record<string, FieldVisibility> = {
+    // Migration (apply-new-default-to-all): legacy share on => name public;
+    // legacy share off/absent => name resolves to the new default "friends".
+    name: identity.share_owner_label ? "public" : "friends",
+  };
+  return {
+    name: identity.owner_label || undefined,
+    visibility,
+    profile_version: 1,
+  };
+}
+
+export function resolveFieldVisibility(profile: IdentityProfile, field: string): FieldVisibility {
+  return profile.visibility?.[field] ?? "friends";
+}
+
+export function resolveSocialVisibility(profile: IdentityProfile, label: string): FieldVisibility {
+  return profile.visibility?.[label] ?? profile.visibility?.["*"] ?? "friends";
+}
+
 // Shared Class-2 lifecycle: terminal states are preserved; otherwise past-expiry
 // becomes "expired" for hard-TTL types or "stale" for soft ones.
 export function computeLifecycle(
@@ -581,17 +653,59 @@ export class EdgeBookStore {
   }
 
   // Update profile fields on an existing identity without rotating keys, so the
-  // agent_id (and any pairing built on it) survives. `owner_label` is the human
-  // who owns the agent; `display_name` is the agent's own name.
-  async setProfile(input: { displayName?: string; ownerLabel?: string; shareOwnerLabel?: boolean }): Promise<LocalIdentity> {
+  // agent_id survives. display_name is the agent's own name (public, on the card).
+  // name/bio/location/socials are the human profile, governed by per-field
+  // visibility (default "friends"). Legacy ownerLabel/shareOwnerLabel map onto
+  // profile.name + visibility.name for back-compat.
+  async setProfile(input: {
+    displayName?: string;
+    ownerLabel?: string;
+    shareOwnerLabel?: boolean;
+    name?: string;
+    bio?: string;
+    location?: string;
+    socials?: SocialLink[];
+    visibility?: Record<string, FieldVisibility>;
+  }): Promise<LocalIdentity> {
     const identity = await this.identity();
+    const profile: IdentityProfile = { ...defaultProfile(identity) };
+    profile.visibility = { ...(profile.visibility ?? {}) };
+
     if (input.displayName !== undefined && input.displayName !== "") identity.display_name = input.displayName;
-    if (input.ownerLabel !== undefined) identity.owner_label = input.ownerLabel;
-    if (input.shareOwnerLabel !== undefined) identity.share_owner_label = input.shareOwnerLabel;
+
+    // Legacy shims: ownerLabel -> profile.name; shareOwnerLabel -> name visibility.
+    if (input.ownerLabel !== undefined) {
+      identity.owner_label = input.ownerLabel;
+      profile.name = input.ownerLabel || undefined;
+    }
+    if (input.shareOwnerLabel !== undefined) {
+      identity.share_owner_label = input.shareOwnerLabel;
+      profile.visibility.name = input.shareOwnerLabel ? "public" : "friends";
+    }
+
+    if (input.name !== undefined) profile.name = input.name || undefined;
+    if (input.bio !== undefined) profile.bio = input.bio || undefined;
+    if (input.location !== undefined) profile.location = input.location || undefined;
+    if (input.socials !== undefined) {
+      const RESERVED = new Set(["name", "bio", "location"]);
+      for (const s of input.socials) {
+        if (RESERVED.has(s.label.toLowerCase())) {
+          throw new EdgeBookError(
+            "reserved_social_label",
+            `Social label '${s.label}' is reserved; choose another (e.g. telegram, twitter)`,
+          );
+        }
+      }
+      profile.socials = input.socials;
+    }
+    if (input.visibility) profile.visibility = { ...profile.visibility, ...input.visibility };
+
+    profile.profile_version = (profile.profile_version ?? 1) + 1;
+    identity.profile = profile;
     identity.updated_at = now();
     await writeJson(this.file(IDENTITY_FILE), identity, 0o600);
     await this.writeCard();
-    await this.audit("identity.update", identity.agent_id, { display_name: identity.display_name, owner_label: identity.owner_label });
+    await this.audit("identity.update", identity.agent_id, { display_name: identity.display_name, profile_version: profile.profile_version });
     return identity;
   }
 
@@ -616,13 +730,23 @@ export class EdgeBookStore {
     if (config.relay_url) transports.push({ mode: "relay", endpoint: config.relay_url });
     const caps = Object.values(await this.capabilities())
       .map((c) => ({ name: c.name, version: c.version, summary: c.summary, status: c.status }));
+    const prof = defaultProfile(identity);
+    const pubInclude = (field: string) => resolveFieldVisibility(prof, field) === "public";
+    const pubSocials = (prof.socials ?? []).filter((s) => resolveSocialVisibility(prof, s.label) === "public");
+    const publicProfile: NonNullable<AgentCard["public_profile"]> = {
+      ...(prof.name && pubInclude("name") ? { name: prof.name } : {}),
+      ...(prof.bio && pubInclude("bio") ? { bio: prof.bio } : {}),
+      ...(prof.location && pubInclude("location") ? { location: prof.location } : {}),
+      ...(pubSocials.length ? { socials: pubSocials } : {}),
+    };
+    const publicName = prof.name && pubInclude("name") ? prof.name : undefined;
     const unsigned: Omit<AgentCard, "card_hash" | "signature"> = {
       schema: "openclaw-agent-card/0.1",
       agent_id: identity.agent_id,
       handle: identity.handle,
       display_name: identity.display_name,
-      // Opt-in only: include the human owner name when the owner enabled sharing.
-      ...(identity.share_owner_label && identity.owner_label ? { owner_label: identity.owner_label } : {}),
+      ...(publicName ? { owner_label: publicName } : {}),
+      ...(Object.keys(publicProfile).length ? { public_profile: publicProfile } : {}),
       card_url: cardUrl || `file://${this.file(CARD_FILE)}`,
       card_version: 1,
       public_keys: [{ id: `${identity.agent_id}#main`, type: "ed25519", public_key_pem: identity.public_key_pem }],
@@ -641,6 +765,28 @@ export class EdgeBookStore {
     const card = await this.buildCard(cardUrl);
     await writeJson(this.file(CARD_FILE), card);
     return card;
+  }
+
+  // The friend-only profile: every field whose visibility resolves to "friends"
+  // or "public". Signed; shared only with confirmed friends.
+  async buildFriendProfile(): Promise<FriendProfile> {
+    const identity = await this.identity();
+    const profile = defaultProfile(identity);
+    const include = (field: string): boolean => resolveFieldVisibility(profile, field) !== "off";
+    const socials = (profile.socials ?? []).filter(
+      (s) => resolveSocialVisibility(profile, s.label) !== "off",
+    );
+    const unsigned: Omit<FriendProfile, "signature"> = {
+      schema: "openclaw-friend-profile/0.1",
+      agent_id: identity.agent_id,
+      profile_version: profile.profile_version ?? 1,
+      ...(profile.name && include("name") ? { name: profile.name } : {}),
+      ...(profile.bio && include("bio") ? { bio: profile.bio } : {}),
+      ...(profile.location && include("location") ? { location: profile.location } : {}),
+      ...(socials.length ? { socials } : {}),
+      issued_at: now(),
+    };
+    return { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
   }
 
   async doctor(): Promise<Record<string, unknown>> {
@@ -716,6 +862,8 @@ export class EdgeBookStore {
       // Carry the peer's shared human name (undefined if they didn't opt in, or
       // dropped on refresh if they turned sharing off).
       owner_label: card.owner_label,
+      // Preserve a previously-received friend profile across card refreshes.
+      ...(existing?.friend_profile ? { friend_profile: existing.friend_profile } : {}),
       advertised_capabilities: card.advertised_capabilities,
       card_url: card.card_url,
       known_endpoints: card.transports,
@@ -803,8 +951,15 @@ export class EdgeBookStore {
     if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
     if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked_peer", "Cannot accept a blocked peer");
     await this.setRelationship(peerAgentId, "friend", "Accept", reason);
-    const grant = await this.issueGrant(peerAgentId, ["message.friend", "feed.read.friends"]);
+    // `profile.read.friend` is minted now but intentionally NOT enforced in this
+    // phase: the push exchange (profile_share) gates on relationship_state ===
+    // "friend", not on the grant. The scope is reserved so a future pull-based
+    // profile-read path (the reader `friend_accept` wiring, Plan C) can enforce
+    // it without re-granting existing friendships. Until that consumer lands it
+    // is a forward-compat token, not a live access check.
+    const grant = await this.issueGrant(peerAgentId, ["message.friend", "feed.read.friends", "profile.read.friend"]);
     const card = await this.writeCard();
+    const profile = await this.buildFriendProfile();
     return this.signEnvelope({
       type: "friend_response",
       to_agent_id: peerAgentId,
@@ -812,11 +967,11 @@ export class EdgeBookStore {
       capability_id: grant.grant_id,
       ref: "",
       transport: "local",
-      body: { accepted: true, card, grant, reason } satisfies FriendResponseBody
+      body: { accepted: true, card, grant, profile, reason } satisfies FriendResponseBody
     });
   }
 
-  async applyFriendResponse(envelope: MessageEnvelope): Promise<void> {
+  async applyFriendResponse(envelope: MessageEnvelope): Promise<MessageEnvelope | null> {
     await this.verifyEnvelope(envelope);
     if (envelope.type !== "friend_response") throw new EdgeBookError("wrong_message_type", "Expected friend_response envelope");
     const body = envelope.body as unknown as FriendResponseBody;
@@ -825,6 +980,82 @@ export class EdgeBookStore {
     await this.upsertContactFromCard(body.card, body.accepted ? "friend" : "rejected");
     await this.setRelationship(envelope.from_agent_id, body.accepted ? "friend" : "rejected", body.accepted ? "Accept" : "Reject", body.reason);
     if (body.grant) await this.storeGrant(body.grant);
+    if (body.accepted && body.profile) {
+      const publicKey = body.card.public_keys?.[0]?.public_key_pem;
+      if (!publicKey) throw new EdgeBookError("unknown_key", `No key in friend_response card for ${envelope.from_agent_id}`);
+      if (body.profile.agent_id !== envelope.from_agent_id) throw new EdgeBookError("agent_id_mismatch", "friend_response profile agent_id does not match sender");
+      validateFriendProfile(body.profile, publicKey);
+      await this.storeFriendProfile(envelope.from_agent_id, body.profile);
+    }
+    // Now that both sides are friends, send our own profile back.
+    if (body.accepted) return this.buildProfileShareEnvelope(envelope.from_agent_id);
+    return null;
+  }
+
+  // Persist a received FriendProfile onto the peer contact (last-writer-wins by
+  // profile_version). Returns true if applied, false if stale.
+  private async storeFriendProfile(peerAgentId: string, profile: FriendProfile): Promise<boolean> {
+    const contacts = await this.contacts();
+    const contact = contacts[peerAgentId];
+    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
+    const current = contact.friend_profile?.profile_version ?? -1;
+    if (profile.profile_version <= current) return false;
+    contact.friend_profile = profile;
+    contact.updated_at = now();
+    contacts[peerAgentId] = contact;
+    await this.saveContacts(contacts);
+    await this.audit("profile.received", peerAgentId, { profile_version: profile.profile_version });
+    return true;
+  }
+
+  // Build a signed profile_share envelope carrying our current FriendProfile to a
+  // confirmed friend.
+  async buildProfileShareEnvelope(peerAgentId: string): Promise<MessageEnvelope> {
+    const identity = await this.identity();
+    const contacts = await this.contacts();
+    const contact = contacts[peerAgentId];
+    if (!contact || contact.relationship_state !== "friend") {
+      throw new EdgeBookError("not_friend", `Not friends with ${peerAgentId}; cannot share profile`);
+    }
+    const profile = await this.buildFriendProfile();
+    return this.signEnvelope({
+      type: "profile_share",
+      to_agent_id: peerAgentId,
+      relationship_id: relationshipId(identity.agent_id, peerAgentId),
+      capability_id: "",
+      ref: "",
+      transport: "local",
+      body: { profile } satisfies ProfileShareBody,
+    });
+  }
+
+  async receiveProfileShare(envelope: MessageEnvelope): Promise<void> {
+    await this.verifyEnvelope(envelope);
+    if (envelope.type !== "profile_share") throw new EdgeBookError("wrong_message_type", "Expected profile_share envelope");
+    const contacts = await this.contacts();
+    const contact = contacts[envelope.from_agent_id];
+    if (!contact || contact.relationship_state !== "friend") {
+      throw new EdgeBookError("not_friend", "profile_share from a non-friend");
+    }
+    const body = envelope.body as unknown as ProfileShareBody;
+    if (body.profile.agent_id !== envelope.from_agent_id) {
+      throw new EdgeBookError("agent_id_mismatch", "FriendProfile agent_id does not match sender");
+    }
+    const publicKey = contact.public_keys?.[0]?.public_key_pem;
+    if (!publicKey) throw new EdgeBookError("unknown_key", `No key for ${envelope.from_agent_id}`);
+    validateFriendProfile(body.profile, publicKey);
+    await this.storeFriendProfile(envelope.from_agent_id, body.profile);
+  }
+
+  // Build a profile_share for every current friend (caller delivers them).
+  async broadcastProfileEnvelopes(): Promise<MessageEnvelope[]> {
+    const contacts = await this.contacts();
+    const friends = Object.values(contacts).filter((c) => c.relationship_state === "friend");
+    const out: MessageEnvelope[] = [];
+    for (const friend of friends) {
+      out.push(await this.buildProfileShareEnvelope(friend.peer_agent_id));
+    }
+    return out;
   }
 
   async revoke(peerAgentId: string): Promise<void> {
@@ -1748,13 +1979,14 @@ export class EdgeBookStore {
     return readJsonl<MessageEnvelope>(this.file(INBOX_FILE));
   }
 
-  async receiveEnvelope(envelope: MessageEnvelope): Promise<void | AgentContactRecord> {
+  async receiveEnvelope(envelope: MessageEnvelope): Promise<void | AgentContactRecord | MessageEnvelope | null> {
     if (envelope.type === "friend_request") return this.receiveFriendRequest(envelope);
     if (envelope.type === "friend_response") return this.applyFriendResponse(envelope);
     if (envelope.type === "privileged_message") return this.receivePrivilegedMessage(envelope);
     if (envelope.type === "object_share") { await this.receiveObjectShare(envelope); return; }
     if (envelope.type === "object_revoke") { await this.receiveObjectRevoke(envelope); return; }
     if (envelope.type === "post_publish") { await this.receivePostPublish(envelope); return; }
+    if (envelope.type === "profile_share") { await this.receiveProfileShare(envelope); return; }
     throw new EdgeBookError("unsupported_envelope", `Unsupported envelope type: ${envelope.type}`);
   }
 
@@ -2201,6 +2433,22 @@ export function validateCard(card: AgentCard): void {
   }
 }
 
+// Structural + signature validation against a known public key (the peer's card
+// key). Throws EdgeBookError on any failure. The agent_id<->sender match is
+// checked by the caller (it has the envelope's from_agent_id).
+export function validateFriendProfile(profile: FriendProfile, publicKeyPem: string): void {
+  if (profile.schema !== "openclaw-friend-profile/0.1") {
+    throw new EdgeBookError("invalid_friend_profile", "Unsupported FriendProfile schema");
+  }
+  if (!profile.agent_id) throw new EdgeBookError("invalid_friend_profile", "FriendProfile missing agent_id");
+  if (typeof profile.profile_version !== "number") {
+    throw new EdgeBookError("invalid_friend_profile", "FriendProfile missing profile_version");
+  }
+  if (!verifyPayload(withoutSignature(profile), profile.signature, publicKeyPem)) {
+    throw new EdgeBookError("invalid_friend_profile", "FriendProfile signature is invalid");
+  }
+}
+
 export async function loadCard(cardPathOrUrl: string): Promise<AgentCard> {
   // "Add me" invite link: edgebook:invite:<base64url(signed Agent Card)>.
   if (cardPathOrUrl.startsWith("edgebook:invite:")) {
@@ -2228,6 +2476,8 @@ export async function runTwoAgentHarness(baseDir?: string): Promise<Record<strin
   const bob = new EdgeBookStore({ home: path.join(root, "bob") });
   await alice.init({ handle: "alice.openclaw.local", displayName: "Alice Agent", ownerLabel: "Alice" });
   await bob.init({ handle: "bob.openclaw.local", displayName: "Bob Agent", ownerLabel: "Bob" });
+  await alice.setProfile({ name: "Alice", bio: "Alice bio", socials: [{ label: "telegram", value: "@alice" }] });
+  await bob.setProfile({ name: "Bob", bio: "Bob bio" });
   const aliceCard = await alice.writeCard();
   const bobCard = await bob.writeCard();
 
@@ -2242,7 +2492,8 @@ export async function runTwoAgentHarness(baseDir?: string): Promise<Record<strin
 
   await bob.receiveFriendRequest(request);
   const accept = await bob.acceptFriend(aliceCard.agent_id);
-  await alice.applyFriendResponse(accept);
+  const aliceFollowUp = await alice.applyFriendResponse(accept);
+  if (aliceFollowUp) await bob.receiveProfileShare(aliceFollowUp);
   const message = await alice.sendPrivilegedMessage(bobCard.agent_id, { text: "hello Bob" });
   await bob.receivePrivilegedMessage(message);
 
@@ -2275,13 +2526,17 @@ export async function runTwoAgentHarness(baseDir?: string): Promise<Record<strin
   const aliceContacts = await alice.contacts();
   const bobAudit = await bob.auditEvents();
 
+  const aliceSeesBob = (await alice.contacts())[bobCard.agent_id].friend_profile?.name === "Bob";
+  const bobSeesAlice = (await bob.contacts())[aliceCard.agent_id].friend_profile?.name === "Alice";
+
   const assertions = {
     deniedBeforeAccept,
     replayDenied,
     revokedDenied,
     blockedDenied,
     aliceHasBobContact: Boolean(aliceContacts[bobCard.agent_id]),
-    bobAuditWritten: bobAudit.length > 0
+    bobAuditWritten: bobAudit.length > 0,
+    profileExchange: aliceSeesBob && bobSeesAlice,
   };
   const passed = Object.values(assertions).every(Boolean);
   if (!passed) throw new EdgeBookError("harness_failed", `Harness failed: ${JSON.stringify(assertions)}`);

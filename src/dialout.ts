@@ -415,8 +415,13 @@ export class EdgeBookDialoutClient {
       if (this.mailboxQueue) {
         this.pushMailbox({ id: frame.id, to: envelope.to_agent_id, from: frame.from, blob: frame.blob_b64, ts: frame.ts });
       } else if (this.options.autoApplyEnvelopes) {
-        await this.store.receiveEnvelope(envelope);
+        const followUp = await this.store.receiveEnvelope(envelope);
         applied = true;
+        // If the store returned a profile_share follow-up (from a friend_response),
+        // auto-deliver it to complete the two-step profile exchange.
+        if (followUp && typeof followUp === "object" && "type" in followUp && (followUp as MessageEnvelope).type === "profile_share") {
+          await this.sendEnvelope(followUp as MessageEnvelope).catch(() => undefined);
+        }
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
