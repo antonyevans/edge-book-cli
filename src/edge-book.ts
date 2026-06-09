@@ -1027,6 +1027,17 @@ export class EdgeBookStore {
     });
   }
 
+  // NOTE — concurrency + sybil-defense assumptions (v1):
+  // The GLOBAL cap (inbound_max_global) is the real sybil defense: it limits total
+  // inbound load regardless of how many distinct identities an attacker mints.
+  // The per-peer cap only slows a single persistent identity; it provides weaker
+  // protection because `from_agent_id` is attacker-mintable (any key can be generated).
+  //
+  // The rate file is read-modify-write.  This is safe under the assumption that the
+  // receive loop is effectively serial for a single-owner edge agent (one active
+  // session at a time).  Concurrent receives — e.g. two simultaneous HTTP deliveries
+  // on a multi-machine deployment — could undercount hits, allowing bursts past the
+  // cap.  A shared atomic lock or external counter store is the follow-up (ea-claude-090).
   private async enforceInboundRate(peerAgentId: string): Promise<void> {
     const config = await this.config();
     const windowMs = config.inbound_window_ms ?? 3_600_000;
@@ -1056,10 +1067,17 @@ export class EdgeBookStore {
     validateCard(body.card);
     if (body.card.agent_id !== envelope.from_agent_id) throw new EdgeBookError("agent_id_mismatch", "Friend request card does not match sender");
     // Invite-only gate: when open_friend_requests is explicitly false, require either
-    // a prior relationship or a valid invite code.
+    // a prior solicited/active relationship or a valid invite code.
+    // Only "request_sent" (we reached out first, so their reply is expected) and
+    // "friend" (already connected) bypass the code requirement.  States like
+    // "rejected", "revoked", and "blocked" are NOT a bypass — those peers must
+    // supply a fresh invite code just like a cold stranger would.
     if ((await this.config()).open_friend_requests === false) {
+      const ALLOWED_INVITE_BYPASS: RelationshipState[] = ["request_sent", "friend"];
       const known = (await this.contacts())[envelope.from_agent_id]?.relationship_state;
-      const allowed = (known && known !== "none") || (body.invite_code ? await this.consumeInviteCode(body.invite_code) : false);
+      const allowed =
+        (known !== undefined && ALLOWED_INVITE_BYPASS.includes(known)) ||
+        (body.invite_code ? await this.consumeInviteCode(body.invite_code) : false);
       if (!allowed) {
         await this.audit("inbound.unsolicited_dropped", envelope.from_agent_id, {});
         throw new EdgeBookError("unsolicited_dropped", "Invite-only: unsolicited request without a valid invite code");
@@ -1286,6 +1304,12 @@ export class EdgeBookStore {
     return invite;
   }
 
+  // NOTE — serial-receive assumption (v1):
+  // consumeInviteCode is read-modify-write.  Under concurrent receives, two requests
+  // carrying the same single-use code could both read uses=0, both pass the max_uses
+  // check, and both increment — effectively spending the code twice.  This is safe for
+  // a single-owner serial receive loop; a locking primitive is needed for concurrent
+  // multi-machine deployments (ties to the same ea-claude-090 follow-up).
   private async consumeInviteCode(code: string): Promise<boolean> {
     const codes = await this.inviteCodes();
     const idx = codes.findIndex((c) => c.code === code);
@@ -1303,22 +1327,27 @@ export class EdgeBookStore {
 
   async reportPeer(peerAgentId: string, reason = "", opts: { block?: boolean } = {}): Promise<ReportRecord> {
     const auditRef = await this.audit("peer.reported", peerAgentId, { reason, block: Boolean(opts.block) });
+    // Attempt the block before building the record so rec.blocked reflects
+    // whether a block ACTUALLY happened (contact must exist for block() to fire).
+    let actuallyBlocked = false;
+    if (opts.block) {
+      const contacts = await this.contacts();
+      if (contacts[peerAgentId]) {
+        await this.block(peerAgentId);
+        actuallyBlocked = true;
+      }
+    }
     const rec: ReportRecord = {
       report_id: randomId("report"),
       peer_agent_id: peerAgentId,
       reason,
-      blocked: Boolean(opts.block),
+      blocked: actuallyBlocked,
       created_at: now(),
       audit_refs: [auditRef],
     };
     const existingReports = await readJson<ReportRecord[]>(this.file(REPORTS_FILE), []);
     existingReports.push(rec);
     await writeJson(this.file(REPORTS_FILE), existingReports);
-    if (opts.block) {
-      // block() is a no-op-safe state set; guard if the contact is unknown.
-      const contacts = await this.contacts();
-      if (contacts[peerAgentId]) await this.block(peerAgentId);
-    }
     return rec;
   }
 

@@ -75,3 +75,81 @@ test("inbound friend_request throttle drops a per-peer flood with rate_limited",
     (e: unknown) => e instanceof EdgeBookError && e.code === "rate_limited",
   );
 });
+
+// FIX 1: invite-only allow-set — rejected peer re-requesting is dropped
+test("invite-only drops a re-request from a peer whose state is 'rejected'", async () => {
+  const { alice, bob } = await pair();
+  const bobCard = await bob.writeCard();
+  // Bob is open by default — receive alice's initial request, then reject her.
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+  await bob.rejectFriend((await alice.identity()).agent_id);
+  // Now bob flips to invite-only.
+  await bob.updateConfig({ open_friend_requests: false });
+  // Alice tries again (no invite code). Her state is "rejected" → must NOT bypass.
+  const req2 = await alice.createFriendRequest(bobCard);
+  await assert.rejects(
+    () => bob.receiveFriendRequest(req2),
+    (e: unknown) => e instanceof EdgeBookError && e.code === "unsolicited_dropped",
+  );
+});
+
+// FIX 1: invite-only allow-set — request_sent peer IS allowed (solicited reply)
+test("invite-only allows a request from a peer we already reached out to (request_sent)", async () => {
+  const { alice, bob } = await pair();
+  // Bob reaches out to alice first → alice's state in bob's contacts becomes "request_sent".
+  const aliceCard = await alice.writeCard();
+  await bob.createFriendRequest(aliceCard); // sets alice → request_sent in bob's store
+  // Bob then flips to invite-only.
+  await bob.updateConfig({ open_friend_requests: false });
+  // Now alice replies with her own friend request (no invite code). Bob set request_sent
+  // first, so this is a solicited reply and must be allowed through.
+  const bobCard = await bob.writeCard();
+  await alice.receiveFriendRequest(await bob.createFriendRequest(aliceCard)); // alice sees bob's req
+  // The key assertion: alice sends her request back to bob (invite-only) without a code.
+  const aliceReply = await alice.createFriendRequest(bobCard);
+  await assert.doesNotReject(() => bob.receiveFriendRequest(aliceReply));
+  assert.equal((await bob.pendingFriendRequests()).length, 1);
+});
+
+// FIX 4: global cap — 3rd distinct peer is rate_limited when global cap is 2
+test("global inbound cap drops requests beyond the configured inbound_max_global", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-gcap-"));
+  const recipient = new EdgeBookStore({ home: path.join(root, "recipient") });
+  await recipient.init({ handle: "recipient.openclaw.local", displayName: "Recipient" });
+  await recipient.updateConfig({ inbound_max_global: 2, inbound_window_ms: 3_600_000 });
+  const recipientCard = await recipient.writeCard();
+
+  // Three distinct senders.
+  const senders = await Promise.all(
+    ["s1", "s2", "s3"].map(async (name) => {
+      const s = new EdgeBookStore({ home: path.join(root, name) });
+      await s.init({ handle: `${name}.openclaw.local`, displayName: name });
+      return s;
+    }),
+  );
+  // First two succeed.
+  await recipient.receiveFriendRequest(await senders[0].createFriendRequest(recipientCard));
+  await recipient.receiveFriendRequest(await senders[1].createFriendRequest(recipientCard));
+  // Third (distinct peer) must hit the global cap.
+  const req3 = await senders[2].createFriendRequest(recipientCard);
+  await assert.rejects(
+    () => recipient.receiveFriendRequest(req3),
+    (e: unknown) => e instanceof EdgeBookError && e.code === "rate_limited",
+  );
+});
+
+// FIX 4: expired invite code is not consumable — request is dropped
+test("invite-only drops a request carrying an expired invite code", async () => {
+  const { alice, bob } = await pair();
+  await bob.updateConfig({ open_friend_requests: false });
+  const bobCard = await bob.writeCard();
+  // Mint a code that expires in 1 ms.
+  const invite = await bob.mintInviteCode({ ttlMs: 1 });
+  // Wait long enough for the code to expire.
+  await new Promise((r) => setTimeout(r, 10));
+  const req = await alice.createFriendRequest(bobCard, "hi", invite.code);
+  await assert.rejects(
+    () => bob.receiveFriendRequest(req),
+    (e: unknown) => e instanceof EdgeBookError && e.code === "unsolicited_dropped",
+  );
+});
