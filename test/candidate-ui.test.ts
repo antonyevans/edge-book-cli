@@ -99,6 +99,27 @@ test("GET /api/candidates lists; POST promote returns a friend_request response_
   assert.equal(after?.approved, true);
 });
 
+test("POST /api/candidates/<unknown-id>/promote → 404 unknown_candidate", async () => {
+  const s = await store();
+  const res = await postApi(s, "/api/candidates/does-not-exist/promote", {});
+  assert.equal(res.status, 404);
+  assert.equal(res.json.error, "unknown_candidate");
+});
+
+test("POST /api/candidates/<id>/promote with no card_url → 400 candidate_not_resolvable", async () => {
+  const s = await store();
+  const c = await writeCandidate(s, {
+    source: "index",
+    confidence: "low",
+    display_name: "No Card",
+    reason: "no card_url candidate",
+    // deliberately omit card_url
+  });
+  const res = await postApi(s, `/api/candidates/${c.candidate_id}/promote`, {});
+  assert.equal(res.status, 400);
+  assert.equal(res.json.error, "candidate_not_resolvable");
+});
+
 test("POST /api/candidates/:id/reject drops it", async () => {
   const s = await store();
   const c = await writeCandidate(s, {

@@ -1390,16 +1390,14 @@ function dashboardHtml(): string {
         }).join("") || renderEmpty("No approval requests.");
       }
       if (state.view === "candidates") {
-        html = (state.candidates || []).map((candidate) => {
-          const actions = !candidate.approved
-            ? action("Approve", "candidate-approve", candidate.candidate_id) + action("Reject", "candidate-reject", candidate.candidate_id, "danger")
-            : "";
+        html = pendingCandidates().map((candidate) => {
+          const actions = action("Approve", "candidate-approve", candidate.candidate_id) + action("Reject", "candidate-reject", candidate.candidate_id, "danger");
           return item(candidate.display_name || "Unknown candidate", candidate.reason, [
             "source: " + labelize(candidate.source),
             "confidence: " + labelize(candidate.confidence),
             candidate.network ? "network: " + candidate.network : "",
-            candidate.approved ? "approved" : "pending"
-          ], candidate, candidate.approved ? "" : "", actions, [
+            "pending"
+          ], candidate, "", actions, [
             ["source", labelize(candidate.source)],
             ["confidence", labelize(candidate.confidence)],
             ["network", candidate.network || "n/a"],
