@@ -113,6 +113,54 @@ export const cardFileProvider = cardProvider("card_file", "card_file", (t) =>
   t.startsWith("file://") || t.startsWith("/") || t.startsWith("./") || t.endsWith(".json")
 );
 
+// Configurable per the 030 Index addendum: which open-vocab Index fields may
+// carry an Edge Book card URL. Confirm with Seref; changing this is one line.
+export const INDEX_CARD_URL_FIELDS = ["edge_book_card", "website", "websites"] as const;
+
+export interface IndexOpportunity {
+  message: string;
+  accept_url: string;
+  socials?: Record<string, string>;
+  network?: string;
+}
+
+export type IndexSource = (target: string) => Promise<IndexOpportunity[]>;
+
+function cardUrlFromSocials(socials?: Record<string, string>): string | undefined {
+  if (!socials) return undefined;
+  for (const field of INDEX_CARD_URL_FIELDS) {
+    if (socials[field]) return socials[field];
+  }
+  return undefined;
+}
+
+export function makeIndexProvider(source: IndexSource): ResolverProvider {
+  return {
+    name: "index",
+    priority: 10,
+    async resolve(_store, target) {
+      if (!target.startsWith("index:")) return null;
+      const opportunities = await source(target);
+      if (opportunities.length === 0) return null;
+      const opp = opportunities[0];
+      const display = opp.message.slice(0, 60);
+      return {
+        kind: "candidate",
+        candidate: {
+          source: "index",
+          confidence: "low",
+          display_name: display,
+          reason: opp.message,
+          network: opp.network,
+          card_url: cardUrlFromSocials(opp.socials),
+          // agent_id intentionally omitted — trust comes only from validateCard at promotion.
+        },
+        provenance: { source: "index", confidence: "low", display_name: display, reason: opp.message, network: opp.network },
+      };
+    },
+  };
+}
+
 export type RegistryLookup = (handle: string) => Promise<string | null>; // returns a loadCard-able target
 
 export function makeRegistryProvider(lookup: RegistryLookup): ResolverProvider {
