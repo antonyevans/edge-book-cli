@@ -862,6 +862,8 @@ export class EdgeBookStore {
       // Carry the peer's shared human name (undefined if they didn't opt in, or
       // dropped on refresh if they turned sharing off).
       owner_label: card.owner_label,
+      // Preserve a previously-received friend profile across card refreshes.
+      ...(existing?.friend_profile ? { friend_profile: existing.friend_profile } : {}),
       advertised_capabilities: card.advertised_capabilities,
       card_url: card.card_url,
       known_endpoints: card.transports,
@@ -963,7 +965,7 @@ export class EdgeBookStore {
     });
   }
 
-  async applyFriendResponse(envelope: MessageEnvelope): Promise<void> {
+  async applyFriendResponse(envelope: MessageEnvelope): Promise<MessageEnvelope | null> {
     await this.verifyEnvelope(envelope);
     if (envelope.type !== "friend_response") throw new EdgeBookError("wrong_message_type", "Expected friend_response envelope");
     const body = envelope.body as unknown as FriendResponseBody;
@@ -972,6 +974,82 @@ export class EdgeBookStore {
     await this.upsertContactFromCard(body.card, body.accepted ? "friend" : "rejected");
     await this.setRelationship(envelope.from_agent_id, body.accepted ? "friend" : "rejected", body.accepted ? "Accept" : "Reject", body.reason);
     if (body.grant) await this.storeGrant(body.grant);
+    if (body.accepted && body.profile) {
+      const publicKey = body.card.public_keys?.[0]?.public_key_pem;
+      if (publicKey && body.profile.agent_id === envelope.from_agent_id) {
+        validateFriendProfile(body.profile, publicKey);
+        await this.storeFriendProfile(envelope.from_agent_id, body.profile);
+      }
+    }
+    // Now that both sides are friends, send our own profile back.
+    if (body.accepted) return this.buildProfileShareEnvelope(envelope.from_agent_id);
+    return null;
+  }
+
+  // Persist a received FriendProfile onto the peer contact (last-writer-wins by
+  // profile_version). Returns true if applied, false if stale.
+  private async storeFriendProfile(peerAgentId: string, profile: FriendProfile): Promise<boolean> {
+    const contacts = await this.contacts();
+    const contact = contacts[peerAgentId];
+    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
+    const current = contact.friend_profile?.profile_version ?? -1;
+    if (profile.profile_version <= current) return false;
+    contact.friend_profile = profile;
+    contact.updated_at = now();
+    contacts[peerAgentId] = contact;
+    await this.saveContacts(contacts);
+    await this.audit("profile.received", peerAgentId, { profile_version: profile.profile_version });
+    return true;
+  }
+
+  // Build a signed profile_share envelope carrying our current FriendProfile to a
+  // confirmed friend.
+  async buildProfileShareEnvelope(peerAgentId: string): Promise<MessageEnvelope> {
+    const identity = await this.identity();
+    const contacts = await this.contacts();
+    const contact = contacts[peerAgentId];
+    if (!contact || contact.relationship_state !== "friend") {
+      throw new EdgeBookError("not_friend", `Not friends with ${peerAgentId}; cannot share profile`);
+    }
+    const profile = await this.buildFriendProfile();
+    return this.signEnvelope({
+      type: "profile_share",
+      to_agent_id: peerAgentId,
+      relationship_id: relationshipId(identity.agent_id, peerAgentId),
+      capability_id: "",
+      ref: "",
+      transport: "local",
+      body: { profile } satisfies ProfileShareBody,
+    });
+  }
+
+  async receiveProfileShare(envelope: MessageEnvelope): Promise<void> {
+    await this.verifyEnvelope(envelope);
+    if (envelope.type !== "profile_share") throw new EdgeBookError("wrong_message_type", "Expected profile_share envelope");
+    const contacts = await this.contacts();
+    const contact = contacts[envelope.from_agent_id];
+    if (!contact || contact.relationship_state !== "friend") {
+      throw new EdgeBookError("not_friend", "profile_share from a non-friend");
+    }
+    const body = envelope.body as unknown as ProfileShareBody;
+    if (body.profile.agent_id !== envelope.from_agent_id) {
+      throw new EdgeBookError("agent_id_mismatch", "FriendProfile agent_id does not match sender");
+    }
+    const publicKey = contact.public_keys?.[0]?.public_key_pem;
+    if (!publicKey) throw new EdgeBookError("unknown_key", `No key for ${envelope.from_agent_id}`);
+    validateFriendProfile(body.profile, publicKey);
+    await this.storeFriendProfile(envelope.from_agent_id, body.profile);
+  }
+
+  // Build a profile_share for every current friend (caller delivers them).
+  async broadcastProfileEnvelopes(): Promise<MessageEnvelope[]> {
+    const contacts = await this.contacts();
+    const friends = Object.values(contacts).filter((c) => c.relationship_state === "friend");
+    const out: MessageEnvelope[] = [];
+    for (const friend of friends) {
+      out.push(await this.buildProfileShareEnvelope(friend.peer_agent_id));
+    }
+    return out;
   }
 
   async revoke(peerAgentId: string): Promise<void> {
@@ -1895,13 +1973,14 @@ export class EdgeBookStore {
     return readJsonl<MessageEnvelope>(this.file(INBOX_FILE));
   }
 
-  async receiveEnvelope(envelope: MessageEnvelope): Promise<void | AgentContactRecord> {
+  async receiveEnvelope(envelope: MessageEnvelope): Promise<void | AgentContactRecord | MessageEnvelope | null> {
     if (envelope.type === "friend_request") return this.receiveFriendRequest(envelope);
     if (envelope.type === "friend_response") return this.applyFriendResponse(envelope);
     if (envelope.type === "privileged_message") return this.receivePrivilegedMessage(envelope);
     if (envelope.type === "object_share") { await this.receiveObjectShare(envelope); return; }
     if (envelope.type === "object_revoke") { await this.receiveObjectRevoke(envelope); return; }
     if (envelope.type === "post_publish") { await this.receivePostPublish(envelope); return; }
+    if (envelope.type === "profile_share") { await this.receiveProfileShare(envelope); return; }
     throw new EdgeBookError("unsupported_envelope", `Unsupported envelope type: ${envelope.type}`);
   }
 
