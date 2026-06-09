@@ -321,7 +321,15 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
   const approvalResolveMatch = /^\/api\/approvals\/([^/]+)\/resolve$/.exec(url.pathname);
   if (req.method === "POST" && approvalResolveMatch) {
     const body = await readJsonBody<{ approved?: boolean }>(req);
-    sendJson(res, 200, { approval: await store.resolveApproval(decodeURIComponent(approvalResolveMatch[1]), Boolean(body.approved)) });
+    const approved = Boolean(body.approved);
+    const approval = await store.resolveApproval(decodeURIComponent(approvalResolveMatch[1]), approved);
+    let response_envelope: unknown;
+    if (approval.type === "friend_accept") {
+      response_envelope = approved
+        ? await store.acceptFriend(approval.object_id)
+        : await store.rejectFriend(approval.object_id);
+    }
+    sendJson(res, 200, response_envelope ? { approval, response_envelope } : { approval });
     return true;
   }
 
