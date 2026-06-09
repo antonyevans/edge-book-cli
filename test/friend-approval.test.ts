@@ -3,8 +3,36 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { EdgeBookStore, type FriendResponseBody } from "../src/edge-book.ts";
+import { EdgeBookStore, type FriendResponseBody, type MessageEnvelope } from "../src/edge-book.ts";
 import { startEdgeBookServer } from "../src/http.ts";
+import { EdgeBookDialoutClient } from "../src/dialout.ts";
+
+// FakeSocket that acks hello AND mailbox_send (copied from dialout-escalation-relay.test.ts)
+class FakeSocket {
+  sent: Record<string, unknown>[] = [];
+  listeners: Record<string, Array<(event?: unknown) => void>> = {};
+  readyState = 1;
+  send(data: string): void {
+    const frame = JSON.parse(data) as Record<string, unknown>;
+    this.sent.push(frame);
+    if (frame.type === "hello") queueMicrotask(() => this.receive({ type: "hello_ok", channel_id: "ch", server_time: new Date().toISOString() }));
+    if (frame.type === "mailbox_send") queueMicrotask(() => this.receive({ type: "mailbox_send_ok", request_id: frame.request_id, id: "host-msg-1" }));
+  }
+  close(): void { this.emit("close"); }
+  addEventListener(event: string, handler: (event?: unknown) => void): void {
+    (this.listeners[event] ||= []).push(handler);
+  }
+  emit(event: string, value?: unknown): void { for (const h of this.listeners[event] || []) h(value); }
+  receive(value: unknown): void { this.emit("message", { data: JSON.stringify(value) }); }
+}
+
+async function waitFor(predicate: () => boolean): Promise<void> {
+  const started = Date.now();
+  while (!predicate()) {
+    if (Date.now() - started > 1500) throw new Error("Timed out waiting for condition");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
 
 function baseUrlOf(server: { address(): unknown }): string {
   return `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -81,4 +109,52 @@ test("resolving a friend_accept approval (approve) makes friends + returns respo
   assert.equal((json.response_envelope as { type: string }).type, "friend_response");
   assert.equal(((json.response_envelope as { body: { accepted: boolean } }).body).accepted, true);
   assert.equal((await bob.contacts())[aliceCard.agent_id].relationship_state, "friend");
+});
+
+test("approving a friend_accept in the reader auto-relays the friend_response over the dial-out channel", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-appr-relay-"));
+  const alice = new EdgeBookStore({ home: path.join(root, "alice") }); // requester
+  const bob = new EdgeBookStore({ home: path.join(root, "bob") });     // reviewee (dialed out)
+  await alice.init({ handle: "alice.openclaw.local", displayName: "Alice Agent" });
+  await bob.init({ handle: "bob.openclaw.local", displayName: "Bob Agent" });
+  const aliceCard = await alice.writeCard();
+  const bobCard = await bob.writeCard();
+  const aliceId = aliceCard.agent_id;
+
+  // Alice sends a friend request; Bob receives it (creates a friend_accept approval).
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+  const approval = Object.values(await bob.approvals()).find((a) => a.type === "friend_accept")!;
+
+  // Bob is dialed out. His human approves in the reader (api_request POST over the channel).
+  let socket: FakeSocket | undefined;
+  const client = new EdgeBookDialoutClient({
+    home: bob.home,
+    host: "ws://host.test/agent",
+    socketFactory: (() => { socket = new FakeSocket(); queueMicrotask(() => socket!.emit("open")); return socket!; }) as never,
+    heartbeatMs: 10_000,
+  });
+  await client.start();
+  try {
+    socket!.receive({
+      type: "api_request",
+      request_id: "frq",
+      method: "POST",
+      path: `/api/approvals/${encodeURIComponent(approval.approval_id)}/resolve`,
+      body_b64: Buffer.from(JSON.stringify({ approved: true }), "utf8").toString("base64"),
+    });
+
+    // The client should both respond (api_response) AND relay a mailbox_send.
+    await waitFor(() => socket!.sent.some((f) => f.type === "mailbox_send"));
+    const relay = socket!.sent.find((f) => f.type === "mailbox_send") as { to: string; blob_b64: string };
+    assert.equal(relay.to, aliceId, "friend_response routes back to the requesting agent");
+    const routed = JSON.parse(Buffer.from(relay.blob_b64, "base64").toString("utf8")) as MessageEnvelope;
+    assert.equal(routed.type, "friend_response");
+    assert.equal(routed.to_agent_id, aliceId);
+
+    // Alice can apply it and becomes friends.
+    await alice.applyFriendResponse(routed);
+    assert.equal((await alice.contacts())[bobCard.agent_id].relationship_state, "friend");
+  } finally {
+    await client.stop();
+  }
 });

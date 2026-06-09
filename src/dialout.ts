@@ -599,11 +599,13 @@ export class EdgeBookDialoutClient {
     await this.options.onStandDown?.(frame);
   }
 
-  // If an API response carries a routed-back `response_envelope` (the escalation
-  // answer endpoint sets it for remote-origin escalations), deliver it over the
-  // mailbox. Best-effort: swallow + audit relay errors so the human's answer, which
-  // is already saved, still returns 200.
-  private async maybeRelayEscalationResponse(status: number, bodyBuffer: Buffer): Promise<void> {
+  // If an API response carries a routed-back `response_envelope` (e.g. the escalation
+  // answer endpoint for remote escalations, or the approval resolve endpoint for
+  // friend_accept approvals), deliver it over the mailbox. Best-effort: swallow +
+  // audit relay errors so the human's action, which is already persisted, still
+  // returns 200. Audit event names are keyed on the envelope type for honest trails
+  // (e.g. "escalation_response.relay", "friend_response.relay").
+  private async maybeRelayResponseEnvelope(status: number, bodyBuffer: Buffer): Promise<void> {
     if (status < 200 || status >= 300) return;
     let envelope: MessageEnvelope | undefined;
     try {
@@ -613,11 +615,12 @@ export class EdgeBookDialoutClient {
       return; // non-JSON or unparseable — nothing to relay
     }
     if (!envelope) return;
+    const envType = (envelope as { type?: string }).type || "unknown";
     try {
       await this.sendEnvelope(envelope);
-      await this.store.audit("escalation.relay", envelope.to_agent_id, { message_id: envelope.message_id, ref: envelope.ref });
+      await this.store.audit(`${envType}.relay`, envelope.to_agent_id, { message_id: envelope.message_id, ref: envelope.ref });
     } catch (error) {
-      await this.store.audit("escalation.relay_failed", envelope.to_agent_id, { ref: envelope.ref, error: error instanceof Error ? error.message : String(error) });
+      await this.store.audit(`${envType}.relay_failed`, envelope.to_agent_id, { ref: envelope.ref, error: error instanceof Error ? error.message : String(error) });
     }
   }
 
@@ -638,12 +641,12 @@ export class EdgeBookDialoutClient {
         body: requestBody(frame, method)
       });
       const bodyBuffer = Buffer.from(await response.arrayBuffer());
-      // Auto-relay: when the owner answers a *remote* escalation in the reader, the
-      // answer endpoint returns a signed `response_envelope` addressed to the agent
-      // that raised it. We hold the live channel, so route it back over the mailbox
-      // (ea-claude-094). Best-effort — the answer is already persisted locally, so a
+      // Auto-relay: when the owner answers a *remote* escalation or approves/rejects
+      // a friend request in the reader, the endpoint returns a signed `response_envelope`
+      // addressed to the originating agent. We hold the live channel, so route it back
+      // over the mailbox. Best-effort — the action is already persisted locally, so a
       // relay failure must not fail the human's request.
-      await this.maybeRelayEscalationResponse(response.status, bodyBuffer);
+      await this.maybeRelayResponseEnvelope(response.status, bodyBuffer);
       return {
         type: "api_response",
         id: frame.id || frame.request_id || "",
