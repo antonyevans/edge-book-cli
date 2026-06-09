@@ -559,6 +559,31 @@ function relationshipId(a: string, b: string): string {
   return `rel_${crypto.createHash("sha256").update([a, b].sort().join("|")).digest("base64url").slice(0, 24)}`;
 }
 
+// Resolve the effective profile for an identity, migrating legacy
+// owner_label/share_owner_label when identity.profile is absent. Pure: callers
+// persist the result via setProfile when the user next edits (no write-on-read).
+export function defaultProfile(identity: LocalIdentity): IdentityProfile {
+  if (identity.profile) return identity.profile;
+  const visibility: Record<string, FieldVisibility> = {
+    // Migration (apply-new-default-to-all): legacy share on => name public;
+    // legacy share off/absent => name resolves to the new default "friends".
+    name: identity.share_owner_label ? "public" : "friends",
+  };
+  return {
+    name: identity.owner_label || undefined,
+    visibility,
+    profile_version: 1,
+  };
+}
+
+export function resolveFieldVisibility(profile: IdentityProfile, field: string): FieldVisibility {
+  return profile.visibility?.[field] ?? "friends";
+}
+
+export function resolveSocialVisibility(profile: IdentityProfile, label: string): FieldVisibility {
+  return profile.visibility?.[label] ?? profile.visibility?.["*"] ?? "friends";
+}
+
 // Shared Class-2 lifecycle: terminal states are preserved; otherwise past-expiry
 // becomes "expired" for hard-TTL types or "stale" for soft ones.
 export function computeLifecycle(
