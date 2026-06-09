@@ -143,7 +143,7 @@ export async function runSmoke(opts: SmokeOptions): Promise<SmokeResult> {
     });
 
     await step(`profile: bidirectional friend profile exchange (via ${transport.name})`, async () => {
-      // Alice applies the accepted friend_response and gets back a follow-up profile_share to deliver.
+      // Both sides are already friends; directly build + deliver Alice's profile_share to exercise the profile_share transport path. (The applyFriendResponse->follow-up seam is covered in runTwoAgentHarness.)
       const followUpEnv = await alice.store.buildProfileShareEnvelope(bob.card.agent_id);
       await transport.deliver(alice, bob, followUpEnv, async () => {
         const contact = (await bob.store.contacts())[alice.card.agent_id];

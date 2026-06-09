@@ -976,10 +976,10 @@ export class EdgeBookStore {
     if (body.grant) await this.storeGrant(body.grant);
     if (body.accepted && body.profile) {
       const publicKey = body.card.public_keys?.[0]?.public_key_pem;
-      if (publicKey && body.profile.agent_id === envelope.from_agent_id) {
-        validateFriendProfile(body.profile, publicKey);
-        await this.storeFriendProfile(envelope.from_agent_id, body.profile);
-      }
+      if (!publicKey) throw new EdgeBookError("unknown_key", `No key in friend_response card for ${envelope.from_agent_id}`);
+      if (body.profile.agent_id !== envelope.from_agent_id) throw new EdgeBookError("agent_id_mismatch", "friend_response profile agent_id does not match sender");
+      validateFriendProfile(body.profile, publicKey);
+      await this.storeFriendProfile(envelope.from_agent_id, body.profile);
     }
     // Now that both sides are friends, send our own profile back.
     if (body.accepted) return this.buildProfileShareEnvelope(envelope.from_agent_id);

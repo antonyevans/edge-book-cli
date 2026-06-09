@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { EdgeBookStore, type FriendResponseBody, type MessageEnvelope } from "../src/edge-book.ts";
+import { EdgeBookStore, type FriendResponseBody, type MessageEnvelope, type ProfileShareBody } from "../src/edge-book.ts";
 
 async function twoAgents() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-x-"));
@@ -110,9 +110,9 @@ test("profile_share from a non-friend is rejected", async () => {
   // Bob (not friends with Alice from Alice's view) crafts a share to Alice.
   await bob.upsertContactFromCard(aliceCard, "friend"); // Bob thinks they're friends
   const share = await bob.buildProfileShareEnvelope(aliceCard.agent_id);
-  await assert.rejects(() => alice.receiveProfileShare(share), (err: Error) => {
-    // Must be rejected (non-friend) — accept any error about non-friend state.
-    return err.message.includes("non-friend") || (err as any).code === "not_friend";
+  await assert.rejects(() => alice.receiveProfileShare(share), (err: any) => {
+    assert.equal(err.code, "not_friend");
+    return true;
   });
 });
 
@@ -129,6 +129,33 @@ test("profile_share with mismatched agent_id is rejected", async () => {
     // Envelope signature check or agent_id mismatch — either is correct.
     return ["agent_id_mismatch", "invalid_friend_profile", "invalid_signature"].includes(code)
       || err.message.includes("invalid") || err.message.includes("mismatch");
+  });
+});
+
+test("receiveProfileShare rejects agent_id_mismatch when envelope is validly signed but inner profile agent_id differs from sender", async () => {
+  const { alice, bob } = await twoAgents();
+  const aliceCard = await alice.writeCard();
+  const bobCard = await bob.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+  await bob.receiveProfileShare((await alice.applyFriendResponse(await bob.acceptFriend(aliceCard.agent_id)))!);
+  // Build a valid profile_share from Bob's side to get a real profile object.
+  const honest = await bob.buildProfileShareEnvelope(aliceCard.agent_id);
+  const honestBody = honest.body as unknown as ProfileShareBody;
+  // Tamper: replace agent_id with a wrong value, then re-sign the ENTIRE envelope so
+  // verifyEnvelope passes — the agent_id_mismatch guard in receiveProfileShare fires first.
+  const tamperedProfile = { ...honestBody.profile, agent_id: "did:openclaw:not-bob" };
+  const tamperedEnvelope = await bob.signEnvelope({
+    type: "profile_share",
+    to_agent_id: aliceCard.agent_id,
+    relationship_id: "",
+    capability_id: "",
+    ref: "",
+    transport: "local",
+    body: { profile: tamperedProfile } satisfies ProfileShareBody,
+  });
+  await assert.rejects(() => alice.receiveProfileShare(tamperedEnvelope), (err: any) => {
+    assert.equal(err.code, "agent_id_mismatch");
+    return true;
   });
 });
 
