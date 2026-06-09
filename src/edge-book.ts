@@ -998,6 +998,23 @@ export class EdgeBookStore {
     const contact = await this.upsertContactFromCard(body.card, "request_received");
     await this.setRelationship(envelope.from_agent_id, "request_received", "FriendRequest", body.note);
     await appendJsonl(this.file(INBOX_FILE), envelope);
+    // Dedup: if a pending friend_accept already exists for this peer (e.g. from a
+    // prior request that was revoked and re-sent with a fresh message_id), reuse it
+    // rather than accumulating stale duplicates that would each re-run acceptFriend.
+    const existingApprovals = await this.approvals();
+    const alreadyPending = Object.values(existingApprovals).some(
+      (a) => a.status === "pending" && a.type === "friend_accept" && a.object_id === envelope.from_agent_id,
+    );
+    if (!alreadyPending) {
+      await this.createApproval({
+        type: "friend_accept",
+        objectType: "contact",
+        objectId: envelope.from_agent_id,
+        summary: `Friend request from ${body.card.display_name}`,
+        riskLevel: "low",
+        requestedByAgentId: envelope.from_agent_id,
+      });
+    }
     return contact;
   }
 
@@ -1052,6 +1069,25 @@ export class EdgeBookStore {
       ref: "",
       transport: "local",
       body: { accepted: true, card, grant, profile, reason } satisfies FriendResponseBody
+    });
+  }
+
+  async rejectFriend(peerAgentId: string, reason = "rejected"): Promise<MessageEnvelope> {
+    const identity = await this.identity();
+    const contacts = await this.contacts();
+    const contact = contacts[peerAgentId];
+    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
+    if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked_peer", "Cannot reject a blocked peer");
+    await this.setRelationship(peerAgentId, "rejected", "Reject", reason);
+    const card = await this.writeCard();
+    return this.signEnvelope({
+      type: "friend_response",
+      to_agent_id: peerAgentId,
+      relationship_id: relationshipId(identity.agent_id, peerAgentId),
+      capability_id: "",
+      ref: "",
+      transport: "local",
+      body: { accepted: false, card, reason } satisfies FriendResponseBody,
     });
   }
 

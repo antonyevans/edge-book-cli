@@ -130,7 +130,7 @@ test("export includes backend objects and import review is non-activating", asyn
     sessions: 0,
     posts: 0,
     feed_items: 1,
-    approvals: 0,
+    approvals: 1, // friend_accept approval created by receiveFriendRequest
     contact_mutes: 1,
     audit: (await bob.auditEvents()).length
   });
