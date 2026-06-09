@@ -21,6 +21,9 @@ export interface EdgeBookOptions {
 export interface EdgeBookConfig {
   direct_url?: string;
   relay_url?: string;
+  // Default ON (treat undefined as true). When false, pendingFriendRequests()
+  // returns [] so the notifier cron stays silent.
+  notify_on_friend_request?: boolean;
 }
 
 export interface LocalIdentity {
@@ -108,6 +111,9 @@ export interface AgentContactRecord {
   owner_label?: string;
   // The latest FriendProfile this peer shared with us (only present once friends).
   friend_profile?: FriendProfile;
+  // ISO timestamp the human was last notified of this inbound request ("" = not
+  // yet notified). Drives friend-request notification dedup.
+  notified_at?: string;
   // The peer's advertised capabilities (from their card; absent if none / older card).
   advertised_capabilities?: Array<{ name: string; version: string; summary: string; status: "active" | "deprecated" }>;
   card_url: string;
@@ -764,6 +770,7 @@ export class EdgeBookStore {
     const next: EdgeBookConfig = { ...current };
     if (input.direct_url !== undefined) next.direct_url = input.direct_url;
     if (input.relay_url !== undefined) next.relay_url = input.relay_url;
+    if (input.notify_on_friend_request !== undefined) next.notify_on_friend_request = input.notify_on_friend_request;
     await writeJson(this.file(CONFIG_FILE), next);
     return next;
   }
@@ -910,6 +917,10 @@ export class EdgeBookStore {
       owner_label: card.owner_label,
       // Preserve a previously-received friend profile across card refreshes.
       ...(existing?.friend_profile ? { friend_profile: existing.friend_profile } : {}),
+      // When transitioning INTO request_received (a fresh inbound request), clear
+      // any stale notified_at so the human is re-notified. For all other state
+      // changes (card refreshes, accept, etc.) carry the stamp forward as before.
+      ...(state !== "request_received" && existing?.notified_at ? { notified_at: existing.notified_at } : {}),
       advertised_capabilities: card.advertised_capabilities,
       card_url: card.card_url,
       known_endpoints: card.transports,
@@ -988,6 +999,31 @@ export class EdgeBookStore {
     await this.setRelationship(envelope.from_agent_id, "request_received", "FriendRequest", body.note);
     await appendJsonl(this.file(INBOX_FILE), envelope);
     return contact;
+  }
+
+  // Inbound friend requests the human hasn't been told about yet. Empty when the
+  // agent has notifications disabled. Read-only — the notifier cron consumes this.
+  async pendingFriendRequests(): Promise<AgentContactRecord[]> {
+    const config = await this.config();
+    if (config.notify_on_friend_request === false) return [];
+    const contacts = await this.contacts();
+    return Object.values(contacts).filter(
+      (c) => c.relationship_state === "request_received" && !c.notified_at,
+    );
+  }
+
+  // Stamp a request as notified so it won't surface again (idempotent sweep,
+  // mirrors expireEscalations).
+  async markFriendRequestNotified(peerAgentId: string): Promise<void> {
+    const contacts = await this.contacts();
+    const contact = contacts[peerAgentId];
+    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
+    if (contact.notified_at) return;
+    contact.notified_at = now();
+    contact.updated_at = now();
+    contacts[peerAgentId] = contact;
+    await this.saveContacts(contacts);
+    await this.audit("friend.notified", peerAgentId, {});
   }
 
   async acceptFriend(peerAgentId: string, reason = "accepted"): Promise<MessageEnvelope> {
