@@ -998,14 +998,23 @@ export class EdgeBookStore {
     const contact = await this.upsertContactFromCard(body.card, "request_received");
     await this.setRelationship(envelope.from_agent_id, "request_received", "FriendRequest", body.note);
     await appendJsonl(this.file(INBOX_FILE), envelope);
-    await this.createApproval({
-      type: "friend_accept",
-      objectType: "contact",
-      objectId: envelope.from_agent_id,
-      summary: `Friend request from ${body.card.display_name}`,
-      riskLevel: "low",
-      requestedByAgentId: envelope.from_agent_id,
-    });
+    // Dedup: if a pending friend_accept already exists for this peer (e.g. from a
+    // prior request that was revoked and re-sent with a fresh message_id), reuse it
+    // rather than accumulating stale duplicates that would each re-run acceptFriend.
+    const existingApprovals = await this.approvals();
+    const alreadyPending = Object.values(existingApprovals).some(
+      (a) => a.status === "pending" && a.type === "friend_accept" && a.object_id === envelope.from_agent_id,
+    );
+    if (!alreadyPending) {
+      await this.createApproval({
+        type: "friend_accept",
+        objectType: "contact",
+        objectId: envelope.from_agent_id,
+        summary: `Friend request from ${body.card.display_name}`,
+        riskLevel: "low",
+        requestedByAgentId: envelope.from_agent_id,
+      });
+    }
     return contact;
   }
 

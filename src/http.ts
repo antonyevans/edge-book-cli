@@ -322,7 +322,29 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
   if (req.method === "POST" && approvalResolveMatch) {
     const body = await readJsonBody<{ approved?: boolean }>(req);
     const approved = Boolean(body.approved);
-    const approval = await store.resolveApproval(decodeURIComponent(approvalResolveMatch[1]), approved);
+    const approvalId = decodeURIComponent(approvalResolveMatch[1]);
+    // Pre-validate for friend_accept (pending only): confirm the contact exists and
+    // is in the right state BEFORE flipping the approval status. This makes a bad
+    // contact state retryable (throws without touching approvals). A double-click on
+    // an already-resolved approval still hits resolveApproval's own guard
+    // ("approval_resolved") — we only pre-check when status is still "pending" so
+    // we don't pre-empt that idempotency guard.
+    const allApprovals = await store.approvals();
+    const pendingApproval = allApprovals[approvalId];
+    if (pendingApproval?.type === "friend_accept" && pendingApproval.status === "pending") {
+      const contacts = await store.contacts();
+      const targetContact = contacts[pendingApproval.object_id];
+      if (!targetContact) {
+        throw new EdgeBookError("unknown_contact", `Contact not found for approval: ${pendingApproval.object_id}`);
+      }
+      if (approved && targetContact.relationship_state !== "request_received") {
+        throw new EdgeBookError(
+          "invalid_relationship_state",
+          `Cannot approve friend_accept: contact is in state '${targetContact.relationship_state}', expected 'request_received'`,
+        );
+      }
+    }
+    const approval = await store.resolveApproval(approvalId, approved);
     let response_envelope: unknown;
     if (approval.type === "friend_accept") {
       response_envelope = approved

@@ -111,6 +111,44 @@ test("resolving a friend_accept approval (approve) makes friends + returns respo
   assert.equal((await bob.contacts())[aliceCard.agent_id].relationship_state, "friend");
 });
 
+test("duplicate friend requests from the same peer produce exactly one pending friend_accept approval", async () => {
+  const { alice, bob } = await pair();
+  const aliceCard = await alice.writeCard();
+  const aliceId = aliceCard.agent_id;
+
+  // First request: bob receives, creating a pending approval.
+  await bob.receiveFriendRequest(await alice.createFriendRequest(await bob.writeCard()));
+  const afterFirst = Object.values(await bob.approvals()).filter(
+    (a) => a.type === "friend_accept" && a.status === "pending",
+  );
+  assert.equal(afterFirst.length, 1, "should have exactly 1 pending friend_accept after first request");
+
+  // Simulate revoke + re-request: alice's contact is revoked, then a fresh inbound arrives.
+  await bob.revoke(aliceId);
+  // Upsert contact back to request_received (simulates the fresh inbound request arriving).
+  await bob.upsertContactFromCard(aliceCard, "request_received");
+  // Receive a second request envelope — fresh message_id, passes replay guard.
+  await bob.receiveFriendRequest(await alice.createFriendRequest(await bob.writeCard()));
+
+  const afterSecond = Object.values(await bob.approvals()).filter(
+    (a) => a.type === "friend_accept" && a.status === "pending" && a.object_id === aliceId,
+  );
+  assert.equal(afterSecond.length, 1, "should still have exactly 1 pending friend_accept after re-request (no duplicate)");
+});
+
+test("resolving a friend_accept approval (reject) returns accepted:false friend_response", async () => {
+  const { alice, bob } = await pair();
+  const aliceCard = await alice.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(await bob.writeCard()));
+  const approval = Object.values(await bob.approvals()).find((a) => a.type === "friend_accept")!;
+
+  const { json } = await postApi(bob, `/api/approvals/${approval.approval_id}/resolve`, { approved: false });
+  assert.equal((json.approval as { status: string }).status, "rejected");
+  assert.equal((json.response_envelope as { type: string }).type, "friend_response");
+  assert.equal(((json.response_envelope as { body: { accepted: boolean } }).body).accepted, false);
+  assert.equal((await bob.contacts())[aliceCard.agent_id].relationship_state, "rejected");
+});
+
 test("approving a friend_accept in the reader auto-relays the friend_response over the dial-out channel", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-appr-relay-"));
   const alice = new EdgeBookStore({ home: path.join(root, "alice") }); // requester
