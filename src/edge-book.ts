@@ -831,6 +831,29 @@ export class EdgeBookStore {
     return identity;
   }
 
+  // Portable identity bundle (the DID keypair + chosen handle). Carry to a new
+  // device → same DID → relay handle keeps resolving to you (spec-096).
+  async exportIdentity(): Promise<{ schema: "edge-book-identity-export/0.1"; identity: LocalIdentity }> {
+    return { schema: "edge-book-identity-export/0.1", identity: await this.identity() };
+  }
+
+  async importIdentity(bundle: { identity: LocalIdentity }, opts: { force?: boolean } = {}): Promise<LocalIdentity> {
+    await ensureHome(this.home);
+    const existing = await readJson<LocalIdentity | null>(this.file(IDENTITY_FILE), null);
+    if (existing && !opts.force) throw new EdgeBookError("identity_exists", `identity_exists: an identity already exists at ${this.home} (use --force to overwrite)`);
+    const id = bundle.identity;
+    if (!id?.public_key_pem || id.agent_id !== stableIdFromPublicKey(id.public_key_pem)) {
+      throw new EdgeBookError("invalid_import", "Bundle agent_id does not match its public key");
+    }
+    await writeJson(this.file(IDENTITY_FILE), id, 0o600);
+    if (!(await readJson<unknown | null>(this.file(CONTACTS_FILE), null))) await writeJson(this.file(CONTACTS_FILE), {});
+    if (!(await readJson<unknown | null>(this.file(GRANTS_FILE), null))) await writeJson(this.file(GRANTS_FILE), {});
+    if (!(await readJson<unknown | null>(this.file(SEEN_MESSAGES_FILE), null))) await writeJson(this.file(SEEN_MESSAGES_FILE), []);
+    await this.writeCard();
+    await this.audit("identity.import", id.agent_id, { handle: id.handle });
+    return id;
+  }
+
   async config(): Promise<EdgeBookConfig> {
     return readJson<EdgeBookConfig>(this.file(CONFIG_FILE), {});
   }
