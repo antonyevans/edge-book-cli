@@ -112,3 +112,24 @@ export const cardUrlProvider = cardProvider("card_url", "card_url", (t) => /^htt
 export const cardFileProvider = cardProvider("card_file", "card_file", (t) =>
   t.startsWith("file://") || t.startsWith("/") || t.startsWith("./") || t.endsWith(".json")
 );
+
+export type RegistryLookup = (handle: string) => Promise<string | null>; // returns a loadCard-able target
+
+export function makeRegistryProvider(lookup: RegistryLookup): ResolverProvider {
+  return {
+    name: "registry",
+    priority: 50,
+    async resolve(_store, target) {
+      if (!target.startsWith("registry:")) return null;
+      const cardTarget = await lookup(target);
+      if (!cardTarget) return null;
+      const card = await loadCard(cardTarget);
+      return {
+        kind: "card",
+        card,
+        agent_id: card.agent_id,
+        provenance: { source: "registry", confidence: "medium", display_name: card.handle, reason: "registry handle lookup" },
+      };
+    },
+  };
+}
