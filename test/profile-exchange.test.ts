@@ -99,6 +99,55 @@ test("receiveEnvelope surfaces a profile_share follow-up for a friend_response",
   assert.ok(result && (result as MessageEnvelope).type === "profile_share");
 });
 
+// Security tests (Task 15)
+
+test("profile_share from a non-friend is rejected", async () => {
+  const { alice, bob } = await twoAgents();
+  const aliceCard = await alice.writeCard();
+  const bobCard = await bob.writeCard();
+  // Make Alice know Bob's key (request_sent) but NOT be friends.
+  await alice.createFriendRequest(bobCard);
+  // Bob (not friends with Alice from Alice's view) crafts a share to Alice.
+  await bob.upsertContactFromCard(aliceCard, "friend"); // Bob thinks they're friends
+  const share = await bob.buildProfileShareEnvelope(aliceCard.agent_id);
+  await assert.rejects(() => alice.receiveProfileShare(share), (err: Error) => {
+    // Must be rejected (non-friend) — accept any error about non-friend state.
+    return err.message.includes("non-friend") || (err as any).code === "not_friend";
+  });
+});
+
+test("profile_share with mismatched agent_id is rejected", async () => {
+  const { alice, bob } = await twoAgents();
+  const aliceCard = await alice.writeCard();
+  const bobCard = await bob.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+  await bob.receiveProfileShare((await alice.applyFriendResponse(await bob.acceptFriend(aliceCard.agent_id)))!);
+  const share = await bob.buildProfileShareEnvelope(aliceCard.agent_id);
+  (share.body as any).profile.agent_id = "did:openclaw:someone-else";
+  await assert.rejects(() => alice.receiveProfileShare(share), (err: Error) => {
+    const code = (err as any).code ?? "";
+    // Envelope signature check or agent_id mismatch — either is correct.
+    return ["agent_id_mismatch", "invalid_friend_profile", "invalid_signature"].includes(code)
+      || err.message.includes("invalid") || err.message.includes("mismatch");
+  });
+});
+
+test("tampered friend profile signature is rejected", async () => {
+  const { alice, bob } = await twoAgents();
+  const aliceCard = await alice.writeCard();
+  const bobCard = await bob.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+  await bob.receiveProfileShare((await alice.applyFriendResponse(await bob.acceptFriend(aliceCard.agent_id)))!);
+  const share = await bob.buildProfileShareEnvelope(aliceCard.agent_id);
+  (share.body as any).profile.bio = "INJECTED";
+  await assert.rejects(() => alice.receiveProfileShare(share), (err: Error) => {
+    const code = (err as any).code ?? "";
+    // Envelope signature, friend profile signature, or replay — any is correct rejection.
+    return ["invalid_friend_profile", "invalid_signature", "replay"].includes(code)
+      || err.message.includes("invalid") || err.message.includes("Replay");
+  });
+});
+
 test("broadcastProfileEnvelopes targets every current friend", async () => {
   const { alice, bob } = await twoAgents();
   const aliceCard = await alice.writeCard();
