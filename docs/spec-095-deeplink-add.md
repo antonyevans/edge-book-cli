@@ -126,3 +126,21 @@ CSRF and is the correct trust boundary for mutations.
 - A single QR that pairs *and* adds in one step (visitor has no agent yet).
 - Push-notifying the target that a request arrived (reader poll surfaces it today).
 - Auto-accept on the target side — approval stays a human gate.
+
+---
+
+## As-built (2026-06-09) — shipped to `main`, host deployed
+
+Implemented smaller than spec'd: `main` already had the generalized dial-out relay
+(`maybeRelayResponseEnvelope`, relays any `response_envelope`), so **no dial-out change
+was needed** (the spec's `maybeRelayOutboundEnvelope` rename was dropped).
+
+- **edge-book-cli** `main`: `POST /api/friend/request` — parses an `edgebook:invite:` link,
+  issues a friend request (auth'd, idempotent on friend/request_sent), returns it as
+  `response_envelope` for the existing relay. Tests: api-friend-request (3) +
+  dialout-friend-relay (1). Suite 202/202.
+- **edge-book-host** `main` (deployed): `GET /auth/session`; `/add` "Add to my agent" CTA →
+  reader `/?add=`; reader confirm → POST `/api/friend/request` with CSRF. Suite 69/69.
+- Verified end-to-end with a real host + real agent (paired, proxied, issued + relayed).
+- Decisions: D1 reader handoff · D3 codeless open invites only · D5 host-only `/auth/session`.
+- Remaining (non-code): republish `edge-book` to npm so paired agents have the endpoint.
