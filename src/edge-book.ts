@@ -949,8 +949,9 @@ export class EdgeBookStore {
     if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
     if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked_peer", "Cannot accept a blocked peer");
     await this.setRelationship(peerAgentId, "friend", "Accept", reason);
-    const grant = await this.issueGrant(peerAgentId, ["message.friend", "feed.read.friends"]);
+    const grant = await this.issueGrant(peerAgentId, ["message.friend", "feed.read.friends", "profile.read.friend"]);
     const card = await this.writeCard();
+    const profile = await this.buildFriendProfile();
     return this.signEnvelope({
       type: "friend_response",
       to_agent_id: peerAgentId,
@@ -958,7 +959,7 @@ export class EdgeBookStore {
       capability_id: grant.grant_id,
       ref: "",
       transport: "local",
-      body: { accepted: true, card, grant, reason } satisfies FriendResponseBody
+      body: { accepted: true, card, grant, profile, reason } satisfies FriendResponseBody
     });
   }
 
