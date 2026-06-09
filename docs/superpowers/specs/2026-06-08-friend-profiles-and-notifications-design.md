@@ -28,7 +28,7 @@ Two gaps in the current friend-request protocol:
 
 ## Background: the ecosystem we plug into
 
-edge-book-cli is the agent's CLI tool. The agent runs on **Hermes** (the host platform — OpenClaw is no longer used) inside the **agentvillage** skill bundle (`Edge-City/agentvillage`, `Edge-City/agentvillage-skills`). Two existing facts shape this design:
+edge-book-cli is the agent's CLI tool. The agent runs on **Hermes** (the primary host platform; **OpenClaw support is planned for later** — both are first-class targets, Hermes ships first) inside the **agentvillage** skill bundle (`Edge-City/agentvillage`, `Edge-City/agentvillage-skills`). Two existing facts shape this design:
 
 - **Profile shape.** Index Network's signup/profile model is `name`, `bio`, `location`, `socials: [{label, value}]` with an **open vocabulary** of labels (`telegram`, `twitter`, `github`, `farcaster`, …). We mirror this so edge-book profiles and Index profiles are interchangeable in the operator's mind.
 - **Notification pattern.** `agentvillage-skills/index-network/heartbeat.md` defines an `accepted-opportunities` heartbeat task: on a cron tick the agent polls for un-notified items and messages the human **on their last-active channel**, tracking dedup state in `memory/heartbeat-state.json`. This is the proven "notify over the usual network" mechanism. We add an analogous task for inbound friend requests rather than inventing a transport.
@@ -158,7 +158,7 @@ Prompt body:
      `edge-book friend pending --mark-notified <agent_id>`.
   ```
 
-*Portable heartbeat file (forward-compat, optional).* Also ship the same task as a host-agnostic `skills/edge-book/heartbeat.md` block (`{name, interval, prompt}`, dedup via edge-book's `notified_at`) so a non-Hermes host that walks heartbeat files can pick it up without the cron installer. Not load-bearing for the current Hermes deployment.
+*OpenClaw skill bundle (planned, ships later).* OpenClaw loads skills via `openclaw.plugin.json` (`"skills": ["."]`) and walks a `heartbeat.md` of `{name, interval, prompt}` tasks on its tick. Ship `skills/edge-book/` with `openclaw.plugin.json` + `SKILL.md` + a `heartbeat.md` carrying the SAME `inbound-friend-requests` task (same prompt body, dedup via edge-book's `notified_at`; last-run in `memory/heartbeat-state.json` under `inboundFriendRequests`). The prompt body is shared with the Hermes cron — single source, two host adapters. Build the data surface + Hermes cron first; the OpenClaw bundle is a thin follow-on that reuses everything.
 
 **C2. Pull via reader approvals (the complement).**
 
@@ -179,8 +179,8 @@ Prompt body:
 | profile exchange (`profile_share` send/receive) | Two-step + edit broadcast | envelope sign/verify, grants |
 | `acceptFriend` (modified) | Add `profile.read.friend` scope + attach profile to response | grants |
 | `friend pending` CLI + notify-state | Expose un-notified inbound requests, dedup (`notified_at`), suppress when notify off | contact store, identity config |
-| Hermes friend-notify cron installer | `FRIEND_NOTIFY_CRON_SPEC` + idempotent reconciler + prompt file | `hermes cron`, mirrors `install_index.ts` |
-| Portable heartbeat block (optional) | `skills/edge-book/heartbeat.md` (`inbound-friend-requests` task) for non-Hermes hosts | host heartbeat tick |
+| Hermes friend-notify cron installer (ships first) | `FRIEND_NOTIFY_CRON_SPEC` + idempotent reconciler + shared prompt file | `hermes cron`, mirrors `install_index.ts` |
+| OpenClaw skill bundle (ships later) | `skills/edge-book/` (`openclaw.plugin.json` + `SKILL.md` + `heartbeat.md`), reuses shared prompt body | OpenClaw heartbeat tick |
 | reader approvals wiring | `friend_accept` approval + accept/reject endpoints | host `/api/*` proxy, reader HTML |
 | migration | Map `owner_label`/`share_owner_label` → profile model | identity load |
 
@@ -207,8 +207,8 @@ Prompt body:
 Confirmed against `Edge-City/agentvillage` (`install/install_index.ts`, `install/paths.ts`) and `Edge-City/agentvillage-skills` (`openclaw.plugin.json`, `index-network/heartbeat.md`):
 
 - **Recurring agent tasks are cron jobs whose body is a natural-language prompt**, delivered on the host channel. There is no separate notification API to call — the agent IS the notifier.
-- **Hermes (this user's host — the path that ships):** add `FRIEND_NOTIFY_CRON_SPEC` + idempotent reconciler mirroring `DIGEST_CRON_SPECS` / `reconcileDigestCronJobs`; `hermes cron create <schedule> <prompt> --name "Edge Book — friend requests" --deliver telegram --workdir $HERMES_HOME`. Own cron-name prefix to avoid collision with agentvillage's `"Edge —"` jobs. Reconciler updates prompt body only, preserving schedule + pause state.
-- **Portable heartbeat (forward-compat, optional):** ship the same task as a host-agnostic `skills/edge-book/heartbeat.md` block (dedup via edge-book's `notified_at`) for any future non-Hermes host that walks heartbeat files. Not load-bearing today.
+- **Hermes (primary — the path that ships first):** add `FRIEND_NOTIFY_CRON_SPEC` + idempotent reconciler mirroring `DIGEST_CRON_SPECS` / `reconcileDigestCronJobs`; `hermes cron create <schedule> <prompt> --name "Edge Book — friend requests" --deliver telegram --workdir $HERMES_HOME`. Own cron-name prefix to avoid collision with agentvillage's `"Edge —"` jobs. Reconciler updates prompt body only, preserving schedule + pause state.
+- **OpenClaw (planned, ships later):** `skills/edge-book/` bundle (`openclaw.plugin.json` + `SKILL.md` + `heartbeat.md`) carrying the same `inbound-friend-requests` task; OpenClaw's heartbeat tick walks it. Shares the prompt body with the Hermes cron — single source, two adapters.
 - **Suppression** (`notify_on_friend_request:false`) is enforced at `friend pending --json` output (returns `[]`) — one source of truth, no host special-casing.
 
 No remaining open questions block the implementation plan.
