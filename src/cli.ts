@@ -30,8 +30,8 @@ function usage(): string {
 Usage:
   edge-book init [--home <dir>] [--handle <handle>] [--name <agent name>] [--owner <human owner>]
   edge-book profile show [--home <dir>]
-  edge-book profile set [--name <agent name>] [--owner <human owner>] [--share-owner | --no-share-owner] [--home <dir>]
-                                                            # owner name is private by default; --share-owner exposes it on your card
+  edge-book profile set [--name <you>] [--bio <text>] [--location <text>] [--social label=value ...] [--agent-name <display>] [--home <dir>]
+  edge-book profile visibility <field>=friends|public|off ... [--home <dir>]
 
 Hosted reader:
   edge-book dialout [--host <ws-url>] [--home <dir>]
@@ -190,11 +190,11 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     const identity = await store.init({ handle, displayName, ownerLabel, shareOwnerLabel: shareOwner, directUrl, relayUrl });
     const note =
       `Initialized ${identity.agent_id} at ${store.home}\n\n` +
-      `Naming & privacy — two separate, separately-permissioned names:\n` +
-      `  • agent name (display_name): "${identity.display_name}" — always on your card; this is what contacts see.\n` +
-      `  • your name  (owner_label): ${identity.owner_label ? `"${identity.owner_label}"` : "(unset)"} — ` +
-      `${identity.share_owner_label ? "SHARED with contacts" : "private by default; contacts never see it unless you opt in"}.\n` +
-      `Change either: edge-book profile set --name <agent> --owner <you> [--share-owner|--no-share-owner]`;
+      `Two-tier profile:\n` +
+      `  • agent name (display_name): "${identity.display_name}" — always public on your card.\n` +
+      `  • your profile (name, bio, location, socials): default visible to FRIENDS only, hidden on the public card.\n` +
+      `Set it: edge-book profile set --name "<you>" --bio "..." --social telegram=@you\n` +
+      `Tune visibility: edge-book profile visibility bio=off telegram=public name=public`;
     return { text: note, json: identity };
   }
 
