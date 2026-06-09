@@ -59,6 +59,11 @@ Local agent:
   edge-book object revoke <peer-agent-id> <object-id> [--deliver] [--host <ws-url>] [--home <dir>]
   edge-book object list [--home <dir>]
   edge-book object read <object-id> [--home <dir>]
+  edge-book escalation raise --kind <question|decision|approval|input> --subject <s> --body <b> [--to <peer-agent-id>] [--option <o>]... [--deliver] [--home <dir>]
+  edge-book escalation list [--home <dir>]
+  edge-book escalation receive <envelope-json-path> [--home <dir>]
+  edge-book escalation answer <escalation-id> [--text <t>] [--choice <o>] [--deliver] [--home <dir>]
+  edge-book escalation respond <envelope-json-path> [--home <dir>]
   edge-book inbox list [--home <dir>]
   edge-book inbox pull --relay <url> [--home <dir>]
   edge-book serve --host <host> --port <port> [--home <dir>]
@@ -120,6 +125,17 @@ function takeRepeatedKV(args: string[], flag: string): Array<{ label: string; va
     const eq = raw.indexOf("=");
     if (eq === -1) throw new EdgeBookError("bad_social", `--social expects label=value, got "${raw}"`);
     out.push({ label: raw.slice(0, eq), value: raw.slice(eq + 1) });
+  }
+  return out;
+}
+
+// Collect every `--flag value` occurrence (repeatable plain string), removing them.
+function takeRepeated(args: string[], flag: string): string[] {
+  const out: string[] = [];
+  let idx: number;
+  while ((idx = args.indexOf(flag)) !== -1) {
+    out.push(args[idx + 1] ?? "");
+    args.splice(idx, 2);
   }
   return out;
 }
@@ -507,6 +523,60 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       await store.receivePrivilegedMessage(await readEnvelope(source));
       return { text: `Received privileged message from ${path.resolve(source)}` };
     }
+  }
+
+  if (command === "escalation") {
+    const action = args.shift();
+    if (action === "raise") {
+      const deliver = takeBoolFlag(args, "--deliver");
+      const hostUrl = parseHost(args, ctx);
+      const kind = requireArg(takeFlag(args, "--kind"), "--kind") as Parameters<EdgeBookStore["raiseEscalation"]>[0]["kind"];
+      const subject = requireArg(takeFlag(args, "--subject"), "--subject");
+      const body = requireArg(takeFlag(args, "--body"), "--body");
+      const to = takeFlag(args, "--to");
+      const options = takeRepeated(args, "--option");
+      const collaborators = takeRepeated(args, "--collaborator");
+      const contextRefs = takeRepeated(args, "--context-ref");
+      const riskLevel = takeFlag(args, "--risk") as "low" | "medium" | "high" | undefined;
+      const { escalation, envelope } = await store.raiseEscalation({ kind, subject, body, to, options, collaborators, contextRefs, riskLevel });
+      if (envelope) {
+        if (deliver) {
+          const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+          return { text: `Raised escalation ${escalation.escalation_id}; delivered to ${to} over the mailbox (host id ${ack.id})`, json: envelope };
+        }
+        return { text: `Raised escalation ${escalation.escalation_id} for ${to}; deliver this envelope (or pass --deliver)`, json: envelope };
+      }
+      return { text: `Raised escalation ${escalation.escalation_id} (local)`, json: escalation };
+    }
+    if (action === "list") {
+      const escalations = await store.escalations();
+      return { text: JSON.stringify(Object.values(escalations), null, 2), json: Object.values(escalations) };
+    }
+    if (action === "receive") {
+      const source = requireArg(args.shift(), "envelope-json-path");
+      const escalation = await store.receiveEscalation(await readEnvelope(source));
+      return { text: `Received escalation ${escalation.escalation_id} from ${escalation.raised_by_agent_id}`, json: escalation };
+    }
+    if (action === "answer") {
+      const deliver = takeBoolFlag(args, "--deliver");
+      const hostUrl = parseHost(args, ctx);
+      const escalationId = requireArg(args.shift(), "escalation-id");
+      const text = takeFlag(args, "--text");
+      const choice = takeFlag(args, "--choice");
+      const { envelope, ...escalation } = await store.answerEscalation(escalationId, { text, choice });
+      if (envelope && deliver) {
+        const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+        return { text: `Answered ${escalationId}; routed response to ${envelope.to_agent_id} over the mailbox (host id ${ack.id})`, json: { ...escalation, response_envelope: envelope } };
+      }
+      const tail = envelope ? `; deliver the response envelope to ${envelope.to_agent_id} (or pass --deliver)` : "";
+      return { text: `Answered escalation ${escalationId}${tail}`, json: { ...escalation, response_envelope: envelope } };
+    }
+    if (action === "respond") {
+      const source = requireArg(args.shift(), "envelope-json-path");
+      const escalation = await store.applyEscalationResponse(await readEnvelope(source));
+      return { text: `Applied escalation response for ${escalation.escalation_id}`, json: escalation };
+    }
+    throw new EdgeBookError("unknown_action", `Unknown escalation action: ${action}`);
   }
 
   if (command === "inbox") {
