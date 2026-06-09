@@ -998,6 +998,14 @@ export class EdgeBookStore {
     const contact = await this.upsertContactFromCard(body.card, "request_received");
     await this.setRelationship(envelope.from_agent_id, "request_received", "FriendRequest", body.note);
     await appendJsonl(this.file(INBOX_FILE), envelope);
+    await this.createApproval({
+      type: "friend_accept",
+      objectType: "contact",
+      objectId: envelope.from_agent_id,
+      summary: `Friend request from ${body.card.display_name}`,
+      riskLevel: "low",
+      requestedByAgentId: envelope.from_agent_id,
+    });
     return contact;
   }
 

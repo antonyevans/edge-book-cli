@@ -14,6 +14,19 @@ async function pair() {
   return { alice, bob };
 }
 
+test("receiveFriendRequest creates a pending friend_accept approval", async () => {
+  const { alice, bob } = await pair();
+  const aliceCard = await alice.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(await bob.writeCard()));
+  const approvals = Object.values(await bob.approvals());
+  const fa = approvals.find((a) => a.type === "friend_accept");
+  assert.ok(fa, "expected a friend_accept approval");
+  assert.equal(fa!.object_type, "contact");
+  assert.equal(fa!.object_id, aliceCard.agent_id);
+  assert.equal(fa!.status, "pending");
+  assert.match(fa!.summary, /Alice Agent/);
+});
+
 test("rejectFriend sets rejected and returns a signed accepted:false response", async () => {
   const { alice, bob } = await pair();
   const aliceCard = await alice.writeCard();
