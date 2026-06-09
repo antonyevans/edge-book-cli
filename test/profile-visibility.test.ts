@@ -132,3 +132,48 @@ test("setProfile still supports legacy displayName/ownerLabel/shareOwnerLabel", 
   assert.equal(id.profile?.name, "Xan");
   assert.equal(id.profile?.visibility?.name, "public");
 });
+
+// ─── I1: reserved social label tests ────────────────────────────────────────
+
+test("setProfile rejects social label 'name' (reserved)", async () => {
+  const store = await freshStore();
+  await assert.rejects(
+    () => store.setProfile({ socials: [{ label: "name", value: "Alice" }] }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as { code?: string }).code, "reserved_social_label");
+      assert.match(err.message, /name.*reserved/);
+      return true;
+    },
+  );
+});
+
+test("setProfile rejects social label 'bio' (reserved, case-insensitive)", async () => {
+  const store = await freshStore();
+  await assert.rejects(
+    () => store.setProfile({ socials: [{ label: "Bio", value: "my-bio" }] }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as { code?: string }).code, "reserved_social_label");
+      return true;
+    },
+  );
+});
+
+test("setProfile rejects social label 'location' (reserved)", async () => {
+  const store = await freshStore();
+  await assert.rejects(
+    () => store.setProfile({ socials: [{ label: "location", value: "NYC" }] }),
+    (err: unknown) => {
+      assert.ok(err instanceof Error);
+      assert.equal((err as { code?: string }).code, "reserved_social_label");
+      return true;
+    },
+  );
+});
+
+test("setProfile accepts non-reserved social labels", async () => {
+  const store = await freshStore();
+  const id = await store.setProfile({ socials: [{ label: "telegram", value: "@alice" }, { label: "twitter", value: "alice" }] });
+  assert.equal(id.profile?.socials?.length, 2);
+});

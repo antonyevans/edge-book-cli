@@ -225,6 +225,21 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       const shareOwner = takeBoolFlag(args, "--share-owner");
       const noShareOwner = takeBoolFlag(args, "--no-share-owner");
       const shareOwnerLabel = shareOwner ? true : (noShareOwner ? false : undefined);
+      // Guard: at least one meaningful flag must be present.
+      if (
+        displayName === undefined &&
+        name === undefined &&
+        bio === undefined &&
+        location === undefined &&
+        socialsKV.length === 0 &&
+        ownerLabel === undefined &&
+        shareOwnerLabel === undefined
+      ) {
+        throw new EdgeBookError(
+          "missing_arg",
+          "profile set needs at least one of --name/--agent-name/--bio/--location/--social/--owner/--share-owner",
+        );
+      }
       const id = await store.setProfile({
         displayName,
         name,
@@ -247,6 +262,20 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
         return [field, vis] as const;
       });
       if (!pairs.length) throw new EdgeBookError("missing_arg", "profile visibility needs at least one field=friends|public|off");
+      // Validate keys: must be a known field, "*", or an existing social label.
+      const KNOWN_FIELDS = new Set(["name", "bio", "location", "*"]);
+      const currentId = await store.identity();
+      const currentProfile = defaultProfile(currentId);
+      const socialLabels = new Set((currentProfile.socials ?? []).map((s) => s.label));
+      for (const [field] of pairs) {
+        if (!KNOWN_FIELDS.has(field) && !socialLabels.has(field)) {
+          const known = [...KNOWN_FIELDS, ...socialLabels].join(", ");
+          throw new EdgeBookError(
+            "unknown_visibility_field",
+            `Unknown profile field/social '${field}'; known: name, bio, location, *, plus your social labels${socialLabels.size ? ` (${[...socialLabels].join(", ")})` : ""}`,
+          );
+        }
+      }
       const id = await store.setProfile({ visibility: Object.fromEntries(pairs) });
       const p = defaultProfile(id);
       return { text: `Updated visibility: ${JSON.stringify(p.visibility ?? {})}`, json: { visibility: p.visibility ?? {} } };

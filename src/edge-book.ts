@@ -681,7 +681,18 @@ export class EdgeBookStore {
     if (input.name !== undefined) profile.name = input.name || undefined;
     if (input.bio !== undefined) profile.bio = input.bio || undefined;
     if (input.location !== undefined) profile.location = input.location || undefined;
-    if (input.socials !== undefined) profile.socials = input.socials;
+    if (input.socials !== undefined) {
+      const RESERVED = new Set(["name", "bio", "location"]);
+      for (const s of input.socials) {
+        if (RESERVED.has(s.label.toLowerCase())) {
+          throw new EdgeBookError(
+            "reserved_social_label",
+            `Social label '${s.label}' is reserved; choose another (e.g. telegram, twitter)`,
+          );
+        }
+      }
+      profile.socials = input.socials;
+    }
     if (input.visibility) profile.visibility = { ...profile.visibility, ...input.visibility };
 
     profile.profile_version = (profile.profile_version ?? 1) + 1;
