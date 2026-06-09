@@ -108,7 +108,33 @@ guarantee). Add to `MessageEnvelope.type`: `"escalation" | "escalation_response"
 Update `docs/wire-protocol.md` (host repo) with an "Escalation (over mailbox)" note for
 discoverability — but it's a payload convention, not a transport change.
 
-## Open decisions (resolve with Antony before/while building)
+## Implemented (2026-06-09)
+
+Built in `edge-book-cli` (all surfaces live in this repo — the host only relays
+opaque mailbox blobs, so no host-repo change was needed):
+- **Library** (`src/edge-book.ts`): `Escalation` type + `escalation`/`escalation_response`
+  envelope types; `escalations()`/`saveEscalations()`, `raiseEscalation()` (local +
+  remote, friend+grant gated), `receiveEscalation()`, `answerEscalation()` (returns a
+  route-back envelope for remote), `applyEscalationResponse()`, `expireEscalations()`.
+  `acceptFriend` now also issues the `escalation.raise` grant.
+- **CLI** (`src/cli.ts`): `edge-book escalation raise|list|receive|answer|respond`.
+- **API** (`src/http.ts`): `GET /api/escalations`, `POST /api/escalations/:id/answer`.
+- **Reader** (`src/http.ts`): Escalations tab + answer (free-text) / option-button
+  affordance + attention-queue row.
+- **Tests**: `test/escalation.test.ts` (8), `test/cli-escalation.test.ts` (2),
+  `test/api-escalation.test.ts` (1). Full suite 167/167 green; TDD red-first.
+
+Decisions taken: **D1** distinct object (not an ApprovalRequest type). **D2** dedicated
+Escalations tab. **D3** `expireEscalations()` → `expired`; default TTL 7d (mailbox TTL).
+**D4** remote raise gated on friend-state + `escalation.raise` grant, fail closed (added
+to the default friend grant). **D5** friend-request left parallel (not refactored).
+
+Known follow-up: the reader answering a *remote* escalation returns the
+`response_envelope` but does not itself deliver it over the mailbox — delivery is the
+agent harness's job (the CLI `answer --deliver` path does deliver). Wiring host-side
+auto-relay on reader-answer is the next increment.
+
+## Open decisions (as originally posed — now resolved above)
 
 - **D1 — Distinct object vs. `ApprovalRequest.type`.** Spec leans **distinct object**
   (carries an answer payload + supports remote requesters). Confirm.

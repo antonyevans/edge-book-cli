@@ -285,7 +285,7 @@ export interface ObjectRevokeBody {
 
 export interface MessageEnvelope {
   message_id: string;
-  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error" | "object_share" | "object_revoke" | "post_publish" | "profile_share";
+  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error" | "object_share" | "object_revoke" | "post_publish" | "profile_share" | "escalation" | "escalation_response";
   from_agent_id: string;
   to_agent_id: string;
   relationship_id: string;
@@ -381,6 +381,51 @@ export interface ApprovalRequest {
   audit_refs: string[];
 }
 
+// Agent → human escalation (ea-claude-094). A free-form ask raised by an agent
+// (local: its own owner; remote: a friend's owner, gated by an escalation.raise
+// grant) that surfaces in the human's reader and whose answer routes back to the
+// requesting agent. Sibling to ApprovalRequest — approvals are gate decisions on
+// the local agent's own actions; an escalation carries a question and an answer
+// payload and may originate from a remote collaborating agent.
+export type EscalationKind = "question" | "decision" | "approval" | "input";
+export type EscalationStatus = "pending" | "answered" | "expired" | "cancelled";
+
+export interface Escalation {
+  escalation_id: string;
+  raised_by_agent_id: string;        // the requesting agent
+  collaborators: string[];           // other agent_ids working the task (multi-agent)
+  to_human_owner_id: string;         // owner of the agent whose human is being asked
+  kind: EscalationKind;
+  subject: string;
+  body: string;
+  options: string[];                 // for decision/approval — the human picks one
+  context_refs: string[];            // post_ids / object_ids / audit_refs to inspect
+  status: EscalationStatus;
+  risk_level: "low" | "medium" | "high";
+  created_at: string;
+  expires_at: string;
+  answer_text: string;               // "" until answered
+  answer_choice: string;             // "" or one of options[]
+  answered_at: string;
+  answered_by: "local-owner" | "";
+  audit_refs: string[];
+}
+
+// Envelope body for a remote escalation (carries the full record so the receiver
+// can materialise an identical copy keyed by the same escalation_id).
+export interface EscalationBody {
+  escalation: Escalation;
+}
+
+// Envelope body routing a resolved escalation back to the requesting agent.
+export interface EscalationResponseBody {
+  escalation_id: string;
+  status: EscalationStatus;
+  answer_text: string;
+  answer_choice: string;
+  answered_at: string;
+}
+
 export interface ContactMute {
   peer_agent_id: string;
   muted_at: string;
@@ -414,6 +459,7 @@ const SESSIONS_FILE = "web-sessions.json";
 const POSTS_FILE = "posts.json";
 const FEED_FILE = "feed-items.json";
 const APPROVALS_FILE = "approvals.json";
+const ESCALATIONS_FILE = "escalations.json";
 const CONTACT_MUTES_FILE = "contact-mutes.json";
 
 // spec-0021 new post-type storage files
@@ -957,7 +1003,9 @@ export class EdgeBookStore {
     // profile-read path (the reader `friend_accept` wiring, Plan C) can enforce
     // it without re-granting existing friendships. Until that consumer lands it
     // is a forward-compat token, not a live access check.
-    const grant = await this.issueGrant(peerAgentId, ["message.friend", "feed.read.friends", "profile.read.friend"]);
+    // `escalation.raise` lets a confirmed friend raise an escalation to this
+    // agent's human (ea-claude-094) — friending is the authorization to ask.
+    const grant = await this.issueGrant(peerAgentId, ["message.friend", "feed.read.friends", "profile.read.friend", "escalation.raise"]);
     const card = await this.writeCard();
     const profile = await this.buildFriendProfile();
     return this.signEnvelope({
@@ -1979,7 +2027,7 @@ export class EdgeBookStore {
     return readJsonl<MessageEnvelope>(this.file(INBOX_FILE));
   }
 
-  async receiveEnvelope(envelope: MessageEnvelope): Promise<void | AgentContactRecord | MessageEnvelope | null> {
+  async receiveEnvelope(envelope: MessageEnvelope): Promise<void | AgentContactRecord | MessageEnvelope | Escalation | null> {
     if (envelope.type === "friend_request") return this.receiveFriendRequest(envelope);
     if (envelope.type === "friend_response") return this.applyFriendResponse(envelope);
     if (envelope.type === "privileged_message") return this.receivePrivilegedMessage(envelope);
@@ -1987,6 +2035,8 @@ export class EdgeBookStore {
     if (envelope.type === "object_revoke") { await this.receiveObjectRevoke(envelope); return; }
     if (envelope.type === "post_publish") { await this.receivePostPublish(envelope); return; }
     if (envelope.type === "profile_share") { await this.receiveProfileShare(envelope); return; }
+    if (envelope.type === "escalation") return this.receiveEscalation(envelope);
+    if (envelope.type === "escalation_response") return this.applyEscalationResponse(envelope);
     throw new EdgeBookError("unsupported_envelope", `Unsupported envelope type: ${envelope.type}`);
   }
 
@@ -2133,6 +2183,216 @@ export class EdgeBookStore {
     approvals[approvalId] = approval;
     await this.saveApprovals(approvals);
     return approval;
+  }
+
+  // ──────────────────────────────────────────────────────────────────────
+  // Agent → human escalation (ea-claude-094). Raise → surface → answer →
+  // route-back, mirroring the friend-request loop. Remote raises are gated on
+  // friend-state + an `escalation.raise` grant (fail closed), exactly like
+  // sendPrivilegedMessage. Local raises (asking your own human) need no grant.
+  // ──────────────────────────────────────────────────────────────────────
+
+  async escalations(): Promise<Record<string, Escalation>> {
+    return readJson<Record<string, Escalation>>(this.file(ESCALATIONS_FILE), {});
+  }
+
+  async saveEscalations(escalations: Record<string, Escalation>): Promise<void> {
+    await writeJson(this.file(ESCALATIONS_FILE), escalations);
+  }
+
+  private async putEscalation(escalation: Escalation): Promise<void> {
+    const all = await this.escalations();
+    all[escalation.escalation_id] = escalation;
+    await this.saveEscalations(all);
+  }
+
+  // Raise an escalation. Omit `to` to ask your own human (local — no envelope).
+  // Pass `to` (a friend's agent_id) to ask their human — returns a signed
+  // `escalation` envelope the caller delivers over the mailbox.
+  async raiseEscalation(input: {
+    kind: EscalationKind;
+    subject: string;
+    body: string;
+    options?: string[];
+    collaborators?: string[];
+    contextRefs?: string[];
+    riskLevel?: Escalation["risk_level"];
+    to?: string;
+    ttlMs?: number;
+  }): Promise<{ escalation: Escalation; envelope?: MessageEnvelope }> {
+    const identity = await this.identity();
+    const ttlMs = input.ttlMs ?? 7 * 24 * 60 * 60 * 1000; // default 7d (mailbox TTL)
+    const escalation: Escalation = {
+      escalation_id: randomId("esc"),
+      raised_by_agent_id: identity.agent_id,
+      collaborators: input.collaborators ?? [],
+      to_human_owner_id: "",
+      kind: input.kind,
+      subject: input.subject,
+      body: input.body,
+      options: input.options ?? [],
+      context_refs: input.contextRefs ?? [],
+      status: "pending",
+      risk_level: input.riskLevel ?? "medium",
+      created_at: now(),
+      expires_at: new Date(Date.now() + ttlMs).toISOString(),
+      answer_text: "",
+      answer_choice: "",
+      answered_at: "",
+      answered_by: "",
+      audit_refs: [],
+    };
+
+    if (!input.to) {
+      // Local: this agent asks its own owner.
+      escalation.to_human_owner_id = identity.owner_label || identity.agent_id;
+      escalation.audit_refs.push(await this.audit("escalation.raise", identity.agent_id, { escalation_id: escalation.escalation_id, kind: escalation.kind, local: true }));
+      await this.putEscalation(escalation);
+      return { escalation };
+    }
+
+    // Remote: ask a friend's human. Gate on friend-state + escalation.raise grant.
+    const contacts = await this.contacts();
+    const contact = contacts[input.to];
+    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${input.to}`);
+    if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked", `Peer ${input.to} is blocked`);
+    if (contact.relationship_state !== "friend") {
+      throw new EdgeBookError("not_friend", `Cannot escalate to relationship_state=${contact.relationship_state}`);
+    }
+    const grant = await this.findUsableGrant(input.to, "escalation.raise");
+    if (!grant) throw new EdgeBookError("missing_grant", `No active escalation.raise grant for ${input.to}`);
+    await this.assertGrantSignature(grant);
+
+    const envelope = await this.signEnvelope({
+      type: "escalation",
+      to_agent_id: input.to,
+      relationship_id: relationshipId(identity.agent_id, input.to),
+      capability_id: grant.grant_id,
+      ref: escalation.escalation_id,
+      transport: "local",
+      // Clone into the signed body — the local copy below mutates audit_refs,
+      // which must not retroactively alter the signed payload.
+      body: { escalation: structuredClone(escalation) } satisfies EscalationBody,
+    });
+    escalation.audit_refs.push(await this.audit("escalation.raise", input.to, { escalation_id: escalation.escalation_id, kind: escalation.kind, message_id: envelope.message_id }));
+    await this.putEscalation(escalation); // requester keeps its own copy to track
+    return { escalation, envelope };
+  }
+
+  // Receive a remote escalation, materialise it for this agent's human.
+  async receiveEscalation(envelope: MessageEnvelope): Promise<Escalation> {
+    await this.verifyEnvelope(envelope);
+    if (envelope.type !== "escalation") throw new EdgeBookError("wrong_message_type", "Expected escalation envelope");
+    const contacts = await this.contacts();
+    const contact = contacts[envelope.from_agent_id];
+    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${envelope.from_agent_id}`);
+    if (contact.relationship_state !== "friend") {
+      throw new EdgeBookError("not_friend", `Cannot receive escalation from relationship_state=${contact.relationship_state}`);
+    }
+    const grants = await this.grants();
+    const grant = grants[envelope.capability_id];
+    if (!grant || grant.status !== "active" || grant.subject_agent_id !== envelope.from_agent_id || !grant.scopes.includes("escalation.raise")) {
+      throw new EdgeBookError("missing_grant", "Escalation does not carry an active escalation.raise grant issued to sender");
+    }
+    await this.assertGrantSignature(grant);
+
+    const identity = await this.identity();
+    const body = envelope.body as unknown as EscalationBody;
+    const incoming = body.escalation;
+    if (incoming.raised_by_agent_id !== envelope.from_agent_id) {
+      throw new EdgeBookError("agent_id_mismatch", "Escalation raised_by does not match sender");
+    }
+    // Re-stamp fields the receiver owns; keep the sender's id/content/options.
+    const escalation: Escalation = {
+      ...incoming,
+      to_human_owner_id: identity.owner_label || identity.agent_id,
+      status: "pending",
+      answer_text: "",
+      answer_choice: "",
+      answered_at: "",
+      answered_by: "",
+      audit_refs: [],
+    };
+    escalation.audit_refs.push(await this.audit("escalation.receive", envelope.from_agent_id, { escalation_id: escalation.escalation_id, kind: escalation.kind }));
+    await this.putEscalation(escalation);
+    return escalation;
+  }
+
+  // The human answers. For a remote-origin escalation, returns an
+  // `escalation_response` envelope to route back to the requesting agent.
+  async answerEscalation(escalationId: string, input: { text?: string; choice?: string }): Promise<Escalation & { envelope?: MessageEnvelope }> {
+    const identity = await this.identity();
+    const all = await this.escalations();
+    const escalation = all[escalationId];
+    if (!escalation) throw new EdgeBookError("unknown_escalation", `Unknown escalation: ${escalationId}`);
+    if (escalation.status !== "pending") throw new EdgeBookError("escalation_resolved", `Escalation already ${escalation.status}`);
+    if ((escalation.kind === "decision" || escalation.kind === "approval") && escalation.options.length > 0) {
+      if (!input.choice || !escalation.options.includes(input.choice)) {
+        throw new EdgeBookError("invalid_option", `Answer must be one of the offered options: ${escalation.options.join(", ")}`);
+      }
+    }
+    escalation.status = "answered";
+    escalation.answer_text = input.text ?? "";
+    escalation.answer_choice = input.choice ?? "";
+    escalation.answered_at = now();
+    escalation.answered_by = "local-owner";
+    escalation.audit_refs.push(await this.audit("escalation.answer", escalation.raised_by_agent_id, { escalation_id: escalationId }));
+    all[escalationId] = escalation;
+    await this.saveEscalations(all);
+
+    // Route back only if a *remote* agent raised this (we are answering on behalf
+    // of our own human for someone else's request).
+    let envelope: MessageEnvelope | undefined;
+    if (escalation.raised_by_agent_id !== identity.agent_id) {
+      envelope = await this.signEnvelope({
+        type: "escalation_response",
+        to_agent_id: escalation.raised_by_agent_id,
+        relationship_id: relationshipId(identity.agent_id, escalation.raised_by_agent_id),
+        capability_id: "",
+        ref: escalationId,
+        transport: "local",
+        body: {
+          escalation_id: escalationId,
+          status: escalation.status,
+          answer_text: escalation.answer_text,
+          answer_choice: escalation.answer_choice,
+          answered_at: escalation.answered_at,
+        } satisfies EscalationResponseBody,
+      });
+    }
+    return { ...escalation, envelope };
+  }
+
+  // The requesting agent applies a routed-back answer to its own copy.
+  async applyEscalationResponse(envelope: MessageEnvelope): Promise<Escalation> {
+    await this.verifyEnvelope(envelope);
+    if (envelope.type !== "escalation_response") throw new EdgeBookError("wrong_message_type", "Expected escalation_response envelope");
+    const body = envelope.body as unknown as EscalationResponseBody;
+    const all = await this.escalations();
+    const escalation = all[body.escalation_id];
+    if (!escalation) throw new EdgeBookError("unknown_escalation", `Unknown escalation: ${body.escalation_id}`);
+    escalation.status = body.status;
+    escalation.answer_text = body.answer_text;
+    escalation.answer_choice = body.answer_choice;
+    escalation.answered_at = body.answered_at;
+    escalation.answered_by = "local-owner";
+    escalation.audit_refs.push(await this.audit("escalation.response", envelope.from_agent_id, { escalation_id: body.escalation_id, status: body.status }));
+    all[body.escalation_id] = escalation;
+    await this.saveEscalations(all);
+    return escalation;
+  }
+
+  // Sweep: pending escalations past their expiry become `expired`.
+  async expireEscalations(): Promise<void> {
+    const all = await this.escalations();
+    let changed = false;
+    for (const escalation of Object.values(all)) {
+      if (escalation.status === "pending" && Date.parse(escalation.expires_at) <= Date.now()) {
+        escalation.status = "expired";
+        changed = true;
+      }
+    }
+    if (changed) await this.saveEscalations(all);
   }
 
   async createPost(input: {

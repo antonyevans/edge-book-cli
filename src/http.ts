@@ -325,6 +325,23 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
     return true;
   }
 
+  // Agent → human escalations (ea-claude-094). Questions an agent (local or a
+  // collaborating friend) raised for this human to answer.
+  if (req.method === "GET" && url.pathname === "/api/escalations") {
+    sendJson(res, 200, { escalations: await store.escalations() });
+    return true;
+  }
+
+  const escalationAnswerMatch = /^\/api\/escalations\/([^/]+)\/answer$/.exec(url.pathname);
+  if (req.method === "POST" && escalationAnswerMatch) {
+    const body = await readJsonBody<{ text?: string; choice?: string }>(req);
+    const { envelope, ...escalation } = await store.answerEscalation(decodeURIComponent(escalationAnswerMatch[1]), { text: body.text, choice: body.choice });
+    // The host relays `response_envelope` back to the requesting agent's mailbox
+    // (remote case); it is null for a local escalation answered in place.
+    sendJson(res, 200, { escalation, response_envelope: envelope ?? null });
+    return true;
+  }
+
   const auditMatch = /^\/api\/audit\/([^/]+)\/([^/]+)$/.exec(url.pathname);
   if (req.method === "GET" && auditMatch) {
     const objectId = decodeURIComponent(auditMatch[2]);
@@ -987,6 +1004,7 @@ function dashboardHtml(): string {
       <button data-view="messages">Messages <span id="messageCount">Total 0</span></button>
       <button data-view="posts">Post history <span id="postCount">Drafts 0</span></button>
       <button data-view="approvals">Approvals <span id="approvalCount">Pending 0</span></button>
+      <button data-view="escalations">Escalations <span id="escalationCount">Pending 0</span></button>
       <button data-view="activity">Activity Log <span id="activityCount">Events 0</span></button>
       <button data-view="inspector">Inspector <span>Details</span></button>
     </nav>
@@ -1049,6 +1067,7 @@ function dashboardHtml(): string {
       posts: {},
       feedItems: {},
       approvals: {},
+      escalations: {},
       messages: [],
       audit: []
     };
@@ -1059,6 +1078,7 @@ function dashboardHtml(): string {
       messages: "Messages",
       posts: "Post history",
       approvals: "Approvals",
+      escalations: "Escalations",
       activity: "Activity Log",
       inspector: "Inspector"
     };
@@ -1069,6 +1089,7 @@ function dashboardHtml(): string {
       messages: "Friend-gated envelopes grouped by peer context.",
       posts: "Drafts, approvals, visibility, source basis, and removal state.",
       approvals: "Human gates for agent-authored changes and risk-bearing actions.",
+      escalations: "Questions your agent — or a collaborating agent — raised for you to answer.",
       activity: "Owner-only audit trail for local decisions, relationship changes, posts, and messages.",
       inspector: "Readable decision summary plus detailed local evidence."
     };
@@ -1153,6 +1174,7 @@ function dashboardHtml(): string {
       return date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
     }
     function pendingApprovals() { return values(state.approvals).filter((approval) => approval.status === "pending"); }
+    function pendingEscalations() { return values(state.escalations).filter((escalation) => escalation.status === "pending"); }
     function visibleFeedItems() { return values(state.feedItems).filter((feed) => !feed.hidden); }
     function friendContacts() { return values(state.contacts).filter((contact) => contact.relationship_state === "friend"); }
     function blockedContacts() { return values(state.contacts).filter((contact) => contact.relationship_state === "blocked"); }
@@ -1160,6 +1182,7 @@ function dashboardHtml(): string {
     function renderAttentionQueue() {
       const rows = [
         ["Approvals", pendingApprovals().length, pendingApprovals().length ? "attention" : "owned"],
+        ["Escalations", pendingEscalations().length, pendingEscalations().length ? "attention" : "owned"],
         ["Unread feed", values(state.feedItems).filter((feed) => feed.read_state !== "read" && !feed.hidden).length, "neutral"],
         ["Blocked peers", blockedContacts().length, blockedContacts().length ? "risk" : "owned"],
         ["Draft/pending posts", draftPosts().length, draftPosts().length ? "attention" : "neutral"]
@@ -1197,6 +1220,7 @@ function dashboardHtml(): string {
       setText("contactCount", "Friends " + friendContacts().length);
       setText("postCount", "Drafts " + draftPosts().length);
       setText("approvalCount", "Pending " + pendingApprovals().length);
+      setText("escalationCount", "Pending " + pendingEscalations().length);
       setText("activityCount", "Events " + state.audit.length);
       setText("messageCount", "Total " + state.messages.length);
       setText("summaryFeed", visibleFeedItems().length);
@@ -1298,6 +1322,26 @@ function dashboardHtml(): string {
         ], "Requested " + timeLabel(approval.created_at));
         }).join("") || renderEmpty("No approval requests.");
       }
+      if (state.view === "escalations") {
+        html = values(state.escalations).map((escalation) => {
+          const isOption = (escalation.kind === "decision" || escalation.kind === "approval") && (escalation.options || []).length;
+          const actions = escalation.status === "pending"
+            ? (isOption
+                ? (escalation.options || []).map((option) => action(option, "escalation-choose", escalation.escalation_id + "::" + option)).join("")
+                : action("Answer", "escalation-answer", escalation.escalation_id))
+            : "";
+          const answer = escalation.status === "answered" ? (escalation.answer_choice || escalation.answer_text || "answered") : "";
+          return item(escalation.subject, escalation.body, [
+            "from: " + agentLabel(escalation.raised_by_agent_id),
+            answer ? "answer: " + answer : ""
+          ], escalation, escalation.risk_level === "high" ? "risk" : escalation.risk_level === "medium" ? "warn" : "", actions, [
+          ["kind", labelize(escalation.kind)],
+          ["status", labelize(escalation.status)],
+          ["from", agentLabel(escalation.raised_by_agent_id)],
+          ["options", (escalation.options || []).join(", ") || "free text"]
+        ], "Raised " + timeLabel(escalation.created_at));
+        }).join("") || renderEmpty("No escalations waiting.");
+      }
       if (state.view === "activity") {
         html = [...state.audit].reverse().map((event) => item(labelize(event.type || "audit event"), event.peer_agent_id ? agentLabel(event.peer_agent_id) : "Local owner action", [
           "when: " + timeLabel(event.created_at),
@@ -1365,6 +1409,17 @@ function dashboardHtml(): string {
         if (name === "post-remove") await postJson("/api/posts/" + encodeURIComponent(id) + "/remove", { reason: prompt("Reason", "removed by owner") || "" });
         if (name === "approval-approve") await postJson("/api/approvals/" + encodeURIComponent(id) + "/resolve", { approved: true });
         if (name === "approval-reject") await postJson("/api/approvals/" + encodeURIComponent(id) + "/resolve", { approved: false });
+        if (name === "escalation-answer") {
+          const text = prompt("Your answer", "");
+          if (text === null) return;
+          await postJson("/api/escalations/" + encodeURIComponent(id) + "/answer", { text });
+        }
+        if (name === "escalation-choose") {
+          const sep = id.lastIndexOf("::");
+          const escalationId = id.slice(0, sep);
+          const choice = id.slice(sep + 2);
+          await postJson("/api/escalations/" + encodeURIComponent(escalationId) + "/answer", { choice });
+        }
         await refresh();
       } catch (error) {
         setInspector({ action: name, id, failure_reason: error.message || String(error) });
@@ -1393,11 +1448,12 @@ function dashboardHtml(): string {
       setText("owner", publicOwnerLabel() + " | Local session active");
       setText("ownerName", publicOwnerLabel());
       setText("ownerShort", "local owner session");
-      const [contacts, posts, feed, approvals, audit] = await Promise.all([
+      const [contacts, posts, feed, approvals, escalations, audit] = await Promise.all([
         api("/api/contacts"),
         api("/api/posts"),
         api("/api/feed"),
         api("/api/approvals"),
+        api("/api/escalations"),
         api("/api/audit")
       ]);
       state.contacts = contacts.contacts;
@@ -1405,6 +1461,7 @@ function dashboardHtml(): string {
       state.posts = posts.posts;
       state.feedItems = feed.feed_items;
       state.approvals = approvals.approvals;
+      state.escalations = escalations.escalations || {};
       state.audit = audit.audit || [];
       const messageSets = await Promise.all(values(state.contacts).map((contact) => api("/api/messages/" + encodeURIComponent(contact.peer_agent_id)).catch(() => ({ messages: [] }))));
       state.messages = messageSets.flatMap((set) => set.messages || []);
