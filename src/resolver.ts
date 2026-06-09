@@ -3,7 +3,7 @@
 // opportunity) to a verified Agent Card or an approval-required candidate.
 // Trust ALWAYS flows from validateCard — Index never asserts an agent_id.
 // Spec: tasks/ea/ea-openclaw-030-.../authoring-spec.md (+ 2026-06-08 addendum).
-import { loadCard } from "./edge-book.ts";
+import { loadCard, readJson, writeJson, randomId } from "./edge-book.ts";
 import type { AgentCard, EdgeBookStore } from "./edge-book.ts";
 
 export type ResolverStatus = "resolved" | "candidates" | "approval_required" | "not_found";
@@ -159,6 +159,42 @@ export function makeIndexProvider(source: IndexSource): ResolverProvider {
       };
     },
   };
+}
+
+const CANDIDATES_FILE = "candidates.json";
+
+type CandidateInput = Omit<Candidate, "candidate_id" | "approved" | "created_at">;
+
+function candidateKey(c: { source: ProvenanceSource; card_url?: string; agent_id?: string }): string {
+  return `${c.source}:${c.card_url ?? c.agent_id ?? ""}`;
+}
+
+async function readCandidates(store: EdgeBookStore): Promise<Record<string, Candidate>> {
+  return readJson<Record<string, Candidate>>(store.file(CANDIDATES_FILE), {});
+}
+
+export async function listCandidates(store: EdgeBookStore): Promise<Candidate[]> {
+  return Object.values(await readCandidates(store));
+}
+
+export async function getCandidate(store: EdgeBookStore, id: string): Promise<Candidate | undefined> {
+  return (await readCandidates(store))[id];
+}
+
+export async function writeCandidate(store: EdgeBookStore, input: CandidateInput): Promise<Candidate> {
+  const map = await readCandidates(store);
+  const existing = Object.values(map).find((c) => candidateKey(c) === candidateKey(input));
+  if (existing) return existing;
+  const candidate: Candidate = {
+    candidate_id: randomId("cand"),
+    approved: false,
+    created_at: new Date().toISOString(),
+    ...input,
+  };
+  map[candidate.candidate_id] = candidate;
+  await writeJson(store.file(CANDIDATES_FILE), map);
+  await store.audit("candidate.write", candidate.agent_id ?? "", { candidate_id: candidate.candidate_id, source: candidate.source });
+  return candidate;
 }
 
 export type RegistryLookup = (handle: string) => Promise<string | null>; // returns a loadCard-able target
