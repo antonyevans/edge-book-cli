@@ -223,6 +223,15 @@ export async function resolveTarget(store: EdgeBookStore, target: string, opts: 
   return { status: "not_found", next_action: "(no match — check the target)" };
 }
 
+// Mark a candidate approved and bind the verified agent_id (idempotent).
+export async function markCandidateApproved(store: EdgeBookStore, candidateId: string, agentId: string): Promise<void> {
+  const map = await readJson<Record<string, Candidate>>(store.file(CANDIDATES_FILE), {});
+  if (!map[candidateId]) return;
+  map[candidateId].approved = true;
+  map[candidateId].agent_id = agentId;
+  await writeJson(store.file(CANDIDATES_FILE), map);
+}
+
 export async function promoteCandidate(store: EdgeBookStore, candidateId: string, note = ""): Promise<MessageEnvelope> {
   const candidate = await getCandidate(store, candidateId);
   if (!candidate) throw new EdgeBookError("unknown_candidate", `No candidate ${candidateId}`);
@@ -232,12 +241,7 @@ export async function promoteCandidate(store: EdgeBookStore, candidateId: string
   }
   const card = await loadCard(candidate.card_url); // validateCard runs inside; throws on forgery
   const envelope = await store.createFriendRequest(card, note);
-  const map = await readJson<Record<string, Candidate>>(store.file(CANDIDATES_FILE), {});
-  if (map[candidateId]) {
-    map[candidateId].approved = true;
-    map[candidateId].agent_id = card.agent_id;
-    await writeJson(store.file(CANDIDATES_FILE), map);
-  }
+  await markCandidateApproved(store, candidateId, card.agent_id);
   await store.audit("candidate.promoted", card.agent_id, { candidate_id: candidateId });
   return envelope;
 }

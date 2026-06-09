@@ -7,6 +7,7 @@ import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox,
 import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
 import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
+import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
 
 export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
 
@@ -230,13 +231,37 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     }
   }
 
+  if (command === "resolve") {
+    const target = requireArg(args.shift(), "target");
+    const result = await resolveTarget(store, target, { providers: defaultProviders() });
+    const label = result.agent_id ?? result.candidates?.[0]?.candidate_id ?? "";
+    return { text: `${result.status}  ${label}\nnext: ${result.next_action}`, json: result };
+  }
+
+  if (command === "candidates") {
+    const action = args.shift() || "list";
+    if (action === "list") {
+      const candidates = await listCandidates(store);
+      const text = candidates.length
+        ? candidates.map((c) => `${c.candidate_id}  ${c.source}  ${c.display_name}  ${c.approved ? "[approved]" : ""}`).join("\n")
+        : "No candidates.";
+      return { text, json: { candidates } };
+    }
+  }
+
   if (command === "friend") {
     const action = args.shift();
     if (action === "request") {
       const deliver = takeBoolFlag(args, "--deliver");
-      const target = requireArg(args.shift(), "card-path-or-url");
-      const card = await loadCard(target);
+      const target = requireArg(args.shift(), "card-path-url-or-candidate");
+      // Resolver-backed: a candidate id promotes through its verified card_url.
+      const candidate = await getCandidate(store, target);
+      if (candidate && !candidate.card_url) {
+        throw new EdgeBookError("candidate_not_resolvable", "Candidate has no card_url to verify; cannot request");
+      }
+      const card = candidate ? await loadCard(candidate.card_url!) : await loadCard(target);
       const envelope = await store.createFriendRequest(card);
+      if (candidate) await markCandidateApproved(store, candidate.candidate_id, card.agent_id);
       if (deliver) {
         const direct = card.transports.find((entry) => entry.mode === "direct")?.endpoint;
         if (direct) return { text: await deliverToEndpoint(envelope, direct), json: envelope };
