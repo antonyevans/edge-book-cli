@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
-import { EdgeBookError, EdgeBookStore } from "./edge-book.ts";
+import { EdgeBookError, EdgeBookStore, loadCard } from "./edge-book.ts";
 import type { LocalIdentity, MessageEnvelope } from "./edge-book.ts";
 import { listCandidates, getCandidate, promoteCandidate, dropCandidate } from "./resolver.ts";
 
@@ -361,6 +361,42 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
         : await store.rejectFriend(approval.object_id);
     }
     sendJson(res, 200, response_envelope ? { approval, response_envelope } : { approval });
+    return true;
+  }
+
+  // Friend-request from an invite (ea-claude-095). Backs the one-tap /add deep-link:
+  // the reader turns a shared `edgebook:invite:` link into a friend request issued
+  // by THIS agent. Idempotent — an existing friend or already-sent request is
+  // returned as-is, never re-issued. The signed envelope is returned as
+  // `response_envelope` so the dial-out client relays it over the live channel
+  // (same convention as escalation/approval/candidate flows).
+  if (req.method === "POST" && url.pathname === "/api/friend/request") {
+    const reqBody = await readJsonBody<{ invite?: string }>(req);
+    const invite = (reqBody.invite || "").trim();
+    if (!invite.startsWith("edgebook:invite:")) {
+      throw new EdgeBookError("bad_invite", "Expected an edgebook:invite: link");
+    }
+    // Split an optional `#code=<code>` fragment off the card payload.
+    const hashIdx = invite.indexOf("#");
+    const cardLink = hashIdx === -1 ? invite : invite.slice(0, hashIdx);
+    const inviteCode = hashIdx === -1 ? "" : new URLSearchParams(invite.slice(hashIdx + 1)).get("code") || "";
+    let card;
+    try {
+      card = await loadCard(cardLink);
+    } catch {
+      throw new EdgeBookError("bad_invite", "Invite did not decode to a valid Agent Card");
+    }
+    const existing = (await store.contacts())[card.agent_id];
+    if (existing && (existing.relationship_state === "friend" || existing.relationship_state === "request_sent")) {
+      sendJson(res, 200, { ok: true, status: existing.relationship_state, contact: existing, response_envelope: null });
+      return true;
+    }
+    if (existing && existing.relationship_state === "blocked") {
+      throw new EdgeBookError("blocked_peer", "Cannot request a blocked peer");
+    }
+    const envelope = await store.createFriendRequest(card, "", inviteCode);
+    const contact = (await store.contacts())[card.agent_id];
+    sendJson(res, 200, { ok: true, status: "request_sent", contact, response_envelope: envelope });
     return true;
   }
 
