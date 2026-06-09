@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
 import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash, defaultProfile } from "./edge-book.ts";
-import type { FieldVisibility, SocialLink } from "./edge-book.ts";
+import type { FieldVisibility, FriendRequestBody, SocialLink } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
 import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
 
@@ -30,7 +30,7 @@ function usage(): string {
 Usage:
   edge-book init [--home <dir>] [--handle <handle>] [--name <agent name>] [--owner <human owner>]
   edge-book profile show [--home <dir>]
-  edge-book profile set [--name <you>] [--bio <text>] [--location <text>] [--social label=value ...] [--agent-name <display>] [--home <dir>]
+  edge-book profile set [--name <human name>] [--agent-name <agent display name>] [--bio <text>] [--location <text>] [--social label=value ...] [--owner <legacy alias>] [--share-owner|--no-share-owner] [--home <dir>]
   edge-book profile visibility <field>=friends|public|off ... [--home <dir>]
 
 Hosted reader:
@@ -442,12 +442,25 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     }
     if (action === "pending") {
       const pending = await store.pendingFriendRequests();
-      const json = pending.map((c) => ({
-        agent_id: c.peer_agent_id,
-        display_name: c.display_name,
-        note: "", // note isn't persisted on the contact; read from inbox if needed
-        contact_created_at: c.created_at,
-      }));
+      const inbox = await store.inbox();
+      const json = pending.map((c) => {
+        // Find the most recent friend_request envelope from this peer in the inbox.
+        const matchingEnvelopes = inbox.filter(
+          (env) => env.type === "friend_request" && env.from_agent_id === c.peer_agent_id,
+        );
+        const latest = matchingEnvelopes.length
+          ? matchingEnvelopes.reduce((a, b) => (a.created_at >= b.created_at ? a : b))
+          : undefined;
+        const note = latest ? ((latest.body as unknown as FriendRequestBody).note ?? "") : "";
+        const requested_at = latest?.created_at ?? "";
+        return {
+          agent_id: c.peer_agent_id,
+          display_name: c.display_name,
+          note,
+          requested_at,
+          contact_created_at: c.created_at,
+        };
+      });
       const text = json.length
         ? json.map((p) => `${p.agent_id}  ${p.display_name}`).join("\n")
         : "No pending friend requests.";

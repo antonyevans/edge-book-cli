@@ -643,6 +643,21 @@ export function resolveSocialVisibility(profile: IdentityProfile, label: string)
 
 // Shared Class-2 lifecycle: terminal states are preserved; otherwise past-expiry
 // becomes "expired" for hard-TTL types or "stale" for soft ones.
+// Project the visible profile fields for a given inclusion predicate. Shared by
+// buildCard (predicate: public-only) and buildFriendProfile (predicate: friends+public).
+function projectProfileFields(
+  profile: IdentityProfile,
+  includeField: (vis: FieldVisibility) => boolean,
+): { name?: string; bio?: string; location?: string; socials?: SocialLink[] } {
+  const out: { name?: string; bio?: string; location?: string; socials?: SocialLink[] } = {};
+  if (profile.name && includeField(resolveFieldVisibility(profile, "name"))) out.name = profile.name;
+  if (profile.bio && includeField(resolveFieldVisibility(profile, "bio"))) out.bio = profile.bio;
+  if (profile.location && includeField(resolveFieldVisibility(profile, "location"))) out.location = profile.location;
+  const socials = (profile.socials ?? []).filter((s) => includeField(resolveSocialVisibility(profile, s.label)));
+  if (socials.length) out.socials = socials;
+  return out;
+}
+
 export function computeLifecycle(
   expiresAt: string,
   hard: boolean,
@@ -784,15 +799,9 @@ export class EdgeBookStore {
     const caps = Object.values(await this.capabilities())
       .map((c) => ({ name: c.name, version: c.version, summary: c.summary, status: c.status }));
     const prof = defaultProfile(identity);
-    const pubInclude = (field: string) => resolveFieldVisibility(prof, field) === "public";
-    const pubSocials = (prof.socials ?? []).filter((s) => resolveSocialVisibility(prof, s.label) === "public");
-    const publicProfile: NonNullable<AgentCard["public_profile"]> = {
-      ...(prof.name && pubInclude("name") ? { name: prof.name } : {}),
-      ...(prof.bio && pubInclude("bio") ? { bio: prof.bio } : {}),
-      ...(prof.location && pubInclude("location") ? { location: prof.location } : {}),
-      ...(pubSocials.length ? { socials: pubSocials } : {}),
-    };
-    const publicName = prof.name && pubInclude("name") ? prof.name : undefined;
+    const publicFields = projectProfileFields(prof, (v) => v === "public");
+    const publicProfile: NonNullable<AgentCard["public_profile"]> = { ...publicFields };
+    const publicName = publicFields.name;
     const unsigned: Omit<AgentCard, "card_hash" | "signature"> = {
       schema: "openclaw-agent-card/0.1",
       agent_id: identity.agent_id,
@@ -825,18 +834,12 @@ export class EdgeBookStore {
   async buildFriendProfile(): Promise<FriendProfile> {
     const identity = await this.identity();
     const profile = defaultProfile(identity);
-    const include = (field: string): boolean => resolveFieldVisibility(profile, field) !== "off";
-    const socials = (profile.socials ?? []).filter(
-      (s) => resolveSocialVisibility(profile, s.label) !== "off",
-    );
+    const friendFields = projectProfileFields(profile, (v) => v !== "off");
     const unsigned: Omit<FriendProfile, "signature"> = {
       schema: "openclaw-friend-profile/0.1",
       agent_id: identity.agent_id,
       profile_version: profile.profile_version ?? 1,
-      ...(profile.name && include("name") ? { name: profile.name } : {}),
-      ...(profile.bio && include("bio") ? { bio: profile.bio } : {}),
-      ...(profile.location && include("location") ? { location: profile.location } : {}),
-      ...(socials.length ? { socials } : {}),
+      ...friendFields,
       issued_at: now(),
     };
     return { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
