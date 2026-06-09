@@ -998,6 +998,31 @@ export class EdgeBookStore {
     return contact;
   }
 
+  // Inbound friend requests the human hasn't been told about yet. Empty when the
+  // agent has notifications disabled. Read-only — the notifier cron consumes this.
+  async pendingFriendRequests(): Promise<AgentContactRecord[]> {
+    const config = await this.config();
+    if (config.notify_on_friend_request === false) return [];
+    const contacts = await this.contacts();
+    return Object.values(contacts).filter(
+      (c) => c.relationship_state === "request_received" && !c.notified_at,
+    );
+  }
+
+  // Stamp a request as notified so it won't surface again (idempotent sweep,
+  // mirrors expireEscalations).
+  async markFriendRequestNotified(peerAgentId: string): Promise<void> {
+    const contacts = await this.contacts();
+    const contact = contacts[peerAgentId];
+    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
+    if (contact.notified_at) return;
+    contact.notified_at = now();
+    contact.updated_at = now();
+    contacts[peerAgentId] = contact;
+    await this.saveContacts(contacts);
+    await this.audit("friend.notified", peerAgentId, {});
+  }
+
   async acceptFriend(peerAgentId: string, reason = "accepted"): Promise<MessageEnvelope> {
     const identity = await this.identity();
     const contacts = await this.contacts();
