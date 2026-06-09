@@ -3,6 +3,7 @@ import http from "node:http";
 import path from "node:path";
 import { EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import type { LocalIdentity, MessageEnvelope } from "./edge-book.ts";
+import { listCandidates, getCandidate, promoteCandidate, dropCandidate } from "./resolver.ts";
 
 export interface ServerOptions {
   home?: string;
@@ -401,6 +402,27 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
   if (req.method === "POST" && url.pathname === "/api/import") {
     const body = await readJsonBody<Record<string, unknown>>(req);
     sendJson(res, 200, { review: await store.reviewLocalDataImport(body) });
+    return true;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/candidates") {
+    sendJson(res, 200, { candidates: await listCandidates(store) });
+    return true;
+  }
+  const candPromote = /^\/api\/candidates\/([^/]+)\/promote$/.exec(url.pathname);
+  if (req.method === "POST" && candPromote) {
+    const id = decodeURIComponent(candPromote[1]);
+    const candidate = await getCandidate(store, id);
+    if (!candidate) { sendJson(res, 404, { error: "unknown_candidate" }); return true; }
+    if (!candidate.card_url) { sendJson(res, 400, { error: "candidate_not_resolvable" }); return true; }
+    const response_envelope = await promoteCandidate(store, id);
+    sendJson(res, 200, { candidate: await getCandidate(store, id), response_envelope });
+    return true;
+  }
+  const candReject = /^\/api\/candidates\/([^/]+)\/reject$/.exec(url.pathname);
+  if (req.method === "POST" && candReject) {
+    await dropCandidate(store, decodeURIComponent(candReject[1]));
+    sendJson(res, 200, { dropped: true });
     return true;
   }
 
