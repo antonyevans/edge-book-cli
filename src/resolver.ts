@@ -197,6 +197,32 @@ export async function writeCandidate(store: EdgeBookStore, input: CandidateInput
   return candidate;
 }
 
+export function defaultProviders(registryLookup: RegistryLookup = async () => null): ResolverProvider[] {
+  return [localContactProvider, inviteProvider, cardUrlProvider, cardFileProvider, makeRegistryProvider(registryLookup)];
+}
+
+export interface ResolveOptions {
+  providers: ResolverProvider[];
+}
+
+export async function resolveTarget(store: EdgeBookStore, target: string, opts: ResolveOptions): Promise<ResolverResult> {
+  const ordered = [...opts.providers].sort((a, b) => b.priority - a.priority);
+  for (const provider of ordered) {
+    const r = await provider.resolve(store, target);
+    if (!r) continue;
+    if (r.kind === "card") {
+      const result: ResolverResult = { status: "resolved", card: r.card, agent_id: r.agent_id, provenance: r.provenance, next_action: "" };
+      result.next_action = nextAction(result, target);
+      return result;
+    }
+    const candidate = await writeCandidate(store, r.candidate!);
+    const result: ResolverResult = { status: "approval_required", candidates: [candidate], provenance: r.provenance, next_action: "" };
+    result.next_action = nextAction(result, target);
+    return result;
+  }
+  return { status: "not_found", next_action: "(no match — check the target)" };
+}
+
 export type RegistryLookup = (handle: string) => Promise<string | null>; // returns a loadCard-able target
 
 export function makeRegistryProvider(lookup: RegistryLookup): ResolverProvider {
