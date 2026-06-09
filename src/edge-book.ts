@@ -648,17 +648,48 @@ export class EdgeBookStore {
   }
 
   // Update profile fields on an existing identity without rotating keys, so the
-  // agent_id (and any pairing built on it) survives. `owner_label` is the human
-  // who owns the agent; `display_name` is the agent's own name.
-  async setProfile(input: { displayName?: string; ownerLabel?: string; shareOwnerLabel?: boolean }): Promise<LocalIdentity> {
+  // agent_id survives. display_name is the agent's own name (public, on the card).
+  // name/bio/location/socials are the human profile, governed by per-field
+  // visibility (default "friends"). Legacy ownerLabel/shareOwnerLabel map onto
+  // profile.name + visibility.name for back-compat.
+  async setProfile(input: {
+    displayName?: string;
+    ownerLabel?: string;
+    shareOwnerLabel?: boolean;
+    name?: string;
+    bio?: string;
+    location?: string;
+    socials?: SocialLink[];
+    visibility?: Record<string, FieldVisibility>;
+  }): Promise<LocalIdentity> {
     const identity = await this.identity();
+    const profile: IdentityProfile = { ...defaultProfile(identity) };
+    profile.visibility = { ...(profile.visibility ?? {}) };
+
     if (input.displayName !== undefined && input.displayName !== "") identity.display_name = input.displayName;
-    if (input.ownerLabel !== undefined) identity.owner_label = input.ownerLabel;
-    if (input.shareOwnerLabel !== undefined) identity.share_owner_label = input.shareOwnerLabel;
+
+    // Legacy shims: ownerLabel -> profile.name; shareOwnerLabel -> name visibility.
+    if (input.ownerLabel !== undefined) {
+      identity.owner_label = input.ownerLabel;
+      profile.name = input.ownerLabel || undefined;
+    }
+    if (input.shareOwnerLabel !== undefined) {
+      identity.share_owner_label = input.shareOwnerLabel;
+      profile.visibility.name = input.shareOwnerLabel ? "public" : "friends";
+    }
+
+    if (input.name !== undefined) profile.name = input.name || undefined;
+    if (input.bio !== undefined) profile.bio = input.bio || undefined;
+    if (input.location !== undefined) profile.location = input.location || undefined;
+    if (input.socials !== undefined) profile.socials = input.socials;
+    if (input.visibility) profile.visibility = { ...profile.visibility, ...input.visibility };
+
+    profile.profile_version = (profile.profile_version ?? 1) + 1;
+    identity.profile = profile;
     identity.updated_at = now();
     await writeJson(this.file(IDENTITY_FILE), identity, 0o600);
     await this.writeCard();
-    await this.audit("identity.update", identity.agent_id, { display_name: identity.display_name, owner_label: identity.owner_label });
+    await this.audit("identity.update", identity.agent_id, { display_name: identity.display_name, profile_version: profile.profile_version });
     return identity;
   }
 
@@ -683,13 +714,23 @@ export class EdgeBookStore {
     if (config.relay_url) transports.push({ mode: "relay", endpoint: config.relay_url });
     const caps = Object.values(await this.capabilities())
       .map((c) => ({ name: c.name, version: c.version, summary: c.summary, status: c.status }));
+    const prof = defaultProfile(identity);
+    const pubInclude = (field: string) => resolveFieldVisibility(prof, field) === "public";
+    const pubSocials = (prof.socials ?? []).filter((s) => resolveSocialVisibility(prof, s.label) === "public");
+    const publicProfile: NonNullable<AgentCard["public_profile"]> = {
+      ...(prof.name && pubInclude("name") ? { name: prof.name } : {}),
+      ...(prof.bio && pubInclude("bio") ? { bio: prof.bio } : {}),
+      ...(prof.location && pubInclude("location") ? { location: prof.location } : {}),
+      ...(pubSocials.length ? { socials: pubSocials } : {}),
+    };
+    const publicName = prof.name && pubInclude("name") ? prof.name : undefined;
     const unsigned: Omit<AgentCard, "card_hash" | "signature"> = {
       schema: "openclaw-agent-card/0.1",
       agent_id: identity.agent_id,
       handle: identity.handle,
       display_name: identity.display_name,
-      // Opt-in only: include the human owner name when the owner enabled sharing.
-      ...(identity.share_owner_label && identity.owner_label ? { owner_label: identity.owner_label } : {}),
+      ...(publicName ? { owner_label: publicName } : {}),
+      ...(Object.keys(publicProfile).length ? { public_profile: publicProfile } : {}),
       card_url: cardUrl || `file://${this.file(CARD_FILE)}`,
       card_version: 1,
       public_keys: [{ id: `${identity.agent_id}#main`, type: "ed25519", public_key_pem: identity.public_key_pem }],
@@ -708,6 +749,28 @@ export class EdgeBookStore {
     const card = await this.buildCard(cardUrl);
     await writeJson(this.file(CARD_FILE), card);
     return card;
+  }
+
+  // The friend-only profile: every field whose visibility resolves to "friends"
+  // or "public". Signed; shared only with confirmed friends.
+  async buildFriendProfile(): Promise<FriendProfile> {
+    const identity = await this.identity();
+    const profile = defaultProfile(identity);
+    const include = (field: string): boolean => resolveFieldVisibility(profile, field) !== "off";
+    const socials = (profile.socials ?? []).filter(
+      (s) => resolveSocialVisibility(profile, s.label) !== "off",
+    );
+    const unsigned: Omit<FriendProfile, "signature"> = {
+      schema: "openclaw-friend-profile/0.1",
+      agent_id: identity.agent_id,
+      profile_version: profile.profile_version ?? 1,
+      ...(profile.name && include("name") ? { name: profile.name } : {}),
+      ...(profile.bio && include("bio") ? { bio: profile.bio } : {}),
+      ...(profile.location && include("location") ? { location: profile.location } : {}),
+      ...(socials.length ? { socials } : {}),
+      issued_at: now(),
+    };
+    return { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
   }
 
   async doctor(): Promise<Record<string, unknown>> {
@@ -2265,6 +2328,22 @@ export function validateCard(card: AgentCard): void {
   if (card.agent_id !== expectedId) throw new EdgeBookError("invalid_card", "Agent Card agent_id does not match public key");
   if (!verifyPayload(withoutSignature(card), card.signature, card.public_keys[0].public_key_pem)) {
     throw new EdgeBookError("invalid_card", "Agent Card signature is invalid");
+  }
+}
+
+// Structural + signature validation against a known public key (the peer's card
+// key). Throws EdgeBookError on any failure. The agent_id<->sender match is
+// checked by the caller (it has the envelope's from_agent_id).
+export function validateFriendProfile(profile: FriendProfile, publicKeyPem: string): void {
+  if (profile.schema !== "openclaw-friend-profile/0.1") {
+    throw new EdgeBookError("invalid_friend_profile", "Unsupported FriendProfile schema");
+  }
+  if (!profile.agent_id) throw new EdgeBookError("invalid_friend_profile", "FriendProfile missing agent_id");
+  if (typeof profile.profile_version !== "number") {
+    throw new EdgeBookError("invalid_friend_profile", "FriendProfile missing profile_version");
+  }
+  if (!verifyPayload(withoutSignature(profile), profile.signature, publicKeyPem)) {
+    throw new EdgeBookError("invalid_friend_profile", "FriendProfile signature is invalid");
   }
 }
 
