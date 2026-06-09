@@ -1055,6 +1055,25 @@ export class EdgeBookStore {
     });
   }
 
+  async rejectFriend(peerAgentId: string, reason = "rejected"): Promise<MessageEnvelope> {
+    const identity = await this.identity();
+    const contacts = await this.contacts();
+    const contact = contacts[peerAgentId];
+    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
+    if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked_peer", "Cannot reject a blocked peer");
+    await this.setRelationship(peerAgentId, "rejected", "Reject", reason);
+    const card = await this.writeCard();
+    return this.signEnvelope({
+      type: "friend_response",
+      to_agent_id: peerAgentId,
+      relationship_id: relationshipId(identity.agent_id, peerAgentId),
+      capability_id: "",
+      ref: "",
+      transport: "local",
+      body: { accepted: false, card, reason } satisfies FriendResponseBody,
+    });
+  }
+
   async applyFriendResponse(envelope: MessageEnvelope): Promise<MessageEnvelope | null> {
     await this.verifyEnvelope(envelope);
     if (envelope.type !== "friend_response") throw new EdgeBookError("wrong_message_type", "Expected friend_response envelope");
