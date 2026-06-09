@@ -1397,13 +1397,19 @@ export class EdgeBookStore {
     const object = await this.getObject(objectId);
     if (object && object.from_agent === subjectAgentId) return true; // owner
     const grants = await this.grants();
-    return Object.values(grants).some((grant) =>
+    const candidates = Object.values(grants).filter((grant) =>
       grant.object_id === objectId &&
       grant.subject_agent_id === subjectAgentId &&
       grant.scopes.includes("object.read") &&
       grant.status === "active" &&
       (!grant.expires_at || Date.parse(grant.expires_at) > at)
     );
+    // ea-openclaw-030 access check #6: the binding grant must carry a verifiable
+    // issuer signature, so a grant tampered after signing fails closed.
+    for (const grant of candidates) {
+      if (await this.verifyGrantSignature(grant)) return true;
+    }
+    return false;
   }
 
   // Audited read. Returns the object iff canReadObject; else fails closed.

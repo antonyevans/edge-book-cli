@@ -77,6 +77,29 @@ test("feed read still works with an intact self-issued grant", async () => {
   await assert.doesNotReject(() => alice.visiblePostsForPeer(bobCard.agent_id));
 });
 
+test("object read is denied when the received object.read grant was tampered after signing", async () => {
+  const root = await tempRoot();
+  const { alice, bob, bobCard } = await befriend(root);
+  const object = await alice.createObject({ title: "Review", body: "please" });
+  await bob.receiveObjectShare(await alice.shareObjectEnvelope(bobCard.agent_id, object.object_id));
+
+  // sanity: with the intact grant, bob can read
+  assert.equal(await bob.canReadObject(object.object_id, bobCard.agent_id), true);
+
+  // tamper bob's stored copy of alice's object.read grant (mutate without re-signing)
+  const grants = await bob.grants();
+  const id = Object.keys(grants).find((k) => grants[k].object_id === object.object_id);
+  assert.ok(id, "expected a received object.read grant");
+  grants[id].expires_at = "2999-01-01T00:00:00.000Z";
+  await bob.saveGrants(grants);
+
+  assert.equal(await bob.canReadObject(object.object_id, bobCard.agent_id), false, "tampered grant must fail closed");
+  await assert.rejects(
+    () => bob.readObject(object.object_id, bobCard.agent_id),
+    (error) => error instanceof EdgeBookError && error.code === "access_denied"
+  );
+});
+
 test("message send is denied with an explicit blocked error after blocking the peer", async () => {
   const root = await tempRoot();
   const { alice, bobCard } = await befriend(root);
