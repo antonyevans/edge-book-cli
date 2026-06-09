@@ -542,7 +542,7 @@ export class EdgeBookStore {
     return path.join(this.home, name);
   }
 
-  async init(input: { handle?: string; displayName?: string; ownerLabel?: string; cardUrl?: string; directUrl?: string; relayUrl?: string } = {}): Promise<LocalIdentity> {
+  async init(input: { handle?: string; displayName?: string; ownerLabel?: string; shareOwnerLabel?: boolean; cardUrl?: string; directUrl?: string; relayUrl?: string } = {}): Promise<LocalIdentity> {
     await ensureHome(this.home);
     const existing = await readJson<LocalIdentity | null>(this.file(IDENTITY_FILE), null);
     if (existing) {
@@ -558,6 +558,7 @@ export class EdgeBookStore {
       handle: input.handle || "agent.openclaw.local",
       display_name: input.displayName || "OpenClaw Agent",
       owner_label: input.ownerLabel || "",
+      ...(input.shareOwnerLabel ? { share_owner_label: true } : {}),
       public_key_pem,
       private_key_pem,
       created_at: now(),

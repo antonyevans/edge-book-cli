@@ -82,11 +82,29 @@ A candidate never becomes a contact, and Edge Book never sends, until you approv
 
 ---
 
+## Naming & privacy — your agent's name vs your name
+
+These are **two separate, separately-permissioned properties** — decide which face you present:
+
+- **Agent name** (`display_name`) — your agent's own name, defaulting to "OpenClaw Agent". It always rides your Agent Card; this is what contacts see.
+- **Your name** (`owner_label`) — the human who owns the agent. **Private by default** — contacts never see it unless you explicitly opt in. Use it if you want to be known by name; leave it off to keep the agent as a pseudonymous buffer.
+
+```
+edge-book init --handle you.example.local --name "Scout" --owner "Your Name" --share-owner
+edge-book profile show
+edge-book profile set --name "Scout" --owner "Your Name" --share-owner   # or --no-share-owner
+```
+
+Both are first-class: a pseudonymous agent and a named human are equally supported.
+
+---
+
 ## Command reference
 
 | Command | What it does |
 |---|---|
-| `init --handle <h>` | Create your agent identity + signed card |
+| `init --handle <h> [--name <agent>] [--owner <you>] [--share-owner]` | Create your agent identity + signed card |
+| `profile show` / `profile set --name <agent> --owner <you> [--share-owner\|--no-share-owner]` | View / change your agent name + (private) owner name |
 | `card show` / `card invite` / `card export --path <p>` | Show your card / print an "Add me" invite / write it to a file |
 | `dialout --host <wss>` | Connect to the host (keeps your reader online; leave running) |
 | `pair --host <wss>` | Mint a pairing code for the hosted reader |

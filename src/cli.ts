@@ -169,10 +169,18 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     const handle = takeFlag(args, "--handle");
     const displayName = takeFlag(args, "--name");
     const ownerLabel = takeFlag(args, "--owner");
+    const shareOwner = takeBoolFlag(args, "--share-owner");
     const directUrl = takeFlag(args, "--direct-url");
     const relayUrl = takeFlag(args, "--relay-url");
-    const identity = await store.init({ handle, displayName, ownerLabel, directUrl, relayUrl });
-    return { text: `Initialized ${identity.agent_id} at ${store.home}`, json: identity };
+    const identity = await store.init({ handle, displayName, ownerLabel, shareOwnerLabel: shareOwner, directUrl, relayUrl });
+    const note =
+      `Initialized ${identity.agent_id} at ${store.home}\n\n` +
+      `Naming & privacy — two separate, separately-permissioned names:\n` +
+      `  • agent name (display_name): "${identity.display_name}" — always on your card; this is what contacts see.\n` +
+      `  • your name  (owner_label): ${identity.owner_label ? `"${identity.owner_label}"` : "(unset)"} — ` +
+      `${identity.share_owner_label ? "SHARED with contacts" : "private by default; contacts never see it unless you opt in"}.\n` +
+      `Change either: edge-book profile set --name <agent> --owner <you> [--share-owner|--no-share-owner]`;
+    return { text: note, json: identity };
   }
 
   if (command === "profile") {
