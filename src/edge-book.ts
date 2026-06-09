@@ -951,6 +951,12 @@ export class EdgeBookStore {
     if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
     if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked_peer", "Cannot accept a blocked peer");
     await this.setRelationship(peerAgentId, "friend", "Accept", reason);
+    // `profile.read.friend` is minted now but intentionally NOT enforced in this
+    // phase: the push exchange (profile_share) gates on relationship_state ===
+    // "friend", not on the grant. The scope is reserved so a future pull-based
+    // profile-read path (the reader `friend_accept` wiring, Plan C) can enforce
+    // it without re-granting existing friendships. Until that consumer lands it
+    // is a forward-compat token, not a live access check.
     const grant = await this.issueGrant(peerAgentId, ["message.friend", "feed.read.friends", "profile.read.friend"]);
     const card = await this.writeCard();
     const profile = await this.buildFriendProfile();
