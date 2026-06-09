@@ -50,6 +50,9 @@ Local agent:
   edge-book friend apply-response <envelope-json-path> [--home <dir>]
   edge-book friend revoke <peer-agent-id> [--home <dir>]
   edge-book friend block <peer-agent-id> [--home <dir>]
+  edge-book friend pending [--json] [--home <dir>]
+  edge-book friend mark-notified <peer-agent-id> [--home <dir>]
+  edge-book friend notify-config --on|--off [--home <dir>]
   edge-book contacts list [--home <dir>]
   edge-book contacts refresh <card-path-or-url> [--home <dir>]
   edge-book message send <peer-agent-id> --body <text> [--deliver] [--home <dir>]
@@ -436,6 +439,31 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       const peer = requireArg(args.shift(), "peer-agent-id");
       await store.block(peer);
       return { text: `Blocked ${peer}` };
+    }
+    if (action === "pending") {
+      const pending = await store.pendingFriendRequests();
+      const json = pending.map((c) => ({
+        agent_id: c.peer_agent_id,
+        display_name: c.display_name,
+        note: "", // note isn't persisted on the contact; read from inbox if needed
+        received_at: c.created_at,
+      }));
+      const text = json.length
+        ? json.map((p) => `${p.agent_id}  ${p.display_name}`).join("\n")
+        : "No pending friend requests.";
+      return { text, json };
+    }
+    if (action === "mark-notified") {
+      const peer = requireArg(args.shift(), "peer-agent-id");
+      await store.markFriendRequestNotified(peer);
+      return { text: `Marked ${peer} notified` };
+    }
+    if (action === "notify-config") {
+      const on = takeBoolFlag(args, "--on");
+      const off = takeBoolFlag(args, "--off");
+      if (!on && !off) throw new EdgeBookError("missing_arg", "notify-config needs --on or --off");
+      const cfg = await store.updateConfig({ notify_on_friend_request: on ? true : false });
+      return { text: `notify_on_friend_request = ${cfg.notify_on_friend_request}`, json: cfg };
     }
   }
 
