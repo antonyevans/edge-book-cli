@@ -73,6 +73,26 @@ test("re-sent friend request re-surfaces after notified_at was stamped", async (
 
 import { handleCli } from "../src/cli.ts";
 
+test("CLI friend pending --json surfaces real note and requested_at from inbox", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-notify-note-"));
+  const alice = new EdgeBookStore({ home: path.join(root, "alice") });
+  const bob = new EdgeBookStore({ home: path.join(root, "bob") });
+  await alice.init({ handle: "alice.openclaw.local", displayName: "Alice Agent" });
+  await bob.init({ handle: "bob.openclaw.local", displayName: "Bob Agent" });
+  const bobCard = await bob.writeCard();
+  // Alice sends a friend request WITH a note (2nd arg to createFriendRequest)
+  const envelope = await alice.createFriendRequest(bobCard, "lets connect");
+  await bob.receiveFriendRequest(envelope);
+
+  const result = await handleCli(["friend", "pending", "--json"], { home: bob.home });
+  const j = result.json as any[];
+  assert.equal(j.length, 1);
+  assert.equal(j[0].note, "lets connect", "note should be surfaced from inbox envelope");
+  assert.ok(j[0].requested_at, "requested_at should be non-empty");
+  assert.ok(j[0].contact_created_at, "contact_created_at should be present");
+  assert.equal(j[0].agent_id, (await alice.identity()).agent_id);
+});
+
 test("CLI friend pending --json lists, mark-notified dedups", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-notify-cli-"));
   const bobHome = path.join(root, "bob");
