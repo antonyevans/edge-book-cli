@@ -3,7 +3,15 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import crypto from "node:crypto";
 import { EdgeBookStore, slugifyHandle, isValidHandle, validateCard } from "../src/edge-book.ts";
+
+function canon(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(canon).join(",")}]`;
+  const o = v as Record<string, unknown>;
+  return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canon(o[k])}`).join(",")}}`;
+}
 
 async function store() {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "eb-handle-"));
@@ -32,4 +40,26 @@ test("setHandle updates identity + re-signs the card", async () => {
 test("setHandle rejects a bad slug", async () => {
   const s = await store();
   await assert.rejects(() => s.setHandle("Bad Handle!"), /invalid_handle/);
+});
+
+test("buildHandleClaim produces a relay-verifiable claim", async () => {
+  const s = await store(); // helper already defined in this file: inits a fresh store
+  await s.setHandle("antony-evans");
+  const claim = await s.buildHandleClaim();
+  const id = await s.identity();
+  assert.equal(claim.handle, "antony-evans");
+  assert.equal(claim.agent_did, id.agent_id);
+  assert.equal((claim.card as { agent_id: string }).agent_id, id.agent_id);
+  const ok = crypto.verify(
+    null,
+    Buffer.from(canon({ handle: claim.handle, agent_did: claim.agent_did, claimed_at: claim.claimed_at })),
+    id.public_key_pem,
+    Buffer.from(claim.claim_sig, "base64url"),
+  );
+  assert.equal(ok, true);
+});
+
+test("buildHandleClaim throws if handle is still the default", async () => {
+  const s = await store();
+  await assert.rejects(() => s.buildHandleClaim(), /invalid_handle/);
 });

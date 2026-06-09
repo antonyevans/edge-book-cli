@@ -888,6 +888,19 @@ export class EdgeBookStore {
     return card;
   }
 
+  // Build a signed handle claim for the relay registry (spec-096). The relay
+  // verifies claim_sig + the card against the identity key before binding.
+  async buildHandleClaim(): Promise<{ handle: string; agent_did: string; card: AgentCard; claimed_at: number; claim_sig: string }> {
+    const identity = await this.identity();
+    if (!isValidHandle(identity.handle)) {
+      throw new EdgeBookError("invalid_handle", `invalid_handle: set a handle first (current: ${identity.handle})`);
+    }
+    const card = await loadCard(this.file(CARD_FILE)); // current signed card
+    const claimed_at = Date.now();
+    const claim_sig = signPayload({ handle: identity.handle, agent_did: identity.agent_id, claimed_at }, identity.private_key_pem);
+    return { handle: identity.handle, agent_did: identity.agent_id, card, claimed_at, claim_sig };
+  }
+
   // The friend-only profile: every field whose visibility resolves to "friends"
   // or "public". Signed; shared only with confirmed friends.
   async buildFriendProfile(): Promise<FriendProfile> {
