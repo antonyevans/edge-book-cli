@@ -108,6 +108,9 @@ export interface AgentContactRecord {
   owner_label?: string;
   // The latest FriendProfile this peer shared with us (only present once friends).
   friend_profile?: FriendProfile;
+  // ISO timestamp the human was last notified of this inbound request ("" = not
+  // yet notified). Drives friend-request notification dedup.
+  notified_at?: string;
   // The peer's advertised capabilities (from their card; absent if none / older card).
   advertised_capabilities?: Array<{ name: string; version: string; summary: string; status: "active" | "deprecated" }>;
   card_url: string;
@@ -910,6 +913,7 @@ export class EdgeBookStore {
       owner_label: card.owner_label,
       // Preserve a previously-received friend profile across card refreshes.
       ...(existing?.friend_profile ? { friend_profile: existing.friend_profile } : {}),
+      ...(existing?.notified_at ? { notified_at: existing.notified_at } : {}),
       advertised_capabilities: card.advertised_capabilities,
       card_url: card.card_url,
       known_endpoints: card.transports,
