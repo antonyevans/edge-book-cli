@@ -13,7 +13,8 @@
     "harness": "node bin/edge-book.js harness two-agent",
     "harness:e2e": "node scripts/convergence-e2e.ts",
     "prepublishOnly": "npm run build",
-    "smoke": "node scripts/smoke-2agent.ts"
+    "smoke": "node scripts/smoke-2agent.ts",
+    "smoke:host": "node scripts/smoke-2agent.ts --host"
   },
   "openclaw": {
     "extensions": [

@@ -3,13 +3,16 @@
 // the full local interaction surface, printing a pass/fail checklist.
 // Exits nonzero on any failed step.
 //
-//   node scripts/smoke-2agent.ts                 # agents in a temp dir, cleaned up
-//   node scripts/smoke-2agent.ts --dir ./.smoke  # persist agents on disk to inspect
-//   npm run smoke
+//   node scripts/smoke-2agent.ts                  # LOCAL in-process, temp dir
+//   node scripts/smoke-2agent.ts --dir ./.smoke   # persist agents on disk
+//   node scripts/smoke-2agent.ts --host           # over a spawned local host mailbox
+//   node scripts/smoke-2agent.ts --remote https://edge-book-host.fly.dev   # over a deployed host
+//   npm run smoke   |   npm run smoke:host
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { runSmoke } from "./lib/two-agent-smoke.ts";
+import { runSmoke, type TransportFactory } from "./lib/two-agent-smoke.ts";
+import { makeHostTransport } from "./lib/host-transport.ts";
 
 function takeFlag(args: string[], name: string): string | undefined {
   const i = args.indexOf(name);
@@ -17,15 +20,25 @@ function takeFlag(args: string[], name: string): string | undefined {
   return args.splice(i, 2)[1];
 }
 
+function takeBool(args: string[], name: string): boolean {
+  const i = args.indexOf(name);
+  if (i === -1) return false;
+  args.splice(i, 1);
+  return true;
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const explicitDir = takeFlag(args, "--dir");
+  const remoteBase = takeFlag(args, "--remote");
+  const useHost = takeBool(args, "--host") || Boolean(remoteBase);
   const dir = explicitDir ? path.resolve(explicitDir) : await fs.mkdtemp(path.join(os.tmpdir(), "edge-book-smoke-"));
   await fs.mkdir(dir, { recursive: true });
 
-  const result = await runSmoke({ dir });
+  const makeTransport: TransportFactory | undefined = useHost ? makeHostTransport({ remoteBase }) : undefined;
+  const result = await runSmoke({ dir, makeTransport });
 
-  console.log(`\nTwo-agent smoke — agents on disk under ${dir}\n`);
+  console.log(`\nTwo-agent smoke [${result.transport}] — agents on disk under ${dir}\n`);
   for (const s of result.steps) {
     console.log(`  ${s.ok ? "✓" : "✗"} ${s.name}\n      ${s.detail}`);
   }
