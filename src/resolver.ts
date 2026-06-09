@@ -223,6 +223,13 @@ export async function resolveTarget(store: EdgeBookStore, target: string, opts: 
   return { status: "not_found", next_action: "(no match — check the target)" };
 }
 
+export async function dropCandidate(store: EdgeBookStore, candidateId: string): Promise<void> {
+  const map = await readJson<Record<string, Candidate>>(store.file(CANDIDATES_FILE), {});
+  if (!map[candidateId]) return;
+  delete map[candidateId];
+  await writeJson(store.file(CANDIDATES_FILE), map);
+}
+
 // Mark a candidate approved and bind the verified agent_id (idempotent).
 export async function markCandidateApproved(store: EdgeBookStore, candidateId: string, agentId: string): Promise<void> {
   const map = await readJson<Record<string, Candidate>>(store.file(CANDIDATES_FILE), {});
