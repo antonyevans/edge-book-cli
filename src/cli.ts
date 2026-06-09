@@ -45,6 +45,11 @@ function parseHost(args: string[], ctx: CliContext): string {
   return takeFlag(args, "--host") || ctx.defaultHost || process.env.EDGE_BOOK_HOST || DEFAULT_DIALOUT_HOST;
 }
 
+// Derive the relay's https origin from the dial-out host (wss://host/agent/ws -> https://host).
+function relayBaseFromHost(host: string): string {
+  return host.replace(/\/agent\/ws\/?$/, "").replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
+}
+
 function requireArg(value: string | undefined, label: string): string {
   if (!value) throw new EdgeBookError("missing_arg", `Missing ${label}`);
   return value;
@@ -296,7 +301,8 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
 
   if (command === "resolve") {
     const target = requireArg(args.shift(), "target");
-    const result = await resolveTarget(store, target, { providers: defaultProviders() });
+    const relayBase = relayBaseFromHost(parseHost(args, ctx));
+    const result = await resolveTarget(store, target, { providers: defaultProviders(relayBase) });
     const label = result.agent_id ?? result.candidates?.[0]?.candidate_id ?? "";
     return { text: `${result.status}  ${label}\nnext: ${result.next_action}`, json: result };
   }
