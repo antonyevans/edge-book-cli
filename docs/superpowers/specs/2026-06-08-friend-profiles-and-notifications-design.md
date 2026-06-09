@@ -130,8 +130,19 @@ export interface IdentityProfile {
 
 **C1. Push via heartbeat (the primary path).**
 
-- New CLI listing: `edge-book friend pending --json` → array of `request_received` contacts not yet notified, each with `{ agent_id, display_name, note, received_at }`. A `notified_at` flag is tracked per contact (or in a `friend-notify-state` file) for dedup.
-- New procedural knowledge file (heartbeat task), shipped where agentvillage expects heartbeat tasks (analogous to `index-network/heartbeat.md`):
+edge-book provides the **data surface**; the host's existing periodic-tick mechanism delivers the notification. edge-book ships **no transport** — delivery rides the host channel layer (Telegram / WhatsApp / whatever the human last used). Accept-by-chat-reply is free because the agent is an LLM on the channel.
+
+*Data surface (host-agnostic, in edge-book-cli):*
+
+- `edge-book friend pending --json` → array of `request_received` contacts whose `notified_at` is unset (or, see suppression below, empty if notify is off), each `{ agent_id, display_name, note, received_at }`.
+- `edge-book friend pending --mark-notified <agent_id>` → stamps `notified_at` on the contact record. **`notified_at` on the contact record is the authoritative dedup state** (works even on hosts without a memory file).
+- Config `notify_on_friend_request` on the identity, **default true**. Suppression is enforced **at `friend pending` output** (single source of truth): when false, `--json` returns `[]`, so no host needs special-casing.
+
+*Procedural knowledge — shipped as a skill bundle in edge-book-cli (`skills/edge-book/`):* mirrors the agentvillage-skills layout so any host loading edge-book as a skill picks it up.
+
+- `skills/edge-book/openclaw.plugin.json` → `{ "id": "edge-book-skill", "name": "Edge Book", "skills": ["."] }` (mirrors `agentvillage-skills/openclaw.plugin.json`).
+- `skills/edge-book/SKILL.md` → bundle descriptor + when-to-read pointers.
+- `skills/edge-book/heartbeat.md` → the `inbound-friend-requests` task, same `{name, interval, prompt}` shape and dedup conventions as `index-network/heartbeat.md` (last-run in `memory/heartbeat-state.json` under `inboundFriendRequests`; per-request dedup is edge-book's own `notified_at`):
 
   ```
   - name: inbound-friend-requests
@@ -144,11 +155,11 @@ export interface IdentityProfile {
          who it is (display_name) and their note. Say: reply "yes" to connect,
          or ignore to leave it pending.
       4. If the human replies yes, run `edge-book friend accept <agent_id> --deliver`.
-      5. Mark each surfaced request notified: `edge-book friend pending --mark-notified <agent_id>`.
+      5. Mark each surfaced request notified:
+         `edge-book friend pending --mark-notified <agent_id>`.
   ```
 
-- This keeps edge-book transport-agnostic. Delivery rides the host's channel layer → Telegram / WhatsApp / whatever the human last used. Accept-by-chat-reply is free because the agent is an LLM on the channel.
-- Config `notify_on_friend_request` on the identity, **default true**. When false, the heartbeat task still runs but the agent suppresses (or `friend pending` returns empty for notification purposes — implementation picks one; spec'd as: flag gates whether `pending` reports requests to the heartbeat).
+*Hermes path (explicit-schedule hosts):* mirror `DIGEST_CRON_SPECS` / `reconcileDigestCronJobs` from `agentvillage/install/install_index.ts`. Add a `FRIEND_NOTIFY_CRON_SPEC` (e.g. `name: "Edge Book — friend requests"`, schedule `*/20 * * * *`, `--deliver telegram`, prompt body = the heartbeat prompt above stored as a prompt file) and a small idempotent installer/reconciler. Cron name carries its own prefix so it never collides with agentvillage's `"Edge —"` jobs. OpenClaw/Claude hosts rely on the `heartbeat.md` walk instead and do not need this installer.
 
 **C2. Pull via reader approvals (the complement).**
 
@@ -168,8 +179,9 @@ export interface IdentityProfile {
 | `buildCard` (modified) | Include only `public`-visibility profile fields | `IdentityProfile` |
 | profile exchange (`profile_share` send/receive) | Two-step + edit broadcast | envelope sign/verify, grants |
 | `acceptFriend` (modified) | Add `profile.read.friend` scope + attach profile to response | grants |
-| `friend pending` CLI + notify-state | Expose un-notified inbound requests, dedup | contact store |
-| heartbeat task file | Procedural notify instructions for the agent | agentvillage heartbeat runner |
+| `friend pending` CLI + notify-state | Expose un-notified inbound requests, dedup (`notified_at`), suppress when notify off | contact store, identity config |
+| `skills/edge-book/` bundle | `openclaw.plugin.json` + `SKILL.md` + `heartbeat.md` (`inbound-friend-requests` task) | host heartbeat tick |
+| Hermes friend-notify cron installer | `FRIEND_NOTIFY_CRON_SPEC` + idempotent reconciler | `hermes cron`, mirrors `install_index.ts` |
 | reader approvals wiring | `friend_accept` approval + accept/reject endpoints | host `/api/*` proxy, reader HTML |
 | migration | Map `owner_label`/`share_owner_label` → profile model | identity load |
 
@@ -191,7 +203,13 @@ export interface IdentityProfile {
 - Notify: `friend pending --json` lists only un-notified `request_received`; `--mark-notified` dedups; `notify_on_friend_request:false` suppresses.
 - Reader: `friend_accept` approval appears in badge + view; accept endpoint issues grant and clears approval.
 
-## Open questions for plan stage
+## Host integration — resolved
 
-- Exact file location/format the agentvillage heartbeat runner expects for a third-party skill's task (confirm against `agentvillage-skills` heartbeat loader before finalizing C1 file placement).
-- Whether `notify_on_friend_request:false` suppresses at `friend pending` output or at the heartbeat prompt (lean: at `pending` output, so one source of truth).
+Confirmed against `Edge-City/agentvillage` (`install/install_index.ts`, `install/paths.ts`) and `Edge-City/agentvillage-skills` (`openclaw.plugin.json`, `index-network/heartbeat.md`):
+
+- **Recurring agent tasks are cron jobs whose body is a natural-language prompt**, delivered on the host channel. There is no separate notification API to call — the agent IS the notifier.
+- **OpenClaw / Claude (primary, this user's host):** ship a skill bundle `skills/edge-book/` with `openclaw.plugin.json` (`"skills": ["."]`) + `SKILL.md` + `heartbeat.md`. The host's heartbeat tick walks `heartbeat.md`, runs due tasks (`interval`-gated), and delivers on the last-active channel. Dedup: last-run in `memory/heartbeat-state.json` (`inboundFriendRequests`); per-request via edge-book's `notified_at`.
+- **Hermes (explicit-schedule):** add `FRIEND_NOTIFY_CRON_SPEC` + idempotent reconciler mirroring `DIGEST_CRON_SPECS` / `reconcileDigestCronJobs`; `hermes cron create <schedule> <prompt> --name "Edge Book — friend requests" --deliver telegram --workdir <home>`. Own cron-name prefix to avoid collision with agentvillage's `"Edge —"` jobs.
+- **Suppression** (`notify_on_friend_request:false`) is enforced at `friend pending --json` output (returns `[]`) — one source of truth, no host special-casing.
+
+No remaining open questions block the implementation plan.
