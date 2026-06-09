@@ -1007,7 +1007,7 @@ export class EdgeBookStore {
     return event;
   }
 
-  async createFriendRequest(targetCard: AgentCard, note = ""): Promise<MessageEnvelope> {
+  async createFriendRequest(targetCard: AgentCard, note = "", inviteCode = ""): Promise<MessageEnvelope> {
     const identity = await this.identity();
     validateCard(targetCard);
     const existing = (await this.contacts())[targetCard.agent_id];
@@ -1015,6 +1015,7 @@ export class EdgeBookStore {
     await this.upsertContactFromCard(targetCard, "request_sent");
     await this.setRelationship(targetCard.agent_id, "request_sent", "FriendRequest", note);
     const card = await this.writeCard();
+    const body: FriendRequestBody = { card, note, ...(inviteCode ? { invite_code: inviteCode } : {}) };
     return this.signEnvelope({
       type: "friend_request",
       to_agent_id: targetCard.agent_id,
@@ -1022,7 +1023,7 @@ export class EdgeBookStore {
       capability_id: "",
       ref: "",
       transport: "local",
-      body: { card, note } satisfies FriendRequestBody
+      body: body as unknown as Record<string, unknown>
     });
   }
 
@@ -1054,6 +1055,16 @@ export class EdgeBookStore {
     const body = envelope.body as unknown as FriendRequestBody;
     validateCard(body.card);
     if (body.card.agent_id !== envelope.from_agent_id) throw new EdgeBookError("agent_id_mismatch", "Friend request card does not match sender");
+    // Invite-only gate: when open_friend_requests is explicitly false, require either
+    // a prior relationship or a valid invite code.
+    if ((await this.config()).open_friend_requests === false) {
+      const known = (await this.contacts())[envelope.from_agent_id]?.relationship_state;
+      const allowed = (known && known !== "none") || (body.invite_code ? await this.consumeInviteCode(body.invite_code) : false);
+      if (!allowed) {
+        await this.audit("inbound.unsolicited_dropped", envelope.from_agent_id, {});
+        throw new EdgeBookError("unsolicited_dropped", "Invite-only: unsolicited request without a valid invite code");
+      }
+    }
     const contact = await this.upsertContactFromCard(body.card, "request_received");
     await this.setRelationship(envelope.from_agent_id, "request_received", "FriendRequest", body.note);
     await appendJsonl(this.file(INBOX_FILE), envelope);
@@ -1255,6 +1266,39 @@ export class EdgeBookStore {
 
   async reports(): Promise<ReportRecord[]> {
     return readJson<ReportRecord[]>(this.file(REPORTS_FILE), []);
+  }
+
+  async inviteCodes(): Promise<InviteCode[]> {
+    return readJson<InviteCode[]>(this.file(INVITE_CODES_FILE), []);
+  }
+
+  async mintInviteCode(opts: { ttlMs?: number; maxUses?: number } = {}): Promise<InviteCode> {
+    const invite: InviteCode = {
+      code: randomId("invite"),
+      created_at: now(),
+      expires_at: opts.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : "",
+      max_uses: opts.maxUses ?? 0,
+      uses: 0,
+    };
+    const codes = await this.inviteCodes();
+    codes.push(invite);
+    await writeJson(this.file(INVITE_CODES_FILE), codes);
+    return invite;
+  }
+
+  private async consumeInviteCode(code: string): Promise<boolean> {
+    const codes = await this.inviteCodes();
+    const idx = codes.findIndex((c) => c.code === code);
+    if (idx === -1) return false;
+    const invite = codes[idx];
+    // Check expiry
+    if (invite.expires_at && new Date(invite.expires_at) < new Date()) return false;
+    // Check max_uses (0 = unlimited)
+    if (invite.max_uses > 0 && invite.uses >= invite.max_uses) return false;
+    invite.uses += 1;
+    codes[idx] = invite;
+    await writeJson(this.file(INVITE_CODES_FILE), codes);
+    return true;
   }
 
   async reportPeer(peerAgentId: string, reason = "", opts: { block?: boolean } = {}): Promise<ReportRecord> {

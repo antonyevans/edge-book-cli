@@ -27,6 +27,42 @@ test("reportPeer records evidence and can auto-block", async () => {
   assert.equal((await bob.contacts())[aliceId].relationship_state, "blocked");
 });
 
+test("invite-only drops a cold unsolicited request; open (default) accepts it", async () => {
+  const { alice, bob } = await pair();
+  const bobCard = await bob.writeCard();
+  // default open
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+  assert.equal((await bob.pendingFriendRequests()).length, 1);
+  // flip to invite-only
+  const { alice: a2, bob: b2 } = await pair();
+  const b2Card = await b2.writeCard();
+  await b2.updateConfig({ open_friend_requests: false });
+  const req = await a2.createFriendRequest(b2Card);
+  await assert.rejects(
+    () => b2.receiveFriendRequest(req),
+    (e: unknown) => e instanceof EdgeBookError && e.code === "unsolicited_dropped",
+  );
+});
+
+test("invite-only accepts a request carrying a valid minted invite code (single use)", async () => {
+  const { alice, bob } = await pair();
+  await bob.updateConfig({ open_friend_requests: false });
+  const bobCard = await bob.writeCard();
+  const invite = await bob.mintInviteCode({ maxUses: 1 });
+  // Requester includes the code; createFriendRequest takes it as 3rd arg.
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard, "hi", invite.code)); // accepted
+  assert.equal((await bob.pendingFriendRequests()).length, 1);
+  // code is now consumed → a second cold request from a different peer is dropped
+  const carolRoot = await fs.mkdtemp(path.join(os.tmpdir(), "eb-carol-"));
+  const carol = new EdgeBookStore({ home: path.join(carolRoot, "c") });
+  await carol.init({ handle: "carol.openclaw.local", displayName: "Carol" });
+  const carolReq = await carol.createFriendRequest(bobCard, "hi", invite.code);
+  await assert.rejects(
+    () => bob.receiveFriendRequest(carolReq),
+    (e: unknown) => e instanceof EdgeBookError && e.code === "unsolicited_dropped",
+  );
+});
+
 test("inbound friend_request throttle drops a per-peer flood with rate_limited", async () => {
   const { alice, bob } = await pair();
   const bobCard = await bob.writeCard();
