@@ -378,9 +378,21 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       return { text: JSON.stringify(envelope, null, 2), json: envelope };
     }
     if (action === "apply-response") {
+      const deliver = takeBoolFlag(args, "--deliver");
       const source = requireArg(args.shift(), "envelope-json-path");
-      await store.applyFriendResponse(await readEnvelope(source));
-      return { text: `Applied friend response from ${path.resolve(source)}` };
+      const followUp = await store.applyFriendResponse(await readEnvelope(source));
+      if (!followUp) return { text: `Applied friend response from ${path.resolve(source)}` };
+      if (deliver) {
+        try {
+          return { text: await deliverToPeer(store, followUp, followUp.to_agent_id), json: followUp };
+        } catch (error) {
+          if (!(error instanceof EdgeBookError) || error.code !== "no_route") throw error;
+          const hostUrl = parseHost(args, ctx);
+          const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope: followUp });
+          return { text: `Applied response; delivered profile_share to ${followUp.to_agent_id} over the mailbox (host id ${ack.id})`, json: followUp };
+        }
+      }
+      return { text: `Applied friend response; deliver this profile_share to ${followUp.to_agent_id}`, json: followUp };
     }
     if (action === "revoke") {
       const peer = requireArg(args.shift(), "peer-agent-id");

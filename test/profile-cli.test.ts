@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { handleCli } from "../src/cli.ts";
+import { EdgeBookStore } from "../src/edge-book.ts";
 
 async function home(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "eb-cli-"));
@@ -70,4 +71,28 @@ test("profile visibility accepts a set social label", async () => {
   await handleCli(["profile", "set", "--name", "Alice", "--social", "twitter=alice"], { home: h });
   // 'twitter' is a current social label — should be accepted.
   await assert.doesNotReject(() => handleCli(["profile", "visibility", "twitter=off"], { home: h }));
+});
+
+test("friend apply-response prints a deliverable profile_share envelope", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-ar-"));
+  const aliceHome = path.join(root, "alice");
+  const bob = new EdgeBookStore({ home: path.join(root, "bob") });
+  await handleCli(["init", "--name", "Alice Agent"], { home: aliceHome });
+  await bob.init({ handle: "bob.openclaw.local", displayName: "Bob Agent" });
+  await handleCli(["profile", "set", "--name", "Alice"], { home: aliceHome });
+  await bob.setProfile({ name: "Bob" });
+
+  const alice = new EdgeBookStore({ home: aliceHome });
+  const aliceCard = await alice.writeCard();
+  const bobCard = await bob.writeCard();
+  const request = await alice.createFriendRequest(bobCard);
+  await bob.receiveFriendRequest(request);
+  const accept = await bob.acceptFriend(aliceCard.agent_id);
+  const acceptPath = path.join(root, "accept.json");
+  await fs.writeFile(acceptPath, JSON.stringify(accept), "utf8");
+
+  const res = await handleCli(["friend", "apply-response", acceptPath], { home: aliceHome });
+  const j = res.json as any;
+  assert.equal(j.type, "profile_share");
+  assert.equal(j.to_agent_id, bobCard.agent_id);
 });
