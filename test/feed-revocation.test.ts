@@ -19,8 +19,14 @@ test("after alice revokes bob, his feed pull is denied but his imported copies p
     (e: unknown) => e instanceof EdgeBookError && e.code === "not_friend"
   );
 
+  // The grant half of the cascade: revoke must also kill the grants, not just
+  // flip relationship_state (the not_friend guard shadows the grant check above).
+  const grants = Object.values(await alice.grants());
+  assert.ok(grants.every((g) => g.status === "revoked"), "all of alice's grants revoked");
+
   // Graceful degrade: bob's already-imported items remain in HIS local feed —
   // revocation stops future pulls, it does not reach into a peer's store.
   const items = Object.values(await bob.feedItems());
   assert.equal(items.length, 1);
+  assert.equal(items[0].post_id, imported[0].post_id);
 });
