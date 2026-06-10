@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { EdgeBookStore } from "../src/edge-book.ts";
 import { startEdgeBookServer } from "../src/http.ts";
+import type { AgentContactRecord } from "../src/types.ts";
 
 async function tempRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "edge-book-api-test-"));
@@ -395,6 +396,57 @@ test("/api/me with a fresh identity returns an empty profile object, no errors",
     assert.equal(me.status, 200);
     const identity = me.body.identity as Record<string, unknown>;
     assert.deepEqual(identity.profile, {});
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("/api/contacts exposes a stored friend_profile verbatim", async () => {
+  const root = await tempRoot();
+  const store = new EdgeBookStore({ home: root });
+  await store.init({ handle: "contacts-api.openclaw.local" });
+  // Simulate a received, validated friend profile the way storeFriendProfile persists it.
+  const contacts = await store.contacts();
+  contacts["did:peer:test"] = {
+    peer_agent_id: "did:peer:test",
+    aliases: ["peer.openclaw.local"],
+    display_name: "Peer Agent",
+    advertised_capabilities: [],
+    card_url: "",
+    known_endpoints: [],
+    public_keys: [],
+    relationship_state: "friend",
+    capability_grants: [],
+    last_card_hash: "",
+    last_card_version: 1,
+    last_card_refresh_at: "2026-06-10T00:00:00Z",
+    last_successful_delivery_at: "",
+    audit_refs: [],
+    created_at: "2026-06-10T00:00:00Z",
+    updated_at: "2026-06-10T00:00:00Z",
+    friend_profile: {
+      schema: "openclaw-friend-profile/0.1",
+      agent_id: "did:peer:test",
+      profile_version: 2,
+      name: "Peer Human",
+      bio: "Friend bio",
+      socials: [{ label: "github", value: "https://github.com/peer" }],
+      issued_at: "2026-06-10T00:00:00Z",
+      signature: "sig"
+    }
+  } satisfies AgentContactRecord;
+  await store.saveContacts(contacts);
+  const server = await startEdgeBookServer({ home: root, host: "127.0.0.1", port: 0 });
+  try {
+    const baseUrl = serverBaseUrl(server);
+    const auth = await login(baseUrl);
+    const res = await jsonRequest(baseUrl, "/api/contacts", { headers: authHeaders(auth) });
+    assert.equal(res.status, 200);
+    const record = (res.body.contacts as Record<string, Record<string, unknown>>)["did:peer:test"];
+    const fp = record.friend_profile as Record<string, unknown>;
+    assert.equal(fp.name, "Peer Human");
+    assert.equal(fp.bio, "Friend bio");
+    assert.deepEqual(fp.socials, [{ label: "github", value: "https://github.com/peer" }]);
   } finally {
     await closeServer(server);
   }
