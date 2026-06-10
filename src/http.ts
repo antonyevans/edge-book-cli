@@ -229,10 +229,13 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
     return true;
   }
 
+  // Invariant for the `match[n]!` assertions below: every route regex's capture
+  // groups are mandatory (no optional quantifiers), so a successful exec
+  // guarantees each indexed group is present.
   // ≤1 attachment, served only when an active object.read grant permits it.
   const attachmentMatch = /^\/api\/shared-objects\/([^/]+)\/attachment$/.exec(url.pathname);
   if (req.method === "GET" && attachmentMatch) {
-    const objectId = decodeURIComponent(attachmentMatch[1]);
+    const objectId = decodeURIComponent(attachmentMatch[1]!);
     const me = (await store.identity()).agent_id;
     const object = await store.readObject(objectId, me); // fail-closed + audits access
     if (!object.attachment) { sendJson(res, 404, { ok: false, code: "no_attachment", error: "Object has no attachment" }); return true; }
@@ -244,21 +247,21 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
   const contactMuteMatch = /^\/api\/contacts\/([^/]+)\/mute$/.exec(url.pathname);
   if (req.method === "POST" && contactMuteMatch) {
     const body = await readJsonBody<{ reason?: string }>(req);
-    sendJson(res, 200, { mute: await store.muteContact(decodeURIComponent(contactMuteMatch[1]), body.reason || "") });
+    sendJson(res, 200, { mute: await store.muteContact(decodeURIComponent(contactMuteMatch[1]!), body.reason || "") });
     return true;
   }
 
   const contactReportMatch = /^\/api\/contacts\/([^/]+)\/report$/.exec(url.pathname);
   if (req.method === "POST" && contactReportMatch) {
     const body = await readJsonBody<{ reason?: string; block?: boolean }>(req);
-    const report = await store.reportPeer(decodeURIComponent(contactReportMatch[1]), body.reason || "", { block: Boolean(body.block) });
+    const report = await store.reportPeer(decodeURIComponent(contactReportMatch[1]!), body.reason || "", { block: Boolean(body.block) });
     sendJson(res, 200, { report });
     return true;
   }
 
   const messagesMatch = /^\/api\/messages\/([^/]+)$/.exec(url.pathname);
   if (req.method === "GET" && messagesMatch) {
-    const peerId = decodeURIComponent(messagesMatch[1]);
+    const peerId = decodeURIComponent(messagesMatch[1]!);
     const inbox = (await store.inbox()).filter((message) => message.from_agent_id === peerId || message.to_agent_id === peerId);
     sendJson(res, 200, { messages: inbox });
     return true;
@@ -267,7 +270,7 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
   const messageSendMatch = /^\/api\/messages\/([^/]+)\/send$/.exec(url.pathname);
   if (req.method === "POST" && messageSendMatch) {
     const body = await readJsonBody<{ text?: string }>(req);
-    const envelope = await store.sendPrivilegedMessage(decodeURIComponent(messageSendMatch[1]), { text: body.text || "" });
+    const envelope = await store.sendPrivilegedMessage(decodeURIComponent(messageSendMatch[1]!), { text: body.text || "" });
     sendJson(res, 200, { envelope });
     return true;
   }
@@ -302,7 +305,7 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
 
   const postActionMatch = /^\/api\/posts\/([^/]+)\/(approve|edit|remove)$/.exec(url.pathname);
   if (req.method === "POST" && postActionMatch) {
-    const postId = decodeURIComponent(postActionMatch[1]);
+    const postId = decodeURIComponent(postActionMatch[1]!);
     const action = postActionMatch[2];
     if (action === "approve") sendJson(res, 200, { post: await store.approvePost(postId) });
     if (action === "edit") {
@@ -323,7 +326,7 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
 
   const feedActionMatch = /^\/api\/feed\/([^/]+)\/(read|hide)$/.exec(url.pathname);
   if (req.method === "POST" && feedActionMatch) {
-    const itemId = decodeURIComponent(feedActionMatch[1]);
+    const itemId = decodeURIComponent(feedActionMatch[1]!);
     if (feedActionMatch[2] === "read") sendJson(res, 200, { feed_item: await store.markFeedItemRead(itemId) });
     if (feedActionMatch[2] === "hide") {
       const body = await readJsonBody<{ reason?: string }>(req);
@@ -341,7 +344,7 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
   if (req.method === "POST" && approvalResolveMatch) {
     const body = await readJsonBody<{ approved?: boolean }>(req);
     const approved = Boolean(body.approved);
-    const approvalId = decodeURIComponent(approvalResolveMatch[1]);
+    const approvalId = decodeURIComponent(approvalResolveMatch[1]!);
     // Pre-validate for friend_accept (pending only): confirm the contact exists and
     // is in the right state BEFORE flipping the approval status. This makes a bad
     // contact state retryable (throws without touching approvals). A double-click on
@@ -420,7 +423,7 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
   const escalationAnswerMatch = /^\/api\/escalations\/([^/]+)\/answer$/.exec(url.pathname);
   if (req.method === "POST" && escalationAnswerMatch) {
     const body = await readJsonBody<{ text?: string; choice?: string }>(req);
-    const { envelope, ...escalation } = await store.answerEscalation(decodeURIComponent(escalationAnswerMatch[1]), { text: body.text, choice: body.choice });
+    const { envelope, ...escalation } = await store.answerEscalation(decodeURIComponent(escalationAnswerMatch[1]!), { text: body.text, choice: body.choice });
     // The host relays `response_envelope` back to the requesting agent's mailbox
     // (remote case); it is null for a local escalation answered in place.
     sendJson(res, 200, { escalation, response_envelope: envelope ?? null });
@@ -429,7 +432,7 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
 
   const auditMatch = /^\/api\/audit\/([^/]+)\/([^/]+)$/.exec(url.pathname);
   if (req.method === "GET" && auditMatch) {
-    const objectId = decodeURIComponent(auditMatch[2]);
+    const objectId = decodeURIComponent(auditMatch[2]!);
     const audit = (await store.auditEvents()).filter((event) => JSON.stringify(event).includes(objectId));
     sendJson(res, 200, { audit });
     return true;
@@ -457,7 +460,7 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
   }
   const candPromote = /^\/api\/candidates\/([^/]+)\/promote$/.exec(url.pathname);
   if (req.method === "POST" && candPromote) {
-    const id = decodeURIComponent(candPromote[1]);
+    const id = decodeURIComponent(candPromote[1]!);
     const candidate = await getCandidate(store, id);
     if (!candidate) { sendJson(res, 404, { error: "unknown_candidate" }); return true; }
     if (!candidate.card_url) { sendJson(res, 400, { error: "candidate_not_resolvable" }); return true; }
@@ -467,7 +470,7 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
   }
   const candReject = /^\/api\/candidates\/([^/]+)\/reject$/.exec(url.pathname);
   if (req.method === "POST" && candReject) {
-    await dropCandidate(store, decodeURIComponent(candReject[1]));
+    await dropCandidate(store, decodeURIComponent(candReject[1]!));
     sendJson(res, 200, { dropped: true });
     return true;
   }
@@ -542,7 +545,7 @@ export function createRelayServer(store: string): http.Server {
         sendJson(res, 404, { ok: false, error: "not_found" });
         return;
       }
-      const agentId = decodeURIComponent(match[1]);
+      const agentId = decodeURIComponent(match[1]!); // capture group is mandatory on a successful exec
       if (req.method === "POST") {
         const envelope = await readJsonBody<MessageEnvelope>(req);
         await appendRelayEnvelope(store, agentId, envelope);

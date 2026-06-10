@@ -376,7 +376,7 @@ export async function consumeInviteCode(store: EdgeBookStore, code: string): Pro
   const codes = await store.inviteCodes();
   const idx = codes.findIndex((c) => c.code === code);
   if (idx === -1) return false;
-  const invite = codes[idx];
+  const invite = codes[idx]!; // findIndex returned a valid index — element is present
   // Check expiry
   if (invite.expires_at && new Date(invite.expires_at) < new Date()) return false;
   // Check max_uses (0 = unlimited)

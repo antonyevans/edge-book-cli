@@ -467,8 +467,9 @@ export class EdgeBookStore {
     const cutoff = Date.now() - windowMs;
     const all = await readJson<Record<string, number[]>>(this.file(INBOUND_RATE_FILE), {});
     for (const k of Object.keys(all)) {
-      all[k] = all[k].filter((t) => t > cutoff);
-      if (!all[k].length) delete all[k];
+      const kept = all[k]!.filter((t) => t > cutoff); // key comes from Object.keys(all) — value is present
+      all[k] = kept;
+      if (!kept.length) delete all[k];
     }
     const peerCount = (all[peerAgentId] ?? []).length;
     const globalCount = Object.values(all).reduce((n, arr) => n + arr.length, 0);
@@ -808,29 +809,35 @@ export class EdgeBookStore {
     const identity = await this.identity();
     const caps = await this.capabilities();
     for (const id of Object.keys(caps)) {
-      if (caps[id].status === "active") {
-        caps[id].status = "deprecated";
-        caps[id].updated_at = now();
-        const { signature: _sig, ...rest } = caps[id];
-        caps[id].signature = signPayload(rest, identity.private_key_pem);
+      const cap = caps[id]!; // key comes from Object.keys(caps) — value is present
+      if (cap.status === "active") {
+        cap.status = "deprecated";
+        cap.updated_at = now();
+        const { signature: _sig, ...rest } = cap;
+        cap.signature = signPayload(rest, identity.private_key_pem);
       }
     }
     await this.saveCapabilities(caps);
     const sigs = await readJson<Record<string, Signal>>(this.file(SIGNALS_FILE), {});
     for (const id of Object.keys(sigs)) {
-      if (sigs[id].lifecycle !== "expired") sigs[id].lifecycle = "expired";
+      const sig = sigs[id]!; // key comes from Object.keys(sigs) — value is present
+      if (sig.lifecycle !== "expired") sig.lifecycle = "expired";
     }
     await this.saveSignals(sigs);
     const eph = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
     for (const id of Object.keys(eph)) {
-      const lc = eph[id].lifecycle;
+      const post = eph[id]!; // key comes from Object.keys(eph) — value is present
+      const lc = post.lifecycle;
       if (lc === "expired" || lc === "cancelled" || lc === "tombstoned") continue;
-      const t = eph[id].post_type;
-      eph[id].lifecycle = (t === "query" || t === "delegation_request") ? "cancelled" : "expired";
+      const t = post.post_type;
+      post.lifecycle = (t === "query" || t === "delegation_request") ? "cancelled" : "expired";
     }
     await this.saveEphemeral(eph);
     const ans = await readJson<Record<string, Answer>>(this.file(ANSWERS_FILE), {});
-    for (const id of Object.keys(ans)) if (ans[id].lifecycle !== "tombstoned") ans[id].lifecycle = "tombstoned";
+    for (const id of Object.keys(ans)) {
+      const answer = ans[id]!; // key comes from Object.keys(ans) — value is present
+      if (answer.lifecycle !== "tombstoned") answer.lifecycle = "tombstoned";
+    }
     await this.saveAnswers(ans);
     // Endorsements (Class 3 evidence) + Attestations (Class 4) remain retained (untouched).
     await this.audit("agent.deregister", (await this.identity()).agent_id, {});
