@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- GRANDFATHERED at 642 code lines (2026-06-10): WebSocket client + frame routing; extract per-frame-type handlers, then remove this disable. See DESIGN.md. */
 // Dial-out client: the agent side of the host <-> agent WebSocket protocol
 // (canonical spec: edge-book-host/docs/wire-protocol.md — every frame shape
 // here is FROZEN by that doc).
@@ -14,39 +13,17 @@
 //   - mailbox delivery is at-least-once: ack only after the envelope is
 //     applied; dedupe happens by inner message_id in receiveEnvelope.
 import crypto from "node:crypto";
-import http from "node:http";
 import WebSocket from "ws";
 import { DEFAULT_PAIR_TTL_MS, createPairRegistration, createSessionsRevokeFrame, loadOrCreateDialoutKey } from "./dialout-key.ts";
 import type { PairRegistration, SessionsRevokeFrame } from "./dialout-key.ts";
+import { apiUrl, closeServer, openLocalApi, requestBody } from "./dialout-local-api.ts";
+import type { DialoutApiRequest, DialoutApiResponse, LocalApi } from "./dialout-local-api.ts";
 import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "./edge-book.ts";
-import { startEdgeBookServer } from "./http.ts";
 
 export const DEFAULT_DIALOUT_HOST = "wss://edge-book-host.fly.dev/agent/ws";
 const DEFAULT_HEARTBEAT_MS = 25_000;
 const DEFAULT_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
-
-export interface DialoutApiRequest {
-  type: "host.api.request" | "api_request";
-  id?: string;
-  request_id?: string;
-  method?: string;
-  path: string;
-  query?: string;
-  headers?: Record<string, string>;
-  body?: unknown;
-  body_b64?: string | null;
-}
-
-export interface DialoutApiResponse {
-  type: "api_response";
-  id: string;
-  request_id: string;
-  status: number;
-  headers: Record<string, string>;
-  body_b64: string;
-  body?: unknown;
-}
 
 export interface SessionsRevokeAck {
   type: "sessions_revoke_ok";
@@ -109,13 +86,6 @@ export interface MailboxDeliverFrame {
   ts: number;
 }
 
-interface LocalApi {
-  server: http.Server;
-  baseUrl: string;
-  sessionId: string;
-  csrf: string;
-}
-
 // Decide whether the agent should claim a handle with the relay on connect.
 // Skip the default placeholder and any handle that isn't a valid slug — the
 // slug rule mirrors isValidHandle in edge-book.ts.
@@ -135,49 +105,6 @@ function addSocketListener(socket: DialoutSocket, event: "open" | "message" | "c
   }
   const prop = `on${event}` as "onopen" | "onmessage" | "onclose" | "onerror";
   socket[prop] = handler as never;
-}
-
-function serverBaseUrl(server: http.Server): string {
-  const address = server.address();
-  if (!address || typeof address === "string") throw new EdgeBookError("local_api_unavailable", "Local API server did not expose a port");
-  return `http://127.0.0.1:${address.port}`;
-}
-
-async function closeServer(server: http.Server): Promise<void> {
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-}
-
-async function openLocalApi(store: EdgeBookStore): Promise<LocalApi> {
-  const server = await startEdgeBookServer({ home: store.home, host: "127.0.0.1", port: 0 });
-  const baseUrl = serverBaseUrl(server);
-  const login = await fetch(`${baseUrl}/auth/login`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ auth_method: "future-remote-auth", ttl_ms: 24 * 60 * 60 * 1000 })
-  });
-  if (!login.ok) {
-    await closeServer(server);
-    throw new EdgeBookError("local_api_login_failed", `Local API login failed: ${login.status}`);
-  }
-  const body = await login.json() as { session_id: string; csrf_token: string };
-  return { server, baseUrl, sessionId: body.session_id, csrf: body.csrf_token };
-}
-
-function normalizeApiPath(value: string): string {
-  if (!value.startsWith("/api/")) throw new EdgeBookError("invalid_proxy_path", "Dial-out only proxies /api/* JSON requests");
-  return value;
-}
-
-function apiUrl(baseUrl: string, frame: DialoutApiRequest): string {
-  return `${baseUrl}${normalizeApiPath(frame.path)}${frame.query || ""}`;
-}
-
-// Return type is Uint8Array<ArrayBuffer> (which Buffer.from satisfies) rather than
-// Buffer so the result is assignable to fetch's BodyInit under strict lib types.
-function requestBody(frame: DialoutApiRequest, method: string): Uint8Array<ArrayBuffer> | undefined {
-  if (method === "GET" || method === "HEAD") return undefined;
-  if (typeof frame.body_b64 === "string") return Buffer.from(frame.body_b64, "base64");
-  return Buffer.from(JSON.stringify(frame.body ?? {}), "utf8");
 }
 
 export class EdgeBookDialoutClient {

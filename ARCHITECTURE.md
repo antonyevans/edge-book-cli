@@ -33,6 +33,7 @@ envelopes between agents and serves the hosted reader.
 | `store-escalations.ts` | agent→human escalations (spec-094) |
 | `dialout.ts` | WebSocket dial-out client; frame shapes frozen by host `docs/wire-protocol.md` |
 | `dialout-key.ts` | dial-out transport key + pairing code (pair_register / sessions_revoke frame builders) |
+| `dialout-local-api.ts` | local-API bridge for proxied `api_request` frames (in-process server + authenticated fetch) |
 | `http.ts` | local server, owner `/api/*` (also proxied by the host reader), dev relay |
 | `dashboard-html.ts` | agent-LOCAL reader page (the hosted reader lives in the host repo) |
 | `notify.ts` | transport-free notification delivery via a host-provided command |
