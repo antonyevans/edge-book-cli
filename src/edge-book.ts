@@ -1,3 +1,32 @@
+// EdgeBookStore — the agent's trust core and the package's public facade.
+//
+// FACADE: everything this package historically exported from "edge-book.ts"
+// is still exported here (types, helpers, validators, harnesses, and the
+// feature-module functions via the class delegates below), so importers and
+// tests never need to know the module layout.
+//
+// MODULE MAP (each store-*.ts holds free functions taking `store` as first
+// argument; the class keeps same-named one-line delegate methods):
+//   types.ts             all shared types (contract-frozen shapes flagged there)
+//   store-files.ts       persisted file names of the agent home (frozen format)
+//   fs-json.ts           atomic JSON/JSONL persistence helpers
+//   crypto.ts            canonical-JSON ed25519 signing/verification (frozen)
+//   handles.ts           human-handle slug rules (must match host)
+//   profile.ts           two-tier profile projection (spec-098)
+//   cards.ts             AgentCard/FriendProfile validation + loading
+//   store-friends.ts     friend-graph lifecycle, invites, reports
+//   store-objects.ts     shared objects + object.read grants (spec-0020)
+//   store-taxonomy.ts    spec-0021 post types (signals/ephemeral/answers/...)
+//   store-posts.ts       owner posts, feed, approvals, contact mutes
+//   store-escalations.ts agent->human escalations (spec-094)
+//   harness.ts           two-agent smoke harnesses
+//
+// WHAT STAYS IN THIS FILE (deliberately — one entangled trust concern):
+// identity/init/card building, the grant trust kernel (issue/verify/assert
+// grant signatures, findUsableGrant), privileged messages, envelope
+// signing/verification/receipt routing, notifications, audit, web sessions,
+// and import/export. These share key material and audit flow; splitting them
+// would scatter a single security boundary.
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -25,7 +54,6 @@ import { upsertContactFromCard, setRelationship, createFriendRequest, receiveFri
 import { IDENTITY_FILE, CONTACTS_FILE, GRANTS_FILE, OBJECTS_FILE, ATTACHMENTS_DIR, SEEN_MESSAGES_FILE, CONFIG_FILE, RELATIONSHIP_EVENTS_FILE, MESSAGES_FILE, AUDIT_FILE, INBOX_FILE, CARD_FILE, SESSIONS_FILE, POSTS_FILE, FEED_FILE, APPROVALS_FILE, NOTIFIED_FILE, ESCALATIONS_FILE, CONTACT_MUTES_FILE, REPORTS_FILE, INVITE_CODES_FILE, INBOUND_RATE_FILE, ATTESTATIONS_FILE, ENDORSEMENTS_FILE, SIGNALS_FILE, CAPABILITIES_FILE, EPHEMERAL_FILE, ANSWERS_FILE, RECEIVED_POSTS_FILE, DEFAULT_SIGNAL_TTL_MS, DEFAULT_EPHEMERAL_TTL_MS } from "./store-files.ts";
 import { EPHEMERAL_TTL_POLICY, EdgeBookError, POST_TAXONOMY, classOf } from "./types.ts";
 import type { RelationshipState, TransportMode, EdgeBookOptions, EdgeBookConfig, LocalIdentity, FieldVisibility, SocialLink, IdentityProfile, FriendProfile, AgentCard, AgentContactRecord, RelationshipEvent, CapabilityGrant, SharedObjectAttachment, SharedObject, ObjectShareBody, ResultAttestation, StrongRef, Endorsement, Signal, EphemeralType, EphemeralPost, Answer, ReceivedPost, CapabilityAdvertisement, ObjectRevokeBody, MessageEnvelope, FriendRequestBody, NotificationIntent, ReportRecord, InviteCode, FriendResponseBody, ProfileShareBody, EdgeBookVisibility, EdgeBookPostStatus, EdgeBookPostKind, LocalUserSession, EdgeBookPost, FeedItem, ApprovalRequest, EscalationKind, EscalationStatus, Escalation, EscalationBody, EscalationResponseBody, ContactMute, PostType } from "./types.ts";
-
 
 type NotifyPolicy = (
   env: MessageEnvelope,
@@ -101,8 +129,6 @@ const NOTIFY_POLICIES: Partial<Record<MessageEnvelope["type"], NotifyPolicy>> = 
     };
   },
 };
-
-
 
 // Shared Class-2 lifecycle: terminal states are preserved; otherwise past-expiry
 // becomes "expired" for hard-TTL types or "stale" for soft ones.
@@ -485,7 +511,6 @@ export class EdgeBookStore {
   // Persist a received FriendProfile onto the peer contact (last-writer-wins by
   // profile_version). Returns true if applied, false if stale.
 
-
   // Build a signed profile_share envelope carrying our current FriendProfile to a
   // confirmed friend.
   async buildProfileShareEnvelope(peerAgentId: string): Promise<MessageEnvelope> {
@@ -527,7 +552,6 @@ export class EdgeBookStore {
   // check, and both increment — effectively spending the code twice.  This is safe for
   // a single-owner serial receive loop; a locking primitive is needed for concurrent
   // multi-machine deployments (ties to the same ea-claude-090 follow-up).
-
 
   async reportPeer(peerAgentId: string, reason = "", opts: { block?: boolean } = {}): Promise<ReportRecord> {
     return reportPeer(this, peerAgentId, reason, opts);
@@ -714,7 +738,6 @@ export class EdgeBookStore {
   }
 
   // Class 2: Signal — ephemeral, lifecycle + TTL (R4)
-
 
   async signals(): Promise<Record<string, Signal>> {
     return signals(this);
@@ -927,12 +950,6 @@ export class EdgeBookStore {
   async receivedByCategory(): Promise<{ signals: Record<string, Signal>; ephemeral: Record<string, EphemeralPost>; answers: Record<string, Answer>; endorsements: Record<string, Endorsement> }> {
     return receivedByCategory(this);
   }
-
-
-
-
-
-
 
   /**
    * Receive a `post_publish` envelope from a friend.
@@ -1161,8 +1178,6 @@ export class EdgeBookStore {
   async saveEscalations(escalations: Record<string, Escalation>): Promise<void> {
     return saveEscalations(this, escalations);
   }
-
-
 
   // Raise an escalation. Omit `to` to ask your own human (local — no envelope).
   // Pass `to` (a friend's agent_id) to ask their human — returns a signed

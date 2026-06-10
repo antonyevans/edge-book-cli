@@ -1,3 +1,12 @@
+// HTTP surfaces of the agent:
+//   - createEdgeBookHttpServer: the agent-local server ("/", /edge-book/card,
+//     /edge-book/envelopes) serving dashboard-html.ts;
+//   - handleOwnerApi: the authenticated owner API (/auth/*, /api/*) consumed
+//     BOTH locally and via the host's reader proxy (the host forwards /api/*
+//     frames over the dial-out channel — see dialout.ts handleApiRequest);
+//   - createRelayServer + postEnvelope/pullRelayEnvelopes: the dev/file relay.
+// Route paths and response shapes are part of the reader contract — the hosted
+// reader (edge-book-host) renders against them; do not rename routes.
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";

@@ -1,3 +1,14 @@
+// CLI command dispatch for the `edge-book` binary AND the OpenClaw plugin
+// surface: index.js (plugin entry) imports handleCli, EdgeBookDialoutClient,
+// and DEFAULT_DIALOUT_HOST from the tsup bundle of THIS file — its exports are
+// a FROZEN public contract (npm package "edge-book").
+//
+// Layout: handleCli is one flat if-chain, one block per command, ordered like
+// the command reference in commands-doc.ts (which generates --help and the
+// README table; the pre-commit hook keeps the README in sync). This file
+// deliberately stays a single file: each block is a thin adapter from flags to
+// one EdgeBookStore/dialout call — splitting it would scatter the dispatch
+// order that makes commands findable.
 import fs from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import net from "node:net";
