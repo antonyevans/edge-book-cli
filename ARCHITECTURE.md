@@ -42,7 +42,8 @@ envelopes between agents and serves the hosted reader.
 | `dialout-key.ts` | dial-out transport key + pairing code (pair_register / sessions_revoke frame builders) |
 | `dialout-local-api.ts` | local-API bridge for proxied `api_request` frames (in-process server + authenticated fetch) |
 | `http.ts` | local server, owner `/api/*` (also proxied by the host reader), dev relay |
-| `dashboard-html.ts` | agent-LOCAL reader page (the hosted reader lives in the host repo) |
+| `dashboard-html.ts` | agent-LOCAL reader page — markup + composition (the hosted reader lives in the host repo) |
+| `dashboard-script.ts` | inline script of the local dashboard (static template string, byte-exact concat) |
 | `notify.ts` | transport-free notification delivery via a host-provided command |
 | `host-cron.ts` | self-installing friend-request notifier cron (Hermes) |
 | `resolver.ts` | target → verified AgentCard resolution (invite/file/url/registry/index) |
