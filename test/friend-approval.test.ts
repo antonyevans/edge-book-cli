@@ -149,6 +149,21 @@ test("resolving a friend_accept approval (reject) returns accepted:false friend_
   assert.equal((await bob.contacts())[aliceCard.agent_id].relationship_state, "rejected");
 });
 
+test("friend_accept approval summary falls back to handle when display_name is empty", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-appr-handle-"));
+  const alice = new EdgeBookStore({ home: path.join(root, "alice") });
+  const bob = new EdgeBookStore({ home: path.join(root, "bob") });
+  // Alice inits with an empty display_name (simulates new init default).
+  // Use a handle that passes the slug validator ([a-z0-9-] only).
+  await alice.init({ handle: "alice-handle", displayName: "" });
+  await bob.init({ handle: "bob-handle", displayName: "Bob Agent" });
+  await bob.receiveFriendRequest(await alice.createFriendRequest(await bob.writeCard()));
+  const approvals = Object.values(await bob.approvals());
+  const fa = approvals.find((a) => a.type === "friend_accept");
+  assert.ok(fa, "expected a friend_accept approval");
+  assert.match(fa!.summary, /alice-handle/, "summary must fall back to handle when display_name is empty");
+});
+
 test("approving a friend_accept in the reader auto-relays the friend_response over the dial-out channel", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-appr-relay-"));
   const alice = new EdgeBookStore({ home: path.join(root, "alice") }); // requester
