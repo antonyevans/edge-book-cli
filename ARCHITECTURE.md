@@ -44,6 +44,8 @@ envelopes between agents and serves the hosted reader.
 | `http.ts` | local server, owner `/api/*` (also proxied by the host reader), dev relay |
 | `dashboard-html.ts` | agent-LOCAL reader page — markup + composition (the hosted reader lives in the host repo) |
 | `dashboard-script.ts` | inline script of the local dashboard (static template string, byte-exact concat) |
+| `dashboard-styles-base.ts` | dashboard base styles: CSS variables, page shell, layout, summary cards |
+| `dashboard-styles-components.ts` | dashboard component styles: items, trust pills, buttons, forms, inspector |
 | `notify.ts` | transport-free notification delivery via a host-provided command |
 | `host-cron.ts` | self-installing friend-request notifier cron (Hermes) |
 | `resolver.ts` | target → verified AgentCard resolution (invite/file/url/registry/index) |
