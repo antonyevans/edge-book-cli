@@ -17,6 +17,7 @@ import { defaultProfile, resolveFieldVisibility, resolveSocialVisibility, projec
 export { validateCard, validateFriendProfile, loadCard } from "./cards.ts";
 export { runTwoAgentHarness, runFeedPrivacyHarness } from "./harness.ts";
 import { validateCard, validateFriendProfile, loadCard } from "./cards.ts";
+import { attestations, saveAttestations, saveEndorsements, saveSignals, saveCapabilities, createAttestation, verifyAttestation, verifyCapability, verifyEphemeral, verifyAnswer, verifySignal, verifyEndorsement, endorsements, createEndorsement, signals, createSignal, expireSignals, saveEphemeral, ephemeralPosts, createEphemeral, expireEphemeral, cancelEphemeral, saveAnswers, answers, createAnswer, deleteQuery, capabilities, advertiseCapability, deprecateCapability, receivedPosts, saveReceivedPosts, receivedByCategory, receivePostPublish, signPostPublishEnvelope } from "./store-taxonomy.ts";
 import { IDENTITY_FILE, CONTACTS_FILE, GRANTS_FILE, OBJECTS_FILE, ATTACHMENTS_DIR, SEEN_MESSAGES_FILE, CONFIG_FILE, RELATIONSHIP_EVENTS_FILE, MESSAGES_FILE, AUDIT_FILE, INBOX_FILE, CARD_FILE, SESSIONS_FILE, POSTS_FILE, FEED_FILE, APPROVALS_FILE, NOTIFIED_FILE, ESCALATIONS_FILE, CONTACT_MUTES_FILE, REPORTS_FILE, INVITE_CODES_FILE, INBOUND_RATE_FILE, ATTESTATIONS_FILE, ENDORSEMENTS_FILE, SIGNALS_FILE, CAPABILITIES_FILE, EPHEMERAL_FILE, ANSWERS_FILE, RECEIVED_POSTS_FILE, DEFAULT_SIGNAL_TTL_MS, DEFAULT_EPHEMERAL_TTL_MS } from "./store-files.ts";
 import { EPHEMERAL_TTL_POLICY, EdgeBookError, POST_TAXONOMY, classOf } from "./types.ts";
 import type { RelationshipState, TransportMode, EdgeBookOptions, EdgeBookConfig, LocalIdentity, FieldVisibility, SocialLink, IdentityProfile, FriendProfile, AgentCard, AgentContactRecord, RelationshipEvent, CapabilityGrant, SharedObjectAttachment, SharedObject, ObjectShareBody, ResultAttestation, StrongRef, Endorsement, Signal, EphemeralType, EphemeralPost, Answer, ReceivedPost, CapabilityAdvertisement, ObjectRevokeBody, MessageEnvelope, FriendRequestBody, NotificationIntent, ReportRecord, InviteCode, FriendResponseBody, ProfileShareBody, EdgeBookVisibility, EdgeBookPostStatus, EdgeBookPostKind, LocalUserSession, EdgeBookPost, FeedItem, ApprovalRequest, EscalationKind, EscalationStatus, Escalation, EscalationBody, EscalationResponseBody, ContactMute, PostType } from "./types.ts";
@@ -955,23 +956,23 @@ export class EdgeBookStore {
 
   // Class 4: Result Attestation — content-addressed, write-once (R6)
   async attestations(): Promise<Record<string, ResultAttestation>> {
-    return readJson<Record<string, ResultAttestation>>(this.file(ATTESTATIONS_FILE), {});
+    return attestations(this);
   }
 
   async saveAttestations(attestations: Record<string, ResultAttestation>): Promise<void> {
-    await writeJson(this.file(ATTESTATIONS_FILE), attestations);
+    return saveAttestations(this, attestations);
   }
 
   async saveEndorsements(endorsements: Record<string, Endorsement>): Promise<void> {
-    await writeJson(this.file(ENDORSEMENTS_FILE), endorsements);
+    return saveEndorsements(this, endorsements);
   }
 
   async saveSignals(signals: Record<string, Signal>): Promise<void> {
-    await writeJson(this.file(SIGNALS_FILE), signals);
+    return saveSignals(this, signals);
   }
 
   async saveCapabilities(capabilities: Record<string, CapabilityAdvertisement>): Promise<void> {
-    await writeJson(this.file(CAPABILITIES_FILE), capabilities);
+    return saveCapabilities(this, capabilities);
   }
 
   async createAttestation(input: {
@@ -979,333 +980,115 @@ export class EdgeBookStore {
     outcome: ResultAttestation["outcome"]; summary: string;
     evidence?: Record<string, unknown>; created_at?: string;
   }): Promise<ResultAttestation> {
-    const identity = await this.identity();
-    const content = {
-      post_type: "result_attestation" as const,
-      schema: "edge-book/result-attestation/0.1" as const,
-      attestor_agent_id: identity.agent_id,
-      subject_agent_id: input.subject_agent_id,
-      task_ref: input.task_ref,
-      outcome: input.outcome,
-      summary: input.summary,
-      evidence: input.evidence ?? {},
-      created_at: input.created_at ?? now(),
-    };
-    const attestation_id = contentHash(content);
-    const attestation: ResultAttestation = {
-      ...content, attestation_id,
-      signature: signPayload({ ...content, attestation_id }, identity.private_key_pem),
-    };
-    const all = await this.attestations();
-    if (!all[attestation_id]) {           // write-once: never rewrite in place (R6)
-      all[attestation_id] = attestation;
-      await this.saveAttestations(all);
-      await this.audit("attestation.create", input.subject_agent_id, { attestation_id, task_ref: input.task_ref });
-    }
-    return all[attestation_id];
+    return createAttestation(this, input);
   }
 
   async verifyAttestation(att: ResultAttestation): Promise<boolean> {
-    const identity = await this.identity();
-    let pub = identity.agent_id === att.attestor_agent_id ? identity.public_key_pem : undefined;
-    if (!pub) {
-      const c = (await this.contacts())[att.attestor_agent_id];
-      pub = c?.public_keys?.[0]?.public_key_pem;
-    }
-    if (!pub) return false;
-    const { signature, ...signedPayload } = att;
-    // integrity: id must equal hash of content (content excludes id+signature)
-    const { attestation_id, ...content } = signedPayload;
-    if (contentHash(content) !== attestation_id) return false;
-    return verifyPayload(signedPayload, signature, pub);
+    return verifyAttestation(this, att);
   }
 
   async verifyCapability(cap: CapabilityAdvertisement): Promise<boolean> {
-    const identity = await this.identity();
-    let pub = identity.agent_id === cap.agent_id ? identity.public_key_pem : undefined;
-    if (!pub) {
-      const c = (await this.contacts())[cap.agent_id];
-      pub = c?.public_keys?.[0]?.public_key_pem;
-    }
-    if (!pub) return false;
-    const { signature, ...rest } = cap;
-    return verifyPayload(rest, signature, pub);
+    return verifyCapability(this, cap);
   }
 
   // Verify an EphemeralPost signature. lifecycle is NOT part of the signed payload
   // (it is mutable local metadata), so strip both signature and lifecycle before verify.
   async verifyEphemeral(post: EphemeralPost): Promise<boolean> {
-    const identity = await this.identity();
-    let pub = identity.agent_id === post.from_agent ? identity.public_key_pem : undefined;
-    if (!pub) {
-      const c = (await this.contacts())[post.from_agent];
-      pub = c?.public_keys?.[0]?.public_key_pem;
-    }
-    if (!pub) return false;
-    const { signature, lifecycle: _lc, ...signedPayload } = post;
-    return verifyPayload(signedPayload, signature, pub);
+    return verifyEphemeral(this, post);
   }
 
   // Verify an Answer signature. lifecycle is NOT part of the signed payload.
   async verifyAnswer(ans: Answer): Promise<boolean> {
-    const identity = await this.identity();
-    let pub = identity.agent_id === ans.answerer_agent_id ? identity.public_key_pem : undefined;
-    if (!pub) {
-      const c = (await this.contacts())[ans.answerer_agent_id];
-      pub = c?.public_keys?.[0]?.public_key_pem;
-    }
-    if (!pub) return false;
-    const { signature, lifecycle: _lc, ...signedPayload } = ans;
-    return verifyPayload(signedPayload, signature, pub);
+    return verifyAnswer(this, ans);
   }
 
   // Verify a Signal signature. lifecycle is NOT part of the signed payload.
   async verifySignal(sig: Signal): Promise<boolean> {
-    const identity = await this.identity();
-    let pub = identity.agent_id === sig.from_agent ? identity.public_key_pem : undefined;
-    if (!pub) {
-      const c = (await this.contacts())[sig.from_agent];
-      pub = c?.public_keys?.[0]?.public_key_pem;
-    }
-    if (!pub) return false;
-    const { signature, lifecycle: _lc, ...signedPayload } = sig;
-    return verifyPayload(signedPayload, signature, pub);
+    return verifySignal(this, sig);
   }
 
   // Verify an Endorsement signature. Endorsements have no lifecycle field.
   async verifyEndorsement(e: Endorsement): Promise<boolean> {
-    const identity = await this.identity();
-    let pub = identity.agent_id === e.endorser_agent_id ? identity.public_key_pem : undefined;
-    if (!pub) {
-      const c = (await this.contacts())[e.endorser_agent_id];
-      pub = c?.public_keys?.[0]?.public_key_pem;
-    }
-    if (!pub) return false;
-    const { signature, ...rest } = e;
-    return verifyPayload(rest, signature, pub);
+    return verifyEndorsement(this, e);
   }
 
   // Class 3: Endorse — actor-owned reified edge, strongRef parent, evidence link (R5, R8)
   async endorsements(): Promise<Record<string, Endorsement>> {
-    return readJson<Record<string, Endorsement>>(this.file(ENDORSEMENTS_FILE), {});
+    return endorsements(this);
   }
 
   async createEndorsement(input: {
     subject_agent_id: string; parent: StrongRef; statement: string;
     evidence_ref?: StrongRef; evidence_task_id?: string;
   }): Promise<Endorsement> {
-    if (!input.evidence_ref && !input.evidence_task_id) {
-      throw new EdgeBookError("missing_evidence", "Endorse requires an evidence link (Result Attestation ref or task id) — R8");
-    }
-    if (!input.parent?.uri || !input.parent?.hash) {
-      throw new EdgeBookError("missing_parent", "Endorse requires a strongRef parent (uri + hash) — R5");
-    }
-    const identity = await this.identity();
-    const endorse_id = randomId("end");
-    const stamp = now();
-    const unsigned = {
-      endorse_id,
-      post_type: "endorse" as const,
-      schema: "edge-book/endorse/0.1" as const,
-      endorser_agent_id: identity.agent_id,   // actor-owned (R5)
-      subject_agent_id: input.subject_agent_id,
-      parent: input.parent,
-      ...(input.evidence_ref ? { evidence_ref: input.evidence_ref } : {}),
-      ...(input.evidence_task_id ? { evidence_task_id: input.evidence_task_id } : {}),
-      statement: input.statement,
-      created_at: stamp,
-    };
-    const endorsement: Endorsement = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
-    const all = await this.endorsements();
-    all[endorse_id] = endorsement;
-    // evidence_ref/evidence_task_id is an open-world link — no referential-integrity check that the attestation exists locally.
-    await this.saveEndorsements(all);
-    await this.audit("endorse.create", input.subject_agent_id, { endorse_id, parent: input.parent.uri });
-    return endorsement;
+    return createEndorsement(this, input);
   }
 
   // Class 2: Signal — ephemeral, lifecycle + TTL (R4)
-  private signalLifecycle(sig: Signal): Signal["lifecycle"] {
-    return computeLifecycle(sig.expires_at, false, sig.lifecycle) as Signal["lifecycle"];
-  }
+
 
   async signals(): Promise<Record<string, Signal>> {
-    const raw = await readJson<Record<string, Signal>>(this.file(SIGNALS_FILE), {});
-    for (const id of Object.keys(raw)) raw[id].lifecycle = this.signalLifecycle(raw[id]);
-    return raw;
+    return signals(this);
   }
 
   async createSignal(input: { body: string; ttlMs?: number }): Promise<Signal> {
-    const identity = await this.identity();
-    const signal_id = randomId("sig");
-    const created = now();
-    const expires_at = new Date(Date.now() + (input.ttlMs ?? DEFAULT_SIGNAL_TTL_MS)).toISOString();
-    // lifecycle is mutable local metadata — excluded from the signed payload so
-    // expireSignals() can advance it without invalidating the signature.
-    const unsigned = {
-      signal_id, post_type: "signal" as const, schema: "edge-book/signal/0.1" as const,
-      from_agent: identity.agent_id, body: input.body,
-      created_at: created, expires_at,
-    };
-    const signal: Signal = { ...unsigned, lifecycle: "active" as const, signature: signPayload(unsigned, identity.private_key_pem) };
-    const all = await this.signals();
-    all[signal_id] = signal;
-    await this.saveSignals(all);
-    await this.audit("signal.create", identity.agent_id, { signal_id });
-    return signal;
+    return createSignal(this, input);
   }
 
   async expireSignals(): Promise<void> {
-    const all = await readJson<Record<string, Signal>>(this.file(SIGNALS_FILE), {});
-    let changed = false;
-    for (const id of Object.keys(all)) {
-      if (all[id].lifecycle !== "expired" && Date.parse(all[id].expires_at) <= Date.now()) {
-        all[id].lifecycle = "expired"; changed = true;
-      }
-    }
-    if (changed) await this.saveSignals(all);
+    return expireSignals(this);
   }
 
   // Generic Class-2 ephemeral store (query/share/coordinate/delegation_request, R2/R4)
   async saveEphemeral(posts: Record<string, EphemeralPost>): Promise<void> {
-    await writeJson(this.file(EPHEMERAL_FILE), posts);
+    return saveEphemeral(this, posts);
   }
 
   async ephemeralPosts(): Promise<Record<string, EphemeralPost>> {
-    const raw = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
-    for (const id of Object.keys(raw)) {
-      raw[id].lifecycle = computeLifecycle(raw[id].expires_at, EPHEMERAL_TTL_POLICY[raw[id].post_type].hard, raw[id].lifecycle);
-    }
-    return raw;
+    return ephemeralPosts(this);
   }
 
   async createEphemeral(type: EphemeralType, input: { body: string; subject_agent_id?: string; ref?: string; ttlMs?: number }): Promise<EphemeralPost> {
-    if (!EPHEMERAL_TTL_POLICY[type]) throw new EdgeBookError("unknown_post_type", `Not an ephemeral Class-2 type: ${type}`);
-    const identity = await this.identity();
-    const post_id = randomId("eph");
-    const created = now();
-    const expires_at = new Date(Date.now() + (input.ttlMs ?? DEFAULT_EPHEMERAL_TTL_MS)).toISOString();
-    // lifecycle is mutable local metadata — excluded from the signed payload so
-    // cancel/expire transitions do not invalidate the signature.
-    const unsigned = {
-      post_id, post_type: type, schema: "edge-book/ephemeral/0.1" as const,
-      from_agent: identity.agent_id, body: input.body,
-      ...(input.subject_agent_id ? { subject_agent_id: input.subject_agent_id } : {}),
-      ...(input.ref ? { ref: input.ref } : {}),
-      created_at: created, expires_at,
-    };
-    const post: EphemeralPost = { ...unsigned, lifecycle: "active" as const, signature: signPayload(unsigned, identity.private_key_pem) };
-    const all = await this.ephemeralPosts();
-    all[post_id] = post;
-    await this.saveEphemeral(all);
-    // actor is always identity.agent_id; subject_agent_id goes in details if relevant
-    await this.audit(type + ".create", identity.agent_id, { post_id, ...(input.subject_agent_id ? { subject_agent_id: input.subject_agent_id } : {}) });
-    return post;
+    return createEphemeral(this, type, input);
   }
 
   async expireEphemeral(): Promise<void> {
-    const all = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
-    let changed = false;
-    for (const id of Object.keys(all)) {
-      const next = computeLifecycle(all[id].expires_at, EPHEMERAL_TTL_POLICY[all[id].post_type].hard, all[id].lifecycle);
-      if (next !== all[id].lifecycle) { all[id].lifecycle = next; changed = true; }
-    }
-    if (changed) await this.saveEphemeral(all);
+    return expireEphemeral(this);
   }
 
   async cancelEphemeral(postId: string): Promise<EphemeralPost> {
-    const all = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
-    const post = all[postId];
-    if (!post) throw new EdgeBookError("not_found", `No ephemeral post ${postId}`);
-    post.lifecycle = "cancelled";
-    await this.saveEphemeral(all);
-    await this.audit("ephemeral.cancel", post.from_agent, { post_id: postId });
-    return post;
+    return cancelEphemeral(this, postId);
   }
 
   // Class 3: Answer — actor-owned, strongRef to a Query (R5)
   async saveAnswers(answers: Record<string, Answer>): Promise<void> {
-    await writeJson(this.file(ANSWERS_FILE), answers);
+    return saveAnswers(this, answers);
   }
 
   async answers(): Promise<Record<string, Answer>> {
-    return readJson<Record<string, Answer>>(this.file(ANSWERS_FILE), {});
+    return answers(this);
   }
 
   async createAnswer(input: { parent: StrongRef; body: string }): Promise<Answer> {
-    if (!input.parent?.uri || !input.parent?.hash) {
-      throw new EdgeBookError("missing_parent", "Answer requires a strongRef parent (uri + hash) — R5");
-    }
-    const identity = await this.identity();
-    const answer_id = randomId("ans");
-    // lifecycle is mutable local metadata — excluded from the signed payload so
-    // deleteQuery tombstone transitions do not invalidate the signature.
-    const unsigned = {
-      answer_id, post_type: "answer" as const, schema: "edge-book/answer/0.1" as const,
-      answerer_agent_id: identity.agent_id,   // actor-owned (R5)
-      parent: input.parent, body: input.body,
-      created_at: now(),
-    };
-    const answer: Answer = { ...unsigned, lifecycle: "active" as const, signature: signPayload(unsigned, identity.private_key_pem) };
-    const all = await this.answers();
-    all[answer_id] = answer;
-    await this.saveAnswers(all);
-    await this.audit("answer.create", identity.agent_id, { answer_id, parent: input.parent.uri });
-    return answer;
+    return createAnswer(this, input);
   }
 
   // R7: deleting a Query tombstones (archives) it AND its Answers — never hard-drops.
   async deleteQuery(queryId: string): Promise<void> {
-    const eph = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
-    const q = eph[queryId];
-    if (!q || q.post_type !== "query") throw new EdgeBookError("not_found", `No query ${queryId}`);
-    q.lifecycle = "tombstoned";
-    await this.saveEphemeral(eph);
-    const parentUri = "edgebook:query:" + queryId;
-    const ans = await this.answers();
-    let changed = false;
-    for (const id of Object.keys(ans)) {
-      if (ans[id].parent.uri === parentUri && ans[id].lifecycle !== "tombstoned") { ans[id].lifecycle = "tombstoned"; changed = true; }
-    }
-    if (changed) await this.saveAnswers(ans);
-    await this.audit("query.delete", q.from_agent, { query_id: queryId });
+    return deleteQuery(this, queryId);
   }
 
   // Class 1: Capability Advertisement — versioned, deprecate-not-delete (R3)
   async capabilities(): Promise<Record<string, CapabilityAdvertisement>> {
-    return readJson<Record<string, CapabilityAdvertisement>>(this.file(CAPABILITIES_FILE), {});
+    return capabilities(this);
   }
 
   async advertiseCapability(input: { name: string; version: string; summary: string }): Promise<CapabilityAdvertisement> {
-    const identity = await this.identity();
-    const capability_id = randomId("cap");
-    const stamp = now();
-    const unsigned = {
-      capability_id, post_type: "capability_advertisement" as const,
-      schema: "edge-book/capability/0.1" as const, agent_id: identity.agent_id,
-      name: input.name, version: input.version, summary: input.summary,
-      status: "active" as const, created_at: stamp, updated_at: stamp,
-    };
-    const cap: CapabilityAdvertisement = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
-    const all = await this.capabilities();
-    all[capability_id] = cap;
-    await this.saveCapabilities(all);
-    await this.audit("capability.advertise", identity.agent_id, { capability_id, name: input.name });
-    return cap;
+    return advertiseCapability(this, input);
   }
 
   async deprecateCapability(capabilityId: string): Promise<CapabilityAdvertisement> {
-    const identity = await this.identity();
-    const all = await this.capabilities();
-    const cap = all[capabilityId];
-    if (!cap) throw new EdgeBookError("not_found", `No capability ${capabilityId}`);
-    cap.status = "deprecated";        // never delete (R3)
-    cap.updated_at = now();
-    const { signature: _sig, ...rest } = cap;
-    cap.signature = signPayload(rest, identity.private_key_pem);
-    await this.saveCapabilities(all);
-    await this.audit("capability.deprecate", identity.agent_id, { capability_id: capabilityId });
-    return cap;
+    return deprecateCapability(this, capabilityId);
   }
 
   // R7 cascade: deprecate Class 1, terminate open Class 2, RETAIN Class 3 + Class 4.
@@ -1568,61 +1351,23 @@ export class EdgeBookStore {
   // ─── Received posts (peer posts delivered via mailbox) ──────────────────────
 
   async receivedPosts(): Promise<Record<string, ReceivedPost>> {
-    return readJson<Record<string, ReceivedPost>>(this.file(RECEIVED_POSTS_FILE), {});
+    return receivedPosts(this);
   }
 
   async saveReceivedPosts(posts: Record<string, ReceivedPost>): Promise<void> {
-    await writeJson(this.file(RECEIVED_POSTS_FILE), posts);
+    return saveReceivedPosts(this, posts);
   }
 
   /** Grouped view for `/api/received` and the reader. */
   async receivedByCategory(): Promise<{ signals: Record<string, Signal>; ephemeral: Record<string, EphemeralPost>; answers: Record<string, Answer>; endorsements: Record<string, Endorsement> }> {
-    const all = await this.receivedPosts();
-    const out: { signals: Record<string, Signal>; ephemeral: Record<string, EphemeralPost>; answers: Record<string, Answer>; endorsements: Record<string, Endorsement> } = {
-      signals: {},
-      ephemeral: {},
-      answers: {},
-      endorsements: {},
-    };
-    for (const id of Object.keys(all)) {
-      const p: any = all[id];
-      if (p.post_type === "signal") out.signals[id] = p;
-      else if (p.post_type === "answer") out.answers[id] = p;
-      else if (p.post_type === "endorse") out.endorsements[id] = p;
-      else out.ephemeral[id] = p; // query / share / coordinate / delegation_request
-    }
-    return out;
+    return receivedByCategory(this);
   }
 
-  private async verifyReceivedPost(p: any): Promise<boolean> {
-    switch (p.post_type) {
-      case "signal": return this.verifySignal(p);
-      case "answer": return this.verifyAnswer(p);
-      case "endorse": return this.verifyEndorsement(p);
-      case "query":
-      case "share":
-      case "coordinate":
-      case "delegation_request": return this.verifyEphemeral(p);
-      default: return false;
-    }
-  }
 
-  private receivedPostId(p: any): string {
-    return p.signal_id || p.post_id || p.answer_id || p.endorse_id || "";
-  }
 
-  private receivedPostAuthor(p: any): string {
-    switch (p.post_type) {
-      case "answer": return p.answerer_agent_id ?? "";
-      case "endorse": return p.endorser_agent_id ?? "";
-      case "signal":
-      case "query":
-      case "share":
-      case "coordinate":
-      case "delegation_request": return p.from_agent ?? "";
-      default: return "";
-    }
-  }
+
+
+
 
   /**
    * Receive a `post_publish` envelope from a friend.
@@ -1635,51 +1380,12 @@ export class EdgeBookStore {
    * Only then store.
    */
   async receivePostPublish(envelope: MessageEnvelope): Promise<ReceivedPost> {
-    await this.verifyEnvelope(envelope);
-    if (envelope.type !== "post_publish") {
-      throw new EdgeBookError("wrong_message_type", "Expected post_publish envelope");
-    }
-    const contact = (await this.contacts())[envelope.from_agent_id];
-    if (!contact || contact.relationship_state !== "friend") {
-      throw new EdgeBookError("not_friend", "post_publish only accepted from friends");
-    }
-    const post = (envelope.body as any).post;
-    if (!post || !post.post_type) {
-      throw new EdgeBookError("malformed_post_publish", "missing or malformed post in envelope body");
-    }
-    if (this.receivedPostAuthor(post) !== envelope.from_agent_id) {
-      throw new EdgeBookError("author_mismatch", "post author does not match envelope sender");
-    }
-    const id = this.receivedPostId(post);
-    if (!id) {
-      throw new EdgeBookError("malformed_post_publish", "post missing id");
-    }
-    if (!(await this.verifyReceivedPost(post))) {
-      throw new EdgeBookError("invalid_signature", "inner post signature invalid");
-    }
-    const all = await this.receivedPosts();
-    const key = envelope.from_agent_id + ":" + id;
-    all[key] = post;
-    await this.saveReceivedPosts(all);
-    await this.audit("post.receive", envelope.from_agent_id, {
-      post_type: post.post_type,
-      id,
-    });
-    return post;
+    return receivePostPublish(this, envelope);
   }
 
   /** Build a signed `post_publish` envelope wrapping any post type. */
   async signPostPublishEnvelope(input: { to_agent_id: string; post: ReceivedPost }): Promise<MessageEnvelope> {
-    const identity = await this.identity();
-    return this.signEnvelope({
-      type: "post_publish",
-      to_agent_id: input.to_agent_id,
-      relationship_id: relationshipId(identity.agent_id, input.to_agent_id),
-      capability_id: "",
-      ref: "",
-      transport: "direct",
-      body: { post: input.post } as unknown as Record<string, unknown>,
-    });
+    return signPostPublishEnvelope(this, input);
   }
 
   async signEnvelope(input: Omit<MessageEnvelope, "message_id" | "from_agent_id" | "created_at" | "expires_at" | "signature">): Promise<MessageEnvelope> {
