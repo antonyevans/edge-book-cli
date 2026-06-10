@@ -451,3 +451,10 @@ test("/api/contacts exposes a stored friend_profile verbatim", async () => {
     await closeServer(server);
   }
 });
+
+test("init without --agent-name leaves display_name empty (no OpenClaw Agent placeholder)", async () => {
+  const root = await tempRoot();
+  const store = new EdgeBookStore({ home: root });
+  const identity = await store.init({ handle: "no-name.openclaw.local" });
+  assert.equal(identity.display_name, "");
+});
