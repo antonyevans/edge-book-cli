@@ -73,6 +73,45 @@ export function makeHostTransport(opts: HostTransportOptions = {}): TransportFac
         await client.sendEnvelope(envelope);
         await waitFor(applied, `${to.home} applies ${envelope.type} over the mailbox`);
       },
+      async fetchAs(agent, apiPath) {
+        const client = clients.get(agent.home);
+        if (!client) throw new Error(`no dial-out client for ${agent.home}`);
+        const cookies = new Map<string, string>();
+        const add = (res: Response) => {
+          const headers = res.headers as unknown as { getSetCookie?: () => string[] };
+          for (const part of headers.getSetCookie?.() ?? []) {
+            const [first] = part.split(";");
+            const eq = first!.indexOf("=");
+            if (eq !== -1) cookies.set(first!.slice(0, eq).trim(), first!.slice(eq + 1).trim());
+          }
+        };
+        const cookieHeader = () => [...cookies.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+
+        // 1) GET /pair to pick up the pair CSRF cookie.
+        const getRes = await fetch(`${base}/pair`);
+        add(getRes);
+        await getRes.text();
+        const csrf = cookies.get("ebh_pair_csrf");
+        if (!csrf) throw new Error("no pair CSRF cookie from host");
+
+        // 2) The REAL agent mints a pairing code over its dial-out socket.
+        const registration = await client.pair();
+
+        // 3) Submit the code as the browser.
+        const form = new URLSearchParams({ csrf, code: registration.code, remember: "1" });
+        const postRes = await fetch(`${base}/pair`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded", cookie: cookieHeader() },
+          body: form.toString(),
+          redirect: "manual",
+        });
+        add(postRes);
+        if (postRes.status !== 303) throw new Error(`pair submit failed: ${postRes.status}`);
+
+        // 4) Authenticated GET proxied through the host to the real agent store.
+        const r = await fetch(`${base}${apiPath}`, { headers: { cookie: cookieHeader() } });
+        return { status: r.status, body: await r.json() };
+      },
       async close() {
         for (const c of clients.values()) await c.stop().catch(() => undefined);
         host?.kill("SIGTERM");
