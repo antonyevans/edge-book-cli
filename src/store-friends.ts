@@ -149,7 +149,7 @@ export async function receiveFriendRequest(store: EdgeBookStore, envelope: Messa
       type: "friend_accept",
       objectType: "contact",
       objectId: envelope.from_agent_id,
-      summary: `Friend request from ${body.card.display_name}`,
+      summary: `Friend request from ${body.card.display_name || body.card.handle}`,
       riskLevel: "low",
       requestedByAgentId: envelope.from_agent_id,
     });

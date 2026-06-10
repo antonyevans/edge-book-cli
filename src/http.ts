@@ -11,6 +11,7 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
 import { EdgeBookError, EdgeBookStore, loadCard } from "./edge-book.ts";
+import { defaultProfile } from "./profile.ts";
 import type { LocalIdentity, MessageEnvelope } from "./edge-book.ts";
 import { listCandidates, getCandidate, promoteCandidate, dropCandidate } from "./resolver.ts";
 import { dashboardHtml } from "./dashboard-html.ts";
@@ -88,14 +89,22 @@ function compactPem(pem: string): string {
     .replace(/\s+/g, "");
 }
 
-function publicIdentity(identity: LocalIdentity): Record<string, string> {
+function publicIdentity(identity: LocalIdentity): Record<string, unknown> {
+  // Self surface: the owner viewing themselves — no visibility gating (spec-098).
+  const profile = defaultProfile(identity);
   return {
     did: identity.agent_id,
     handle: identity.handle,
     name: identity.display_name,
     display_name: identity.display_name,
     owner_label: identity.owner_label,
-    public_key: compactPem(identity.public_key_pem)
+    public_key: compactPem(identity.public_key_pem),
+    profile: {
+      ...(profile.name ? { name: profile.name } : {}),
+      ...(profile.bio ? { bio: profile.bio } : {}),
+      ...(profile.location ? { location: profile.location } : {}),
+      ...(profile.socials && profile.socials.length ? { socials: profile.socials } : {})
+    }
   };
 }
 

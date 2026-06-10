@@ -25,14 +25,15 @@ export async function recordInviteCandidate(store: EdgeBookStore, inviteUrl: str
   const hashIndex = inviteUrl.indexOf("#");
   const bareUrl = hashIndex === -1 ? inviteUrl : inviteUrl.slice(0, hashIndex);
   const card = await loadCard(bareUrl);
+  const displayName = card.display_name || card.handle;
   const candidate = await writeCandidate(store, {
     source: "invite",
     confidence: "high",
-    display_name: card.display_name,
+    display_name: displayName,
     reason: "Add-me invite passed to init --from-invite",
     card_url: bareUrl,
   });
-  return { candidateId: candidate.candidate_id, displayName: card.display_name };
+  return { candidateId: candidate.candidate_id, displayName };
 }
 
 export function buildOnboardingNote(opts: OnboardingNoteOptions = {}): string {

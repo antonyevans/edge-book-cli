@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { EdgeBookStore } from "../src/edge-book.ts";
 import { handleCli } from "../src/cli.ts";
+import { recordInviteCandidate } from "../src/onboarding.ts";
 
 async function tempRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "edge-book-names-"));
@@ -36,4 +37,25 @@ test("init output explains the two-tier profile so users understand agent name v
   assert.match(result.text, /profile set/i);
   // The human name/bio/location is now a separate profile tier, not just "owner"
   assert.match(result.text, /friends/i);
+});
+
+test("recordInviteCandidate falls back to handle when inviter display_name is empty", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "edge-book-names-invite-"));
+  const inviterHome = path.join(root, "inviter");
+  // Inviter inits with empty display_name (new default — no name set).
+  // Use a handle that passes the slug validator ([a-z0-9-] only).
+  await handleCli(["init", "--home", inviterHome, "--handle", "greeter-no-name", "--name", ""]);
+  const inviteResult = await handleCli(["card", "invite", "--home", inviterHome, "--ttl-ms", "60000", "--uses", "1"]);
+  const inviteUrl = (inviteResult.json as { invite_url: string }).invite_url;
+
+  const newbieHome = path.join(root, "newbie");
+  const newbieStore = new EdgeBookStore({ home: newbieHome });
+  await newbieStore.init({ handle: "newbie.openclaw.local", displayName: "Newbie" });
+
+  const result = await recordInviteCandidate(newbieStore, inviteUrl);
+  assert.equal(
+    result.displayName,
+    "greeter-no-name",
+    "displayName must fall back to handle when inviter display_name is empty",
+  );
 });

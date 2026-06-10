@@ -36,7 +36,7 @@ export async function init(store: EdgeBookStore, input: { handle?: string; displ
   const identity: LocalIdentity = {
     agent_id: stableIdFromPublicKey(public_key_pem),
     handle: input.handle || "agent.openclaw.local",
-    display_name: input.displayName || "OpenClaw Agent",
+    display_name: input.displayName || "",
     owner_label: input.ownerLabel || "",
     ...(input.shareOwnerLabel ? { share_owner_label: true } : {}),
     public_key_pem,
