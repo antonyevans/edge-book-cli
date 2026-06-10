@@ -1,3 +1,17 @@
+// Dial-out client: the agent side of the host <-> agent WebSocket protocol
+// (canonical spec: edge-book-host/docs/wire-protocol.md — every frame shape
+// here is FROZEN by that doc).
+//
+// Invariants:
+//   - the transport key (host-dialout-key.json) defines channel_id =
+//     sha256(agent_key) and is TOFU-locked by the host; it is SEPARATE from
+//     the identity keypair (identity.json) that defines the DID;
+//   - on a `stand_down` frame the client MUST stop reconnecting (idle
+//     stand-down); any other socket drop reconnects with jittered backoff;
+//   - API responses carrying a `response_envelope` are auto-relayed over the
+//     live channel (escalation answers, friend requests — spec-094/095);
+//   - mailbox delivery is at-least-once: ack only after the envelope is
+//     applied; dedupe happens by inner message_id in receiveEnvelope.
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -272,7 +286,9 @@ function apiUrl(baseUrl: string, frame: DialoutApiRequest): string {
   return `${baseUrl}${normalizeApiPath(frame.path)}${frame.query || ""}`;
 }
 
-function requestBody(frame: DialoutApiRequest, method: string): Buffer | undefined {
+// Return type is Uint8Array<ArrayBuffer> (which Buffer.from satisfies) rather than
+// Buffer so the result is assignable to fetch's BodyInit under strict lib types.
+function requestBody(frame: DialoutApiRequest, method: string): Uint8Array<ArrayBuffer> | undefined {
   if (method === "GET" || method === "HEAD") return undefined;
   if (typeof frame.body_b64 === "string") return Buffer.from(frame.body_b64, "base64");
   return Buffer.from(JSON.stringify(frame.body ?? {}), "utf8");

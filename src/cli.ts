@@ -1,3 +1,14 @@
+// CLI command dispatch for the `edge-book` binary AND the OpenClaw plugin
+// surface: index.js (plugin entry) imports handleCli, EdgeBookDialoutClient,
+// and DEFAULT_DIALOUT_HOST from the tsup bundle of THIS file — its exports are
+// a FROZEN public contract (npm package "edge-book").
+//
+// Layout: handleCli is one flat if-chain, one block per command, ordered like
+// the command reference in commands-doc.ts (which generates --help and the
+// README table; the pre-commit hook keeps the README in sync). This file
+// deliberately stays a single file: each block is a thin adapter from flags to
+// one EdgeBookStore/dialout call — splitting it would scatter the dispatch
+// order that makes commands findable.
 import fs from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import net from "node:net";
@@ -685,7 +696,10 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     // EDGE_BOOK_NO_CRON_INSTALL. A failure here must never break the dial-out.
     try {
       const disabled = takeBoolFlag(args, "--no-cron-install") || process.env.EDGE_BOOK_NO_CRON_INSTALL === "1";
-      const res = ensureNotifierCron({ runner: defaultHermesRunner(), home, disabled });
+      // `home` can be undefined when neither --home nor ctx.home is set; ensureNotifierCron
+      // tolerates that at runtime (any failure is caught below). Documented cast to keep
+      // pre-existing behavior unchanged — see FINDINGS.md §1.
+      const res = ensureNotifierCron({ runner: defaultHermesRunner(), home: home as string, disabled });
       if (res.status === "installed") console.log(`  ↳ notifier cron self-installed ("Edge Book — friend requests", every 20m → telegram)`);
       else if (res.status === "error") console.log(`  ↳ notifier cron install skipped: ${res.detail}`);
     } catch (e) {
@@ -697,7 +711,9 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   if (command === "ensure-notifier") {
     // Explicit one-shot: provision the host notifier (for installers/manual setup).
     const disabled = takeBoolFlag(args, "--no-cron-install") || process.env.EDGE_BOOK_NO_CRON_INSTALL === "1";
-    const res = ensureNotifierCron({ runner: defaultHermesRunner(), home, disabled });
+    // Same documented cast as the dialout branch: `home` may be undefined and
+    // ensureNotifierCron reports (not throws) failures. See FINDINGS.md §1.
+    const res = ensureNotifierCron({ runner: defaultHermesRunner(), home: home as string, disabled });
     const msg: Record<string, string> = {
       installed: 'Installed notifier cron "Edge Book — friend requests" (every 20m → telegram).',
       already_present: "Notifier cron already present — nothing to do.",
