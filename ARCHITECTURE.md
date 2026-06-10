@@ -16,7 +16,11 @@ envelopes between agents and serves the hosted reader.
 
 | File | Responsibility |
 |---|---|
-| `cli.ts` | flat command dispatch (`handleCli`); frozen export surface |
+| `cli.ts` | flat command dispatch (`handleCli`) + host/server commands; frozen export surface |
+| `cli-shared.ts` | CLI flag parsing + envelope delivery helpers shared by the command modules |
+| `cli-identity.ts` | identity & profile commands (init, handle, identity, profile, doctor, card) |
+| `cli-social.ts` | social-graph & messaging commands (resolve, candidates, friend, object, contacts, message, escalation, inbox) |
+| `cli-taxonomy.ts` | spec-0021 post-taxonomy commands (attest, endorse, signal, capability, query…, answer, report) |
 | `commands-doc.ts` | command reference → `--help` + README table (synced by pre-commit hook) |
 | `edge-book.ts` | `EdgeBookStore` trust core + the package facade (re-exports everything) |
 | `types.ts` | all shared types; contract-frozen shapes flagged in its header |

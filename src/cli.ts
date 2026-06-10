@@ -1,31 +1,27 @@
-/* eslint-disable max-lines -- GRANDFATHERED at 835 code lines (2026-06-10): flat command dispatch; split per-command handlers into feature modules, then remove this disable. See DESIGN.md. */
 // CLI command dispatch for the `edge-book` binary AND the OpenClaw plugin
 // surface: index.js (plugin entry) imports handleCli, EdgeBookDialoutClient,
 // and DEFAULT_DIALOUT_HOST from the tsup bundle of THIS file — its exports are
 // a FROZEN public contract (npm package "edge-book").
 //
-// Layout: handleCli is one flat if-chain, one block per command, ordered like
-// the command reference in commands-doc.ts (which generates --help and the
-// README table; the pre-commit hook keeps the README in sync). This file
-// deliberately stays a single file: each block is a thin adapter from flags to
-// one EdgeBookStore/dialout call — splitting it would scatter the dispatch
-// order that makes commands findable.
-import fs from "node:fs/promises";
+// Layout: handleCli is one flat if-chain ordered like the command reference in
+// commands-doc.ts (which generates --help and the README table; the pre-commit
+// hook keeps the README in sync). Per-feature command blocks live in
+// cli-identity.ts / cli-social.ts / cli-taxonomy.ts (each returns null when the
+// command is not its own, preserving dispatch order); host/server commands
+// (serve, dialout, pair, sessions, relay, harness) stay inline here.
 import { realpathSync } from "node:fs";
 import net from "node:net";
-import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { broadcastPost, deliverToEndpoint, deliverToPeer, parseHome, parseHost, readEnvelope, relayBaseFromHost, requireArg, takeBoolFlag, takeFlag, takeRepeated, takeRepeatedKV } from "./cli-shared.ts";
+import { parseHome, parseHost, requireArg, takeBoolFlag, takeFlag } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
 import { handleIdentityCli } from "./cli-identity.ts";
 import { handleSocialCli } from "./cli-social.ts";
-import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
+import { handleTaxonomyCli } from "./cli-taxonomy.ts";
+import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { SessionsRevokeFrame } from "./dialout-key.ts";
-import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash, defaultProfile, slugifyHandle } from "./edge-book.ts";
+import { runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import { renderUsage } from "./commands-doc.ts";
-import type { FieldVisibility, FriendRequestBody } from "./edge-book.ts";
-import { postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
-import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
+import { startRelayServer, startEdgeBookServer } from "./http.ts";
 import { makeNotifyOnEnvelope, resolveNotifyCmd } from "./notify.ts";
 import { ensureNotifierCron, defaultHermesRunner } from "./host-cron.ts";
 
@@ -177,133 +173,8 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     }
   }
 
-  // ─── spec-0021 post-taxonomy CLI commands ────────────────────────────────
-
-  if (command === "attest") {
-    const id = await store.createAttestation({
-      subject_agent_id: requireArg(takeFlag(args, "--subject"), "--subject"),
-      task_ref: requireArg(takeFlag(args, "--task"), "--task"),
-      outcome: (takeFlag(args, "--outcome") ?? "success") as "success" | "failure" | "partial",
-      summary: requireArg(takeFlag(args, "--summary"), "--summary"),
-    });
-    return { text: `Attestation ${id.attestation_id}`, json: id };
-  }
-
-  if (command === "endorse") {
-    const deliver = takeBoolFlag(args, "--deliver");
-    const hostUrl = parseHost(args, ctx);
-    const subject = requireArg(args.shift(), "<subject-agent-id>");
-    const evAtt = takeFlag(args, "--evidence-attestation");
-    const evTask = takeFlag(args, "--evidence-task");
-    const post = await store.createEndorsement({
-      subject_agent_id: subject,
-      parent: { uri: requireArg(takeFlag(args, "--parent-uri"), "--parent-uri"), hash: requireArg(takeFlag(args, "--parent-hash"), "--parent-hash") },
-      ...(evAtt ? { evidence_ref: { uri: `edgebook:attestation:${evAtt}`, hash: evAtt } } : {}),
-      ...(evTask ? { evidence_task_id: evTask } : {}),
-      statement: requireArg(takeFlag(args, "--statement"), "--statement"),
-    });
-    if (deliver) {
-      const n = await broadcastPost(store, hostUrl, ctx.socketFactory, post);
-      return { text: `Endorsement ${post.endorse_id} — delivered to ${n} friend(s)`, json: { post, delivered: n } };
-    }
-    return { text: `Endorsement ${post.endorse_id}`, json: post };
-  }
-
-  if (command === "signal") {
-    const deliver = takeBoolFlag(args, "--deliver");
-    const hostUrl = parseHost(args, ctx);
-    const ttl = takeFlag(args, "--ttl-ms");
-    const post = await store.createSignal({ body: requireArg(takeFlag(args, "--body"), "--body"), ttlMs: ttl ? Number(ttl) : undefined });
-    if (deliver) {
-      const n = await broadcastPost(store, hostUrl, ctx.socketFactory, post);
-      return { text: `Signal ${post.signal_id} — delivered to ${n} friend(s)`, json: { post, delivered: n } };
-    }
-    return { text: `Signal ${post.signal_id}`, json: post };
-  }
-
-  if (command === "capability") {
-    const action = args.shift() || "list";
-    if (action === "advertise") {
-      const id = await store.advertiseCapability({
-        name: requireArg(takeFlag(args, "--name"), "--name"),
-        version: requireArg(takeFlag(args, "--version"), "--version"),
-        summary: requireArg(takeFlag(args, "--summary"), "--summary"),
-      });
-      return { text: `Capability ${id.capability_id}`, json: id };
-    }
-    if (action === "deprecate") {
-      const id = await store.deprecateCapability(requireArg(args.shift(), "<capability-id>"));
-      return { text: `Deprecated ${id.capability_id}`, json: id };
-    }
-    if (action === "list") {
-      const all = await store.capabilities();
-      return { text: JSON.stringify(all, null, 2), json: all };
-    }
-    throw new EdgeBookError("unknown_action", `Unknown capability action: ${action}`);
-  }
-
-  // ─── spec-0021 remaining post-taxonomy CLI commands ─────────────────────
-
-  if (command === "query" || command === "share" || command === "coordinate" || command === "delegate") {
-    const deliver = takeBoolFlag(args, "--deliver");
-    const hostUrl = parseHost(args, ctx);
-    const type = command === "delegate" ? "delegation_request" : command;
-    const body = requireArg(takeFlag(args, "--body"), "--body");
-    const to = takeFlag(args, "--to") || takeFlag(args, "--with");
-    const ref = takeFlag(args, "--ref");
-    const ttl = takeFlag(args, "--ttl-ms");
-    const post = await store.createEphemeral(type as any, { body, subject_agent_id: to, ref, ttlMs: ttl ? Number(ttl) : undefined });
-    if (deliver) {
-      const n = await broadcastPost(store, hostUrl, ctx.socketFactory, post);
-      return { text: `${post.post_type} ${post.post_id} — delivered to ${n} friend(s)`, json: { post, delivered: n } };
-    }
-    return { text: `${post.post_type} ${post.post_id}`, json: post };
-  }
-
-  if (command === "answer") {
-    const deliver = takeBoolFlag(args, "--deliver");
-    const hostUrl = parseHost(args, ctx);
-    const queryId = requireArg(args.shift(), "<query-id>");
-    const ephemeral = await store.ephemeralPosts();
-    const query = ephemeral[queryId];
-    if (!query) throw new EdgeBookError("not_found", `No local query ${queryId} to answer`);
-    // Compute the parent hash over the query's immutable signed content (strip
-    // signature and lifecycle, which are not part of the signed payload).
-    const { signature: _sig, lifecycle: _lc, ...queryUnsigned } = query;
-    const ans = await store.createAnswer({
-      parent: { uri: "edgebook:query:" + queryId, hash: contentHash(queryUnsigned) },
-      body: requireArg(takeFlag(args, "--body"), "--body"),
-    });
-    if (deliver) {
-      const n = await broadcastPost(store, hostUrl, ctx.socketFactory, ans);
-      return { text: `answer ${ans.answer_id} — delivered to ${n} friend(s)`, json: { post: ans, delivered: n } };
-    }
-    return { text: `answer ${ans.answer_id}`, json: ans };
-  }
-
-  if (command === "query-delete") {
-    const queryId = requireArg(args.shift(), "<query-id>");
-    await store.deleteQuery(queryId);
-    return { text: `Tombstoned query ${queryId} and its answers`, json: { query_id: queryId } };
-  }
-
-  if (command === "ephemeral") {
-    const all = await store.ephemeralPosts();
-    return { text: JSON.stringify(all, null, 2), json: all };
-  }
-
-  if (command === "answers") {
-    const all = await store.answers();
-    return { text: JSON.stringify(all, null, 2), json: all };
-  }
-
-  if (command === "report") {
-    const peer = requireArg(args.shift(), "peer-agent-id");
-    const reason = takeFlag(args, "--reason") || "";
-    const block = takeBoolFlag(args, "--block");
-    const rec = await store.reportPeer(peer, reason, { block });
-    return { text: `Reported ${peer}${block ? " and blocked" : ""} (report ${rec.report_id})`, json: rec };
-  }
+  const taxonomyResult = await handleTaxonomyCli(command, args, ctx, store);
+  if (taxonomyResult) return taxonomyResult;
 
   throw new EdgeBookError("unknown_command", usage());
 }
