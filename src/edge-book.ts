@@ -52,6 +52,7 @@ import { objects, saveObjects, getObject, createObject, issueObjectGrant, canRea
 import { posts, savePosts, feedItems, saveFeedItems, approvals, saveApprovals, contactMutes, saveContactMutes, createApproval, resolveApproval, createPost, approvePost, editPost, removePost, expirePost, ensureLocalFeedItem, visiblePostsForPeer, importFeedPosts, markFeedItemRead, hideFeedItem, muteContact, unmuteContact } from "./store-posts.ts";
 import { escalations, saveEscalations, raiseEscalation, receiveEscalation, answerEscalation, applyEscalationResponse, expireEscalations } from "./store-escalations.ts";
 import { upsertContactFromCard, setRelationship, createFriendRequest, receiveFriendRequest, pendingFriendRequests, markFriendRequestNotified, acceptFriend, rejectFriend, applyFriendResponse, buildProfileShareEnvelope, receiveProfileShare, broadcastProfileEnvelopes, revoke, block, reports, inviteCodes, mintInviteCode, reportPeer } from "./store-friends.ts";
+import { init, setProfile, setHandle, exportIdentity, importIdentity, updateConfig, buildCard, writeCard, buildHandleClaim, buildFriendProfile, doctor, deregister, reviewLocalDataImport, exportLocalData } from "./store-identity.ts";
 import { IDENTITY_FILE, CONTACTS_FILE, GRANTS_FILE, OBJECTS_FILE, ATTACHMENTS_DIR, SEEN_MESSAGES_FILE, CONFIG_FILE, RELATIONSHIP_EVENTS_FILE, MESSAGES_FILE, AUDIT_FILE, INBOX_FILE, CARD_FILE, SESSIONS_FILE, POSTS_FILE, FEED_FILE, APPROVALS_FILE, NOTIFIED_FILE, ESCALATIONS_FILE, CONTACT_MUTES_FILE, REPORTS_FILE, INVITE_CODES_FILE, INBOUND_RATE_FILE, ATTESTATIONS_FILE, ENDORSEMENTS_FILE, SIGNALS_FILE, CAPABILITIES_FILE, EPHEMERAL_FILE, ANSWERS_FILE, RECEIVED_POSTS_FILE, DEFAULT_SIGNAL_TTL_MS, DEFAULT_EPHEMERAL_TTL_MS } from "./store-files.ts";
 import { EPHEMERAL_TTL_POLICY, EdgeBookError, POST_TAXONOMY, classOf } from "./types.ts";
 import type { RelationshipState, TransportMode, EdgeBookOptions, EdgeBookConfig, LocalIdentity, FieldVisibility, SocialLink, IdentityProfile, FriendProfile, AgentCard, AgentContactRecord, RelationshipEvent, CapabilityGrant, SharedObjectAttachment, SharedObject, ObjectShareBody, ResultAttestation, StrongRef, Endorsement, Signal, EphemeralType, EphemeralPost, Answer, ReceivedPost, CapabilityAdvertisement, ObjectRevokeBody, MessageEnvelope, FriendRequestBody, NotificationIntent, ReportRecord, InviteCode, FriendResponseBody, ProfileShareBody, EdgeBookVisibility, EdgeBookPostStatus, EdgeBookPostKind, LocalUserSession, EdgeBookPost, FeedItem, ApprovalRequest, EscalationKind, EscalationStatus, Escalation, EscalationBody, EscalationResponseBody, ContactMute, PostType } from "./types.ts";
@@ -157,35 +158,7 @@ export class EdgeBookStore {
   }
 
   async init(input: { handle?: string; displayName?: string; ownerLabel?: string; shareOwnerLabel?: boolean; cardUrl?: string; directUrl?: string; relayUrl?: string } = {}): Promise<LocalIdentity> {
-    await ensureHome(this.home);
-    const existing = await readJson<LocalIdentity | null>(this.file(IDENTITY_FILE), null);
-    if (existing) {
-      await this.updateConfig({ direct_url: input.directUrl, relay_url: input.relayUrl });
-      return existing;
-    }
-
-    const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-    const public_key_pem = publicKey.export({ type: "spki", format: "pem" }).toString();
-    const private_key_pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const identity: LocalIdentity = {
-      agent_id: stableIdFromPublicKey(public_key_pem),
-      handle: input.handle || "agent.openclaw.local",
-      display_name: input.displayName || "OpenClaw Agent",
-      owner_label: input.ownerLabel || "",
-      ...(input.shareOwnerLabel ? { share_owner_label: true } : {}),
-      public_key_pem,
-      private_key_pem,
-      created_at: now(),
-      updated_at: now()
-    };
-    await writeJson(this.file(IDENTITY_FILE), identity, 0o600);
-    await writeJson(this.file(CONTACTS_FILE), {});
-    await writeJson(this.file(GRANTS_FILE), {});
-    await writeJson(this.file(SEEN_MESSAGES_FILE), []);
-    await this.updateConfig({ direct_url: input.directUrl, relay_url: input.relayUrl });
-    await this.audit("identity.init", identity.agent_id, { handle: identity.handle });
-    await this.writeCard(input.cardUrl);
-    return identity;
+    return init(this, input);
   }
 
   async identity(): Promise<LocalIdentity> {
@@ -209,83 +182,22 @@ export class EdgeBookStore {
     socials?: SocialLink[];
     visibility?: Record<string, FieldVisibility>;
   }): Promise<LocalIdentity> {
-    const identity = await this.identity();
-    const profile: IdentityProfile = { ...defaultProfile(identity) };
-    profile.visibility = { ...(profile.visibility ?? {}) };
-
-    if (input.displayName !== undefined && input.displayName !== "") identity.display_name = input.displayName;
-
-    // Legacy shims: ownerLabel -> profile.name; shareOwnerLabel -> name visibility.
-    if (input.ownerLabel !== undefined) {
-      identity.owner_label = input.ownerLabel;
-      profile.name = input.ownerLabel || undefined;
-    }
-    if (input.shareOwnerLabel !== undefined) {
-      identity.share_owner_label = input.shareOwnerLabel;
-      profile.visibility.name = input.shareOwnerLabel ? "public" : "friends";
-    }
-
-    if (input.name !== undefined) profile.name = input.name || undefined;
-    if (input.bio !== undefined) profile.bio = input.bio || undefined;
-    if (input.location !== undefined) profile.location = input.location || undefined;
-    if (input.socials !== undefined) {
-      const RESERVED = new Set(["name", "bio", "location"]);
-      for (const s of input.socials) {
-        if (RESERVED.has(s.label.toLowerCase())) {
-          throw new EdgeBookError(
-            "reserved_social_label",
-            `Social label '${s.label}' is reserved; choose another (e.g. telegram, twitter)`,
-          );
-        }
-      }
-      profile.socials = input.socials;
-    }
-    if (input.visibility) profile.visibility = { ...profile.visibility, ...input.visibility };
-
-    profile.profile_version = (profile.profile_version ?? 1) + 1;
-    identity.profile = profile;
-    identity.updated_at = now();
-    await writeJson(this.file(IDENTITY_FILE), identity, 0o600);
-    await this.writeCard();
-    await this.audit("identity.update", identity.agent_id, { display_name: identity.display_name, profile_version: profile.profile_version });
-    return identity;
+    return setProfile(this, input);
   }
 
   // Set a user-chosen unique handle. Re-signs the card; does NOT rotate keys.
   async setHandle(handle: string): Promise<LocalIdentity> {
-    if (!isValidHandle(handle)) {
-      throw new EdgeBookError("invalid_handle", `invalid_handle: must be 3-30 chars [a-z0-9-], not reserved: ${handle}`);
-    }
-    const identity = await this.identity();
-    identity.handle = handle;
-    identity.updated_at = now();
-    await writeJson(this.file(IDENTITY_FILE), identity, 0o600);
-    await this.writeCard();
-    await this.audit("identity.set_handle", identity.agent_id, { handle });
-    return identity;
+    return setHandle(this, handle);
   }
 
   // Portable identity bundle (the DID keypair + chosen handle). Carry to a new
   // device → same DID → relay handle keeps resolving to you (spec-096).
   async exportIdentity(): Promise<{ schema: "edge-book-identity-export/0.1"; identity: LocalIdentity }> {
-    return { schema: "edge-book-identity-export/0.1", identity: await this.identity() };
+    return exportIdentity(this);
   }
 
   async importIdentity(bundle: { identity: LocalIdentity }, opts: { force?: boolean } = {}): Promise<LocalIdentity> {
-    await ensureHome(this.home);
-    const existing = await readJson<LocalIdentity | null>(this.file(IDENTITY_FILE), null);
-    if (existing && !opts.force) throw new EdgeBookError("identity_exists", `identity_exists: an identity already exists at ${this.home} (use --force to overwrite)`);
-    const id = bundle.identity;
-    if (!id?.public_key_pem || id.agent_id !== stableIdFromPublicKey(id.public_key_pem)) {
-      throw new EdgeBookError("invalid_import", "Bundle agent_id does not match its public key");
-    }
-    await writeJson(this.file(IDENTITY_FILE), id, 0o600);
-    if (!(await readJson<unknown | null>(this.file(CONTACTS_FILE), null))) await writeJson(this.file(CONTACTS_FILE), {});
-    if (!(await readJson<unknown | null>(this.file(GRANTS_FILE), null))) await writeJson(this.file(GRANTS_FILE), {});
-    if (!(await readJson<unknown | null>(this.file(SEEN_MESSAGES_FILE), null))) await writeJson(this.file(SEEN_MESSAGES_FILE), []);
-    await this.writeCard();
-    await this.audit("identity.import", id.agent_id, { handle: id.handle });
-    return id;
+    return importIdentity(this, bundle, opts);
   }
 
   async config(): Promise<EdgeBookConfig> {
@@ -293,129 +205,31 @@ export class EdgeBookStore {
   }
 
   async updateConfig(input: EdgeBookConfig): Promise<EdgeBookConfig> {
-    const current = await this.config();
-    const next: EdgeBookConfig = { ...current };
-    if (input.direct_url !== undefined) next.direct_url = input.direct_url;
-    if (input.relay_url !== undefined) next.relay_url = input.relay_url;
-    if (input.notify_on_friend_request !== undefined) next.notify_on_friend_request = input.notify_on_friend_request;
-    if (input.notify_cmd !== undefined) next.notify_cmd = input.notify_cmd;
-    if (input.notify_types !== undefined) next.notify_types = input.notify_types;
-    if (input.open_friend_requests !== undefined) next.open_friend_requests = input.open_friend_requests;
-    if (input.inbound_max_per_peer !== undefined) next.inbound_max_per_peer = input.inbound_max_per_peer;
-    if (input.inbound_max_global !== undefined) next.inbound_max_global = input.inbound_max_global;
-    if (input.inbound_window_ms !== undefined) next.inbound_window_ms = input.inbound_window_ms;
-    await writeJson(this.file(CONFIG_FILE), next);
-    return next;
+    return updateConfig(this, input);
   }
 
   async buildCard(cardUrl?: string): Promise<AgentCard> {
-    const identity = await this.identity();
-    const config = await this.config();
-    const transports: AgentCard["transports"] = [{ mode: "local", endpoint: this.home }];
-    if (config.direct_url) transports.push({ mode: "direct", endpoint: config.direct_url });
-    if (config.relay_url) transports.push({ mode: "relay", endpoint: config.relay_url });
-    const caps = Object.values(await this.capabilities())
-      .map((c) => ({ name: c.name, version: c.version, summary: c.summary, status: c.status }));
-    const prof = defaultProfile(identity);
-    const publicFields = projectProfileFields(prof, (v) => v === "public");
-    const publicProfile: NonNullable<AgentCard["public_profile"]> = { ...publicFields };
-    const publicName = publicFields.name;
-    const unsigned: Omit<AgentCard, "card_hash" | "signature"> = {
-      schema: "openclaw-agent-card/0.1",
-      agent_id: identity.agent_id,
-      handle: identity.handle,
-      display_name: identity.display_name,
-      ...(publicName ? { owner_label: publicName } : {}),
-      ...(Object.keys(publicProfile).length ? { public_profile: publicProfile } : {}),
-      card_url: cardUrl || `file://${this.file(CARD_FILE)}`,
-      card_version: 1,
-      public_keys: [{ id: `${identity.agent_id}#main`, type: "ed25519", public_key_pem: identity.public_key_pem }],
-      capabilities: ["friend_request", "friend_gated_message", "feed_read_friends"],
-      ...(caps.length ? { advertised_capabilities: caps } : {}),
-      transports,
-      refresh_after: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-      expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
-    };
-    const card_hash = crypto.createHash("sha256").update(canonicalize(unsigned)).digest("base64url");
-    const withHash = { ...unsigned, card_hash };
-    return { ...withHash, signature: signPayload(withHash, identity.private_key_pem) };
+    return buildCard(this, cardUrl);
   }
 
   async writeCard(cardUrl?: string): Promise<AgentCard> {
-    const card = await this.buildCard(cardUrl);
-    await writeJson(this.file(CARD_FILE), card);
-    return card;
+    return writeCard(this, cardUrl);
   }
 
   // Build a signed handle claim for the relay registry (spec-096). The relay
   // verifies claim_sig + the card against the identity key before binding.
   async buildHandleClaim(): Promise<{ handle: string; agent_did: string; card: AgentCard; claimed_at: number; claim_sig: string }> {
-    const identity = await this.identity();
-    if (!isValidHandle(identity.handle)) {
-      throw new EdgeBookError("invalid_handle", `invalid_handle: set a handle first (current: ${identity.handle})`);
-    }
-    const card = await loadCard(this.file(CARD_FILE)); // current signed card
-    const claimed_at = Date.now();
-    const claim_sig = signPayload({ handle: identity.handle, agent_did: identity.agent_id, claimed_at }, identity.private_key_pem);
-    return { handle: identity.handle, agent_did: identity.agent_id, card, claimed_at, claim_sig };
+    return buildHandleClaim(this);
   }
 
   // The friend-only profile: every field whose visibility resolves to "friends"
   // or "public". Signed; shared only with confirmed friends.
   async buildFriendProfile(): Promise<FriendProfile> {
-    const identity = await this.identity();
-    const profile = defaultProfile(identity);
-    const friendFields = projectProfileFields(profile, (v) => v !== "off");
-    const unsigned: Omit<FriendProfile, "signature"> = {
-      schema: "openclaw-friend-profile/0.1",
-      agent_id: identity.agent_id,
-      profile_version: profile.profile_version ?? 1,
-      ...friendFields,
-      issued_at: now(),
-    };
-    return { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    return buildFriendProfile(this);
   }
 
   async doctor(): Promise<Record<string, unknown>> {
-    const identity = await readJson<LocalIdentity | null>(this.file(IDENTITY_FILE), null);
-    const config = await this.config();
-    const checks: Record<string, unknown> = {
-      home: this.home,
-      initialized: Boolean(identity),
-      config,
-      files: {}
-    };
-    const requiredFiles = [IDENTITY_FILE, CONTACTS_FILE, GRANTS_FILE, SEEN_MESSAGES_FILE, CARD_FILE];
-    const files: Record<string, unknown> = {};
-    for (const name of requiredFiles) {
-      try {
-        const stat = await fs.stat(this.file(name));
-        files[name] = {
-          exists: true,
-          mode: `0${(stat.mode & 0o777).toString(8)}`
-        };
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-          files[name] = { exists: false };
-        } else {
-          throw error;
-        }
-      }
-    }
-    checks.files = files;
-    let cardValid = false;
-    try {
-      const card = await loadCard(this.file(CARD_FILE));
-      cardValid = Boolean(identity && card.agent_id === identity.agent_id);
-    } catch {
-      cardValid = false;
-    }
-    const identityMode = (files[IDENTITY_FILE] as { mode?: string }).mode;
-    const privateKeyModeOk = process.platform === "win32" || identityMode === "0600";
-    checks.card_valid = cardValid;
-    checks.private_key_mode_ok = privateKeyModeOk;
-    checks.pass = Boolean(identity) && cardValid && privateKeyModeOk;
-    return checks;
+    return doctor(this);
   }
 
   async contacts(): Promise<Record<string, AgentContactRecord>> {
@@ -807,41 +621,7 @@ export class EdgeBookStore {
 
   // R7 cascade: deprecate Class 1, terminate open Class 2, RETAIN Class 3 + Class 4.
   async deregister(): Promise<void> {
-    const identity = await this.identity();
-    const caps = await this.capabilities();
-    for (const id of Object.keys(caps)) {
-      const cap = caps[id]!; // key comes from Object.keys(caps) — value is present
-      if (cap.status === "active") {
-        cap.status = "deprecated";
-        cap.updated_at = now();
-        const { signature: _sig, ...rest } = cap;
-        cap.signature = signPayload(rest, identity.private_key_pem);
-      }
-    }
-    await this.saveCapabilities(caps);
-    const sigs = await readJson<Record<string, Signal>>(this.file(SIGNALS_FILE), {});
-    for (const id of Object.keys(sigs)) {
-      const sig = sigs[id]!; // key comes from Object.keys(sigs) — value is present
-      if (sig.lifecycle !== "expired") sig.lifecycle = "expired";
-    }
-    await this.saveSignals(sigs);
-    const eph = await readJson<Record<string, EphemeralPost>>(this.file(EPHEMERAL_FILE), {});
-    for (const id of Object.keys(eph)) {
-      const post = eph[id]!; // key comes from Object.keys(eph) — value is present
-      const lc = post.lifecycle;
-      if (lc === "expired" || lc === "cancelled" || lc === "tombstoned") continue;
-      const t = post.post_type;
-      post.lifecycle = (t === "query" || t === "delegation_request") ? "cancelled" : "expired";
-    }
-    await this.saveEphemeral(eph);
-    const ans = await readJson<Record<string, Answer>>(this.file(ANSWERS_FILE), {});
-    for (const id of Object.keys(ans)) {
-      const answer = ans[id]!; // key comes from Object.keys(ans) — value is present
-      if (answer.lifecycle !== "tombstoned") answer.lifecycle = "tombstoned";
-    }
-    await this.saveAnswers(ans);
-    // Endorsements (Class 3 evidence) + Attestations (Class 4) remain retained (untouched).
-    await this.audit("agent.deregister", (await this.identity()).agent_id, {});
+    return deregister(this);
   }
 
   // Issue an `object.read` grant binding ONE object to ONE subject (revocable).
@@ -1284,40 +1064,10 @@ export class EdgeBookStore {
   }
 
   async reviewLocalDataImport(data: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const objectCount = (key: string): number => {
-      const value = data[key];
-      if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
-      return Object.keys(value as Record<string, unknown>).length;
-    };
-    const audit = Array.isArray(data.audit) ? data.audit.length : 0;
-    return {
-      review_only: true,
-      activates_remote_endpoints: false,
-      counts: {
-        contacts: objectCount("contacts"),
-        grants: objectCount("grants"),
-        sessions: objectCount("sessions"),
-        posts: objectCount("posts"),
-        feed_items: objectCount("feed_items"),
-        approvals: objectCount("approvals"),
-        contact_mutes: objectCount("contact_mutes"),
-        audit
-      }
-    };
+    return reviewLocalDataImport(this, data);
   }
 
   async exportLocalData(): Promise<Record<string, unknown>> {
-    return {
-      identity: await this.identity(),
-      contacts: await this.contacts(),
-      grants: await this.grants(),
-      sessions: await this.sessions(),
-      posts: await this.posts(),
-      feed_items: await this.feedItems(),
-      approvals: await this.approvals(),
-      contact_mutes: await this.contactMutes(),
-      audit: await this.auditEvents()
-    };
+    return exportLocalData(this);
   }
 }
-
