@@ -338,8 +338,15 @@ type NotifyPolicy = (
   store: EdgeBookStore,
 ) => Promise<NotificationIntent | null>; // null = silent
 
+// Resolve a peer's display name from local contacts, falling back to the agent id.
+async function peerName(store: EdgeBookStore, agentId: string): Promise<string | undefined> {
+  return (await store.contacts())[agentId]?.display_name || undefined;
+}
+
 const NOTIFY_POLICIES: Partial<Record<MessageEnvelope["type"], NotifyPolicy>> = {
-  friend_request: async (env) => {
+  friend_request: async (env, store) => {
+    // Honour the per-type opt-out (default ON: treat undefined as enabled).
+    if ((await store.config()).notify_on_friend_request === false) return null;
     const body = env.body as unknown as FriendRequestBody;
     const name = body.card?.display_name || env.from_agent_id;
     const note = body.note ? ` — “${body.note}”` : "";
@@ -348,6 +355,19 @@ const NOTIFY_POLICIES: Partial<Record<MessageEnvelope["type"], NotifyPolicy>> = 
       from_id: env.from_agent_id,
       from_name: body.card?.display_name,
       message: `${name} wants to connect on Edge Book${note}. Reply “yes” to connect, or ignore to leave it pending.`,
+      dedup_key: env.message_id,
+    };
+  },
+  privileged_message: async (env, store) => {
+    const body = env.body as { text?: unknown };
+    const name = (await peerName(store, env.from_agent_id)) || env.from_agent_id;
+    const text = typeof body.text === "string" ? body.text : "";
+    const preview = text.length > 280 ? `${text.slice(0, 279)}…` : text;
+    return {
+      kind: "privileged_message",
+      from_id: env.from_agent_id,
+      from_name: await peerName(store, env.from_agent_id),
+      message: `${name}: ${preview}`,
       dedup_key: env.message_id,
     };
   },
