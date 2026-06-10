@@ -10,6 +10,7 @@ import { renderUsage } from "./commands-doc.ts";
 import type { FieldVisibility, FriendRequestBody, SocialLink } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
 import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
+import { makeNotifyOnEnvelope, resolveNotifyCmd } from "./notify.ts";
 
 export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
 
@@ -657,9 +658,22 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
 
   if (command === "dialout") {
     const hostUrl = parseHost(args, ctx);
-    const client = new EdgeBookDialoutClient({ home, host: hostUrl, socketFactory: ctx.socketFactory });
+    const store = new EdgeBookStore({ home });
+    // Resolve the host notify command (flag > env > config). When set, every
+    // applied inbound envelope notifies the human via the host command.
+    const notifyCmd = resolveNotifyCmd({
+      flag: takeFlag(args, "--notify-cmd"),
+      env: process.env.EDGE_BOOK_NOTIFY_CMD,
+      config: (await store.config()).notify_cmd,
+    });
+    const client = new EdgeBookDialoutClient({
+      home,
+      host: hostUrl,
+      socketFactory: ctx.socketFactory,
+      onEnvelope: makeNotifyOnEnvelope(store, notifyCmd),
+    });
     await client.start();
-    console.log(`Edge Book dial-out connected to ${hostUrl}`);
+    console.log(`Edge Book dial-out connected to ${hostUrl}${notifyCmd ? " (notify hook active)" : ""}`);
     await new Promise(() => undefined);
   }
 

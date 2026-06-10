@@ -24,6 +24,11 @@ export interface EdgeBookConfig {
   // Default ON (treat undefined as true). When false, pendingFriendRequests()
   // returns [] so the notifier cron stays silent.
   notify_on_friend_request?: boolean;
+  // Host-provided notify command (ea-claude-125). When set, the dial-out runs it
+  // on each notifiable inbound envelope, delivering the message via stdin/env.
+  // Edge Book stays transport-free — the command owns the channel. May also be
+  // supplied via --notify-cmd flag or EDGE_BOOK_NOTIFY_CMD env (flag > env > config).
+  notify_cmd?: string;
   // Abuse floor. open_friend_requests default true (treat undefined as true):
   // accept unsolicited friend requests. false => invite-only (drop unsolicited
   // requests that carry no valid invite code and have no prior relationship).
@@ -919,6 +924,7 @@ export class EdgeBookStore {
     if (input.direct_url !== undefined) next.direct_url = input.direct_url;
     if (input.relay_url !== undefined) next.relay_url = input.relay_url;
     if (input.notify_on_friend_request !== undefined) next.notify_on_friend_request = input.notify_on_friend_request;
+    if (input.notify_cmd !== undefined) next.notify_cmd = input.notify_cmd;
     if (input.open_friend_requests !== undefined) next.open_friend_requests = input.open_friend_requests;
     if (input.inbound_max_per_peer !== undefined) next.inbound_max_per_peer = input.inbound_max_per_peer;
     if (input.inbound_max_global !== undefined) next.inbound_max_global = input.inbound_max_global;

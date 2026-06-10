@@ -63,6 +63,15 @@ export async function deliverNotification(intent: NotificationIntent, opts: Deli
   });
 }
 
+// Resolve the host notify command: --notify-cmd flag > EDGE_BOOK_NOTIFY_CMD env >
+// config.notify_cmd. Blank/empty values fall through.
+export function resolveNotifyCmd(input: { flag?: string; env?: string; config?: string }): string | undefined {
+  for (const v of [input.flag, input.env, input.config]) {
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return undefined;
+}
+
 export interface NotifyInboundResult {
   notified: boolean;
   reason?: string; // "silent" | "already_notified" | "no_notify_cmd" | delivery error
@@ -97,4 +106,21 @@ export async function notifyInbound(
   }
   await store.audit("notify.delivered", intent.from_id, { kind: intent.kind, dedup_key: intent.dedup_key, channel: "hook" });
   return { notified: true };
+}
+
+// Build a dial-out onEnvelope handler that notifies on each applied inbound
+// envelope. A notification failure is swallowed — it must never break the
+// dial-out connection. No command configured = no-op (fallback territory).
+export function makeNotifyOnEnvelope(
+  store: EdgeBookStore,
+  cmd: string | undefined,
+): (envelope: MessageEnvelope, result: { applied: boolean; error?: string }) => Promise<void> {
+  return async (envelope, result) => {
+    if (!result.applied || !cmd) return;
+    try {
+      await notifyInbound(store, envelope, { cmd });
+    } catch {
+      // Never let a notification failure tear down the dial-out.
+    }
+  };
 }
