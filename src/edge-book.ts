@@ -376,6 +376,41 @@ const NOTIFY_POLICIES: Partial<Record<MessageEnvelope["type"], NotifyPolicy>> = 
       dedup_key: env.message_id,
     };
   },
+  friend_response: async (env) => {
+    const body = env.body as unknown as FriendResponseBody;
+    const name = body.card?.display_name || env.from_agent_id;
+    const verb = body.accepted ? "accepted" : "declined";
+    return {
+      kind: "friend_response",
+      from_id: env.from_agent_id,
+      from_name: body.card?.display_name,
+      message: `${name} ${verb} your friend request on Edge Book.`,
+      dedup_key: env.message_id,
+    };
+  },
+  object_share: async (env, store) => {
+    const body = env.body as unknown as ObjectShareBody;
+    const name = (await peerName(store, env.from_agent_id)) || env.from_agent_id;
+    const title = body.object?.request?.title || "an item";
+    return {
+      kind: "object_share",
+      from_id: env.from_agent_id,
+      from_name: await peerName(store, env.from_agent_id),
+      message: `${name} shared a request: “${title}”.`,
+      dedup_key: env.message_id,
+    };
+  },
+  escalation: async (env) => {
+    const body = env.body as unknown as EscalationBody;
+    const esc = body.escalation;
+    const opts = esc?.options?.length ? ` (options: ${esc.options.join(" / ")})` : "";
+    return {
+      kind: "escalation",
+      from_id: env.from_agent_id,
+      message: `${esc?.subject ?? "A decision is needed"} — ${esc?.body ?? ""}${opts}`,
+      dedup_key: env.message_id,
+    };
+  },
 };
 
 export interface ReportRecord {
