@@ -7,7 +7,7 @@ import http from "node:http";
 import { EdgeBookStore, EdgeBookError } from "../src/edge-book.ts";
 import { resolveTarget, makeRegistryProvider } from "../src/resolver.ts";
 
-test("an expired relay-served card fails discovery loudly, never resolves", async () => {
+test("an expired relay-served card fails discovery loudly, never resolves", async (t) => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "eb-expiry-"));
   const s = new EdgeBookStore({ home });
   await s.init({ displayName: "Owner" });
@@ -30,6 +30,7 @@ test("an expired relay-served card fails discovery loudly, never resolves", asyn
     }
   });
   await new Promise<void>((r) => srv.listen(0, r));
+  t.after(() => new Promise<void>((r) => srv.close(() => r())));
   const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
   const provider = makeRegistryProvider(async (t) => {
     const h = t.startsWith("registry:") ? t.slice("registry:".length) : t;
@@ -41,5 +42,4 @@ test("an expired relay-served card fails discovery loudly, never resolves", asyn
     (err: unknown) =>
       err instanceof EdgeBookError && /card_expired|invalid_card/.test(err.code),
   );
-  await new Promise<void>((r) => srv.close(() => r()));
 });
