@@ -11,6 +11,7 @@ import type { FieldVisibility, FriendRequestBody, SocialLink } from "./edge-book
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
 import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
 import { makeNotifyOnEnvelope, resolveNotifyCmd } from "./notify.ts";
+import { ensureNotifierCron, defaultHermesRunner } from "./host-cron.ts";
 
 export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
 
@@ -679,7 +680,32 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     });
     await client.start();
     console.log(`Edge Book dial-out connected to ${hostUrl}${notifyCmd ? " (notify hook active)" : ""}`);
+    // Idempotently self-install the host notifier on a recognized host (e.g. Hermes
+    // delivers via cron). Detection-gated, disable with --no-cron-install /
+    // EDGE_BOOK_NO_CRON_INSTALL. A failure here must never break the dial-out.
+    try {
+      const disabled = takeBoolFlag(args, "--no-cron-install") || process.env.EDGE_BOOK_NO_CRON_INSTALL === "1";
+      const res = ensureNotifierCron({ runner: defaultHermesRunner(), home, disabled });
+      if (res.status === "installed") console.log(`  ↳ notifier cron self-installed ("Edge Book — friend requests", every 20m → telegram)`);
+      else if (res.status === "error") console.log(`  ↳ notifier cron install skipped: ${res.detail}`);
+    } catch (e) {
+      console.log(`  ↳ notifier cron install skipped: ${e instanceof Error ? e.message : String(e)}`);
+    }
     await new Promise(() => undefined);
+  }
+
+  if (command === "ensure-notifier") {
+    // Explicit one-shot: provision the host notifier (for installers/manual setup).
+    const disabled = takeBoolFlag(args, "--no-cron-install") || process.env.EDGE_BOOK_NO_CRON_INSTALL === "1";
+    const res = ensureNotifierCron({ runner: defaultHermesRunner(), home, disabled });
+    const msg: Record<string, string> = {
+      installed: 'Installed notifier cron "Edge Book — friend requests" (every 20m → telegram).',
+      already_present: "Notifier cron already present — nothing to do.",
+      host_unsupported: "No recognized host (Hermes) detected — nothing installed. Set notify_cmd for real-time delivery on hosts with a sender.",
+      disabled: "Cron self-install disabled.",
+      error: `Could not install notifier cron: ${res.detail ?? ""}`,
+    };
+    return { text: msg[res.status] ?? res.status, json: res };
   }
 
   if (command === "pair") {
