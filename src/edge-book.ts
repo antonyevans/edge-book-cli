@@ -17,6 +17,7 @@ import { defaultProfile, resolveFieldVisibility, resolveSocialVisibility, projec
 export { validateCard, validateFriendProfile, loadCard } from "./cards.ts";
 export { runTwoAgentHarness, runFeedPrivacyHarness } from "./harness.ts";
 import { validateCard, validateFriendProfile, loadCard } from "./cards.ts";
+import { IDENTITY_FILE, CONTACTS_FILE, GRANTS_FILE, OBJECTS_FILE, ATTACHMENTS_DIR, SEEN_MESSAGES_FILE, CONFIG_FILE, RELATIONSHIP_EVENTS_FILE, MESSAGES_FILE, AUDIT_FILE, INBOX_FILE, CARD_FILE, SESSIONS_FILE, POSTS_FILE, FEED_FILE, APPROVALS_FILE, NOTIFIED_FILE, ESCALATIONS_FILE, CONTACT_MUTES_FILE, REPORTS_FILE, INVITE_CODES_FILE, INBOUND_RATE_FILE, ATTESTATIONS_FILE, ENDORSEMENTS_FILE, SIGNALS_FILE, CAPABILITIES_FILE, EPHEMERAL_FILE, ANSWERS_FILE, RECEIVED_POSTS_FILE, DEFAULT_SIGNAL_TTL_MS, DEFAULT_EPHEMERAL_TTL_MS } from "./store-files.ts";
 import { EPHEMERAL_TTL_POLICY, EdgeBookError, POST_TAXONOMY, classOf } from "./types.ts";
 import type { RelationshipState, TransportMode, EdgeBookOptions, EdgeBookConfig, LocalIdentity, FieldVisibility, SocialLink, IdentityProfile, FriendProfile, AgentCard, AgentContactRecord, RelationshipEvent, CapabilityGrant, SharedObjectAttachment, SharedObject, ObjectShareBody, ResultAttestation, StrongRef, Endorsement, Signal, EphemeralType, EphemeralPost, Answer, ReceivedPost, CapabilityAdvertisement, ObjectRevokeBody, MessageEnvelope, FriendRequestBody, NotificationIntent, ReportRecord, InviteCode, FriendResponseBody, ProfileShareBody, EdgeBookVisibility, EdgeBookPostStatus, EdgeBookPostKind, LocalUserSession, EdgeBookPost, FeedItem, ApprovalRequest, EscalationKind, EscalationStatus, Escalation, EscalationBody, EscalationResponseBody, ContactMute, PostType } from "./types.ts";
 
@@ -97,40 +98,6 @@ const NOTIFY_POLICIES: Partial<Record<MessageEnvelope["type"], NotifyPolicy>> = 
 };
 
 
-const IDENTITY_FILE = "identity.json";
-const CONTACTS_FILE = "contacts.json";
-const GRANTS_FILE = "grants.json";
-const OBJECTS_FILE = "objects.json";
-const ATTACHMENTS_DIR = "attachments";
-const SEEN_MESSAGES_FILE = "seen-messages.json";
-const CONFIG_FILE = "config.json";
-const RELATIONSHIP_EVENTS_FILE = "relationship-events.jsonl";
-const MESSAGES_FILE = "messages.jsonl";
-const AUDIT_FILE = "audit.jsonl";
-const INBOX_FILE = "inbox.jsonl";
-const CARD_FILE = "openclaw-agent.json";
-const SESSIONS_FILE = "web-sessions.json";
-const POSTS_FILE = "posts.json";
-const FEED_FILE = "feed-items.json";
-const APPROVALS_FILE = "approvals.json";
-const NOTIFIED_FILE = "notified.json"; // dedup ledger for delivered notifications (ea-claude-125)
-const ESCALATIONS_FILE = "escalations.json";
-const CONTACT_MUTES_FILE = "contact-mutes.json";
-const REPORTS_FILE = "reports.json";
-const INVITE_CODES_FILE = "invite-codes.json";
-const INBOUND_RATE_FILE = "inbound-rate.json";
-
-// spec-0021 new post-type storage files
-const ATTESTATIONS_FILE = "attestations.json";
-const ENDORSEMENTS_FILE = "endorsements.json";
-const SIGNALS_FILE = "signals.json";
-const CAPABILITIES_FILE = "capabilities.json";
-const EPHEMERAL_FILE = "ephemeral-posts.json";
-const ANSWERS_FILE = "answers.json";
-const RECEIVED_POSTS_FILE = "received-posts.json";
-
-const DEFAULT_SIGNAL_TTL_MS = 6 * 60 * 60 * 1000;
-const DEFAULT_EPHEMERAL_TTL_MS = 24 * 60 * 60 * 1000;
 
 // Shared Class-2 lifecycle: terminal states are preserved; otherwise past-expiry
 // becomes "expired" for hard-TTL types or "stale" for soft ones.
