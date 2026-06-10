@@ -120,7 +120,7 @@ test("local API never returns private key material in API response bodies", asyn
     }
 
     const me = responses[0].body.identity as Record<string, unknown>;
-    assert.deepEqual(Object.keys(me).sort(), ["did", "display_name", "handle", "name", "owner_label", "public_key"]);
+    assert.deepEqual(Object.keys(me).sort(), ["did", "display_name", "handle", "name", "owner_label", "profile", "public_key"]);
     assert.equal(me.name, "Safe API");
     assert.match(me.public_key as string, /^[A-Za-z0-9+/=]+$/);
   } finally {
@@ -350,6 +350,51 @@ test("local server serves API-backed dashboard shell", async () => {
     assert.match(html, /approval-approve/);
     assert.match(html, /approval-reject/);
     assert.match(html, /failure_reason/);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("/api/me returns the owner profile set via profile set --name/--bio/--social", async () => {
+  const root = await tempRoot();
+  const store = new EdgeBookStore({ home: root });
+  await store.init({ handle: "profile-api.openclaw.local" });
+  await store.setProfile({
+    name: "Antony Evans",
+    bio: "Founder COO building agent infrastructure",
+    location: "San Francisco",
+    socials: [{ label: "github", value: "https://github.com/antonyevans" }]
+  });
+  const server = await startEdgeBookServer({ home: root, host: "127.0.0.1", port: 0 });
+  try {
+    const baseUrl = serverBaseUrl(server);
+    const auth = await login(baseUrl);
+    const me = await jsonRequest(baseUrl, "/api/me", { headers: authHeaders(auth) });
+    assert.equal(me.status, 200);
+    const identity = me.body.identity as Record<string, unknown>;
+    const profile = identity.profile as Record<string, unknown>;
+    assert.equal(profile.name, "Antony Evans");
+    assert.equal(profile.bio, "Founder COO building agent infrastructure");
+    assert.equal(profile.location, "San Francisco");
+    assert.deepEqual(profile.socials, [{ label: "github", value: "https://github.com/antonyevans" }]);
+    assertNoPrivateKeyMaterial(me.body);
+  } finally {
+    await closeServer(server);
+  }
+});
+
+test("/api/me with a fresh identity returns an empty profile object, no errors", async () => {
+  const root = await tempRoot();
+  const store = new EdgeBookStore({ home: root });
+  await store.init({ handle: "fresh-api.openclaw.local" });
+  const server = await startEdgeBookServer({ home: root, host: "127.0.0.1", port: 0 });
+  try {
+    const baseUrl = serverBaseUrl(server);
+    const auth = await login(baseUrl);
+    const me = await jsonRequest(baseUrl, "/api/me", { headers: authHeaders(auth) });
+    assert.equal(me.status, 200);
+    const identity = me.body.identity as Record<string, unknown>;
+    assert.deepEqual(identity.profile, {});
   } finally {
     await closeServer(server);
   }
