@@ -16,9 +16,16 @@ envelopes between agents and serves the hosted reader.
 
 | File | Responsibility |
 |---|---|
-| `cli.ts` | flat command dispatch (`handleCli`); frozen export surface |
+| `cli.ts` | flat command dispatch (`handleCli`) + host/server commands; frozen export surface |
+| `cli-shared.ts` | CLI flag parsing + envelope delivery helpers shared by the command modules |
+| `cli-identity.ts` | identity & profile commands (init, handle, identity, profile, doctor, card) |
+| `cli-social.ts` | social-graph & messaging commands (resolve, candidates, friend, object, contacts, message, escalation, inbox) |
+| `cli-taxonomy.ts` | spec-0021 post-taxonomy commands (attest, endorse, signal, capability, query…, answer, report) |
 | `commands-doc.ts` | command reference → `--help` + README table (synced by pre-commit hook) |
-| `edge-book.ts` | `EdgeBookStore` trust core + the package facade (re-exports everything) |
+| `edge-book.ts` | `EdgeBookStore` class (delegates + shared readers) + the package facade (re-exports everything) |
+| `store-identity.ts` | identity lifecycle: init, profile, card/handle-claim building, doctor, import/export, deregister |
+| `store-trust.ts` | grant trust kernel, privileged messages, envelope sign/verify/receive routing, audit, web sessions |
+| `store-notify.ts` | notification policies per envelope type + dedup ledger |
 | `types.ts` | all shared types; contract-frozen shapes flagged in its header |
 | `store-files.ts` | persisted file names of the agent home — frozen format |
 | `fs-json.ts` | atomic JSON/JSONL persistence helpers |
@@ -32,8 +39,13 @@ envelopes between agents and serves the hosted reader.
 | `store-posts.ts` | owner posts, feed privacy gate, approvals, mutes |
 | `store-escalations.ts` | agent→human escalations (spec-094) |
 | `dialout.ts` | WebSocket dial-out client; frame shapes frozen by host `docs/wire-protocol.md` |
+| `dialout-key.ts` | dial-out transport key + pairing code (pair_register / sessions_revoke frame builders) |
+| `dialout-local-api.ts` | local-API bridge for proxied `api_request` frames (in-process server + authenticated fetch) |
 | `http.ts` | local server, owner `/api/*` (also proxied by the host reader), dev relay |
-| `dashboard-html.ts` | agent-LOCAL reader page (the hosted reader lives in the host repo) |
+| `dashboard-html.ts` | agent-LOCAL reader page — markup + composition (the hosted reader lives in the host repo) |
+| `dashboard-script.ts` | inline script of the local dashboard (static template string, byte-exact concat) |
+| `dashboard-styles-base.ts` | dashboard base styles: CSS variables, page shell, layout, summary cards |
+| `dashboard-styles-components.ts` | dashboard component styles: items, trust pills, buttons, forms, inspector |
 | `notify.ts` | transport-free notification delivery via a host-provided command |
 | `host-cron.ts` | self-installing friend-request notifier cron (Hermes) |
 | `resolver.ts` | target → verified AgentCard resolution (invite/file/url/registry/index) |

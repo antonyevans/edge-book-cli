@@ -6,11 +6,13 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 import {
   DEFAULT_DIALOUT_HOST,
-  EdgeBookDialoutClient,
+  EdgeBookDialoutClient
+} from "../src/dialout.ts";
+import {
   createPairRegistration,
   createSessionsRevokeFrame,
   loadOrCreateDialoutKey
-} from "../src/dialout.ts";
+} from "../src/dialout-key.ts";
 import { EdgeBookStore } from "../src/edge-book.ts";
 import { handleCli } from "../src/cli.ts";
 

@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- GRANDFATHERED at 642 code lines (2026-06-10): WebSocket client + frame routing; extract per-frame-type handlers, then remove this disable. See DESIGN.md. */
 // Dial-out client: the agent side of the host <-> agent WebSocket protocol
 // (canonical spec: edge-book-host/docs/wire-protocol.md — every frame shape
 // here is FROZEN by that doc).
@@ -14,66 +13,17 @@
 //   - mailbox delivery is at-least-once: ack only after the envelope is
 //     applied; dedupe happens by inner message_id in receiveEnvelope.
 import crypto from "node:crypto";
-import fs from "node:fs/promises";
-import http from "node:http";
-import path from "node:path";
 import WebSocket from "ws";
+import { DEFAULT_PAIR_TTL_MS, createPairRegistration, createSessionsRevokeFrame, loadOrCreateDialoutKey } from "./dialout-key.ts";
+import type { PairRegistration, SessionsRevokeFrame } from "./dialout-key.ts";
+import { apiUrl, closeServer, openLocalApi, requestBody } from "./dialout-local-api.ts";
+import type { DialoutApiRequest, DialoutApiResponse, LocalApi } from "./dialout-local-api.ts";
 import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "./edge-book.ts";
-import { startEdgeBookServer } from "./http.ts";
 
-const KEY_FILE = "host-dialout-key.json";
 export const DEFAULT_DIALOUT_HOST = "wss://edge-book-host.fly.dev/agent/ws";
-const DEFAULT_PAIR_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_HEARTBEAT_MS = 25_000;
 const DEFAULT_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
-const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-
-export interface DialoutKey {
-  schema: "edge-book-host-dialout-key/0.1";
-  key_id: string;
-  agent_key: string;
-  public_key_pem: string;
-  private_key_pem: string;
-  created_at: string;
-}
-
-export interface DialoutApiRequest {
-  type: "host.api.request" | "api_request";
-  id?: string;
-  request_id?: string;
-  method?: string;
-  path: string;
-  query?: string;
-  headers?: Record<string, string>;
-  body?: unknown;
-  body_b64?: string | null;
-}
-
-export interface DialoutApiResponse {
-  type: "api_response";
-  id: string;
-  request_id: string;
-  status: number;
-  headers: Record<string, string>;
-  body_b64: string;
-  body?: unknown;
-}
-
-export interface PairRegistration {
-  code: string;
-  frame: {
-    type: "pair_register";
-    code: string;
-    ttl_ms: number;
-    request_id: string;
-  };
-}
-
-export interface SessionsRevokeFrame {
-  type: "sessions_revoke";
-  request_id: string;
-}
 
 export interface SessionsRevokeAck {
   type: "sessions_revoke_ok";
@@ -136,106 +86,11 @@ export interface MailboxDeliverFrame {
   ts: number;
 }
 
-interface LocalApi {
-  server: http.Server;
-  baseUrl: string;
-  sessionId: string;
-  csrf: string;
-}
-
-function now(): string {
-  return new Date().toISOString();
-}
-
-function keyId(agentKey: string): string {
-  return `agent_${crypto.createHash("sha256").update(agentKey).digest("base64url").slice(0, 32)}`;
-}
-
-export function channelIdForKey(key: DialoutKey): string {
-  return crypto.createHash("sha256").update(key.agent_key).digest("hex");
-}
-
 // Decide whether the agent should claim a handle with the relay on connect.
 // Skip the default placeholder and any handle that isn't a valid slug — the
 // slug rule mirrors isValidHandle in edge-book.ts.
 export function shouldClaimHandle(handle: string | undefined): boolean {
   return !!handle && handle !== "agent.openclaw.local" && /^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/.test(handle);
-}
-
-async function chmodBestEffort(file: string, mode: number): Promise<void> {
-  if (process.platform === "win32") return;
-  try {
-    await fs.chmod(file, mode);
-  } catch {
-    // Some mounted filesystems do not honor POSIX modes.
-  }
-}
-
-export async function loadOrCreateDialoutKey(store: EdgeBookStore): Promise<DialoutKey> {
-  const file = store.file(KEY_FILE);
-  try {
-    const existing = JSON.parse(await fs.readFile(file, "utf8")) as Partial<DialoutKey>;
-    if (existing.agent_key && existing.public_key_pem && existing.private_key_pem && existing.key_id) return existing as DialoutKey;
-    if (existing.public_key_pem && existing.private_key_pem && existing.key_id) {
-      const migrated = {
-        ...existing,
-        agent_key: `ed25519:${Buffer.from(existing.public_key_pem, "utf8").toString("base64")}`
-      } as DialoutKey;
-      migrated.key_id = keyId(migrated.agent_key);
-      await fs.writeFile(file, `${JSON.stringify(migrated, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-      await chmodBestEffort(file, 0o600);
-      return migrated;
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
-
-  const pair = crypto.generateKeyPairSync("ed25519");
-  const publicKeyPem = pair.publicKey.export({ type: "spki", format: "pem" }).toString();
-  const privateKeyPem = pair.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-  const publicKeyDer = pair.publicKey.export({ type: "spki", format: "der" });
-  const agentKey = `ed25519:${Buffer.from(publicKeyDer).toString("base64")}`;
-  const key: DialoutKey = {
-    schema: "edge-book-host-dialout-key/0.1",
-    key_id: keyId(agentKey),
-    agent_key: agentKey,
-    public_key_pem: publicKeyPem,
-    private_key_pem: privateKeyPem,
-    created_at: now()
-  };
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.writeFile(file, `${JSON.stringify(key, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  await chmodBestEffort(file, 0o600);
-  return key;
-}
-
-export function generatePairingCode(length = 8): string {
-  let code = "";
-  for (let i = 0; i < length; i += 1) {
-    code += PAIRING_ALPHABET[crypto.randomInt(PAIRING_ALPHABET.length)];
-  }
-  return code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
-}
-
-export async function createPairRegistration(store: EdgeBookStore, ttlMs = DEFAULT_PAIR_TTL_MS): Promise<PairRegistration> {
-  const code = generatePairingCode();
-  return {
-    code,
-    frame: {
-      type: "pair_register",
-      code,
-      ttl_ms: ttlMs,
-      request_id: crypto.randomUUID()
-    }
-  };
-}
-
-export async function createSessionsRevokeFrame(store: EdgeBookStore): Promise<SessionsRevokeFrame> {
-  await loadOrCreateDialoutKey(store);
-  return {
-    type: "sessions_revoke",
-    request_id: crypto.randomUUID()
-  };
 }
 
 function socketFactory(url: string): DialoutSocket {
@@ -250,49 +105,6 @@ function addSocketListener(socket: DialoutSocket, event: "open" | "message" | "c
   }
   const prop = `on${event}` as "onopen" | "onmessage" | "onclose" | "onerror";
   socket[prop] = handler as never;
-}
-
-function serverBaseUrl(server: http.Server): string {
-  const address = server.address();
-  if (!address || typeof address === "string") throw new EdgeBookError("local_api_unavailable", "Local API server did not expose a port");
-  return `http://127.0.0.1:${address.port}`;
-}
-
-async function closeServer(server: http.Server): Promise<void> {
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-}
-
-async function openLocalApi(store: EdgeBookStore): Promise<LocalApi> {
-  const server = await startEdgeBookServer({ home: store.home, host: "127.0.0.1", port: 0 });
-  const baseUrl = serverBaseUrl(server);
-  const login = await fetch(`${baseUrl}/auth/login`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ auth_method: "future-remote-auth", ttl_ms: 24 * 60 * 60 * 1000 })
-  });
-  if (!login.ok) {
-    await closeServer(server);
-    throw new EdgeBookError("local_api_login_failed", `Local API login failed: ${login.status}`);
-  }
-  const body = await login.json() as { session_id: string; csrf_token: string };
-  return { server, baseUrl, sessionId: body.session_id, csrf: body.csrf_token };
-}
-
-function normalizeApiPath(value: string): string {
-  if (!value.startsWith("/api/")) throw new EdgeBookError("invalid_proxy_path", "Dial-out only proxies /api/* JSON requests");
-  return value;
-}
-
-function apiUrl(baseUrl: string, frame: DialoutApiRequest): string {
-  return `${baseUrl}${normalizeApiPath(frame.path)}${frame.query || ""}`;
-}
-
-// Return type is Uint8Array<ArrayBuffer> (which Buffer.from satisfies) rather than
-// Buffer so the result is assignable to fetch's BodyInit under strict lib types.
-function requestBody(frame: DialoutApiRequest, method: string): Uint8Array<ArrayBuffer> | undefined {
-  if (method === "GET" || method === "HEAD") return undefined;
-  if (typeof frame.body_b64 === "string") return Buffer.from(frame.body_b64, "base64");
-  return Buffer.from(JSON.stringify(frame.body ?? {}), "utf8");
 }
 
 export class EdgeBookDialoutClient {
