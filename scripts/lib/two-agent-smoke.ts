@@ -180,7 +180,40 @@ export async function runSmoke(opts: SmokeOptions): Promise<SmokeResult> {
       await alice.store.createPost({ title: "Smoke post", body: "hi friends", visibility: "friends", status: "published" });
       await alice.store.issueGrant(bob.card.agent_id, ["feed.read.friends"]);
       const posts = await alice.store.visiblePostsForPeer(bob.card.agent_id);
+      if (posts.length < 1) throw new Error("no friend-visible posts");
       return `${posts.length} friend-visible post(s)`;
+    });
+
+    await step("feed-journey: bob imports alice's friend-visible posts into his feed", async () => {
+      const visible = await alice.store.visiblePostsForPeer(bob.card.agent_id);
+      const imported = await bob.store.importFeedPosts(alice.card.agent_id, visible, "direct");
+      if (imported.length !== visible.length) throw new Error(`imported ${imported.length}/${visible.length}`);
+      return `imported ${imported.length} feed item(s)`;
+    });
+
+    await step("feed-journey: bob engages (read + hide) without mutating alice's source post", async () => {
+      const items = Object.values(await bob.store.feedItems()).filter((f) => f.origin_agent_id === alice.card.agent_id);
+      if (!items.length) throw new Error("no imported items from alice");
+      const target = items[0];
+      const sourceBefore = JSON.stringify((await alice.store.posts())[target.post_id]);
+      const read = await bob.store.markFeedItemRead(target.feed_item_id);
+      if (read.read_state !== "read") throw new Error("read_state not set");
+      const hidden = await bob.store.hideFeedItem(target.feed_item_id, "smoke hide");
+      if (!hidden.hidden) throw new Error("hidden not set");
+      const sourceAfter = JSON.stringify((await alice.store.posts())[target.post_id]);
+      if (sourceBefore !== sourceAfter) throw new Error("engagement mutated alice's source post");
+      return "read+hide applied locally; source post untouched";
+    });
+
+    await step("feed-journey: re-import is idempotent and preserves engagement state", async () => {
+      const before = Object.keys(await bob.store.feedItems()).length;
+      const visible = await alice.store.visiblePostsForPeer(bob.card.agent_id);
+      await bob.store.importFeedPosts(alice.card.agent_id, visible, "direct");
+      const after = Object.keys(await bob.store.feedItems()).length;
+      if (after !== before) throw new Error(`dedup failed: feed item count ${before} -> ${after}`);
+      const items = Object.values(await bob.store.feedItems()).filter((f) => f.origin_agent_id === alice.card.agent_id);
+      if (items[0].read_state !== "read" || !items[0].hidden) throw new Error("engagement state lost on re-import");
+      return "idempotent re-import; read/hidden state preserved";
     });
 
     await step("revoke: after revoking bob's object grant, his read is denied", async () =>
