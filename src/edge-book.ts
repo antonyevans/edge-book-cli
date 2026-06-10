@@ -24,6 +24,14 @@ export interface EdgeBookConfig {
   // Default ON (treat undefined as true). When false, pendingFriendRequests()
   // returns [] so the notifier cron stays silent.
   notify_on_friend_request?: boolean;
+  // Host-provided notify command (ea-claude-125). When set, the dial-out runs it
+  // on each notifiable inbound envelope, delivering the message via stdin/env.
+  // Edge Book stays transport-free — the command owns the channel. May also be
+  // supplied via --notify-cmd flag or EDGE_BOOK_NOTIFY_CMD env (flag > env > config).
+  notify_cmd?: string;
+  // Optional whitelist of inbound kinds to notify on. When set, only these kinds
+  // produce a notification; when unset, all registered notify policies apply.
+  notify_types?: string[];
   // Abuse floor. open_friend_requests default true (treat undefined as true):
   // accept unsolicited friend requests. false => invite-only (drop unsolicited
   // requests that carry no valid invite code and have no prior relationship).
@@ -319,6 +327,95 @@ export interface FriendRequestBody {
   invite_code?: string; // present when the requester used an invite link carrying a code
 }
 
+// ── Generic inbound notifications (ea-claude-125) ──────────────────────────
+// Edge Book stays transport-free: it renders a transport-agnostic intent describing
+// "notify the human", and an entry point (dial-out, server) delivers it via a
+// host-provided notify command. A per-type registry decides notify-vs-silent and
+// renders the message — adding a new inbound format = one registry row.
+export interface NotificationIntent {
+  kind: string;            // envelope.type
+  message: string;         // pre-rendered, human-readable, safe to display
+  from_id: string;         // envelope.from_agent_id
+  from_name?: string;      // resolved display_name (best-effort)
+  dedup_key: string;       // stable per logical notification (default: message_id)
+  meta?: Record<string, string>; // extra type-specific fields for the host command env
+}
+
+type NotifyPolicy = (
+  env: MessageEnvelope,
+  store: EdgeBookStore,
+) => Promise<NotificationIntent | null>; // null = silent
+
+// Resolve a peer's display name from local contacts, falling back to the agent id.
+async function peerName(store: EdgeBookStore, agentId: string): Promise<string | undefined> {
+  return (await store.contacts())[agentId]?.display_name || undefined;
+}
+
+const NOTIFY_POLICIES: Partial<Record<MessageEnvelope["type"], NotifyPolicy>> = {
+  friend_request: async (env, store) => {
+    // Honour the per-type opt-out (default ON: treat undefined as enabled).
+    if ((await store.config()).notify_on_friend_request === false) return null;
+    const body = env.body as unknown as FriendRequestBody;
+    const name = body.card?.display_name || env.from_agent_id;
+    const note = body.note ? ` — “${body.note}”` : "";
+    return {
+      kind: "friend_request",
+      from_id: env.from_agent_id,
+      from_name: body.card?.display_name,
+      message: `${name} wants to connect on Edge Book${note}. Reply “yes” to connect, or ignore to leave it pending.`,
+      dedup_key: env.message_id,
+    };
+  },
+  privileged_message: async (env, store) => {
+    const body = env.body as { text?: unknown };
+    const name = (await peerName(store, env.from_agent_id)) || env.from_agent_id;
+    const text = typeof body.text === "string" ? body.text : "";
+    const preview = text.length > 280 ? `${text.slice(0, 279)}…` : text;
+    return {
+      kind: "privileged_message",
+      from_id: env.from_agent_id,
+      from_name: await peerName(store, env.from_agent_id),
+      message: `${name}: ${preview}`,
+      dedup_key: env.message_id,
+    };
+  },
+  friend_response: async (env) => {
+    const body = env.body as unknown as FriendResponseBody;
+    const name = body.card?.display_name || env.from_agent_id;
+    const verb = body.accepted ? "accepted" : "declined";
+    return {
+      kind: "friend_response",
+      from_id: env.from_agent_id,
+      from_name: body.card?.display_name,
+      message: `${name} ${verb} your friend request on Edge Book.`,
+      dedup_key: env.message_id,
+    };
+  },
+  object_share: async (env, store) => {
+    const body = env.body as unknown as ObjectShareBody;
+    const name = (await peerName(store, env.from_agent_id)) || env.from_agent_id;
+    const title = body.object?.request?.title || "an item";
+    return {
+      kind: "object_share",
+      from_id: env.from_agent_id,
+      from_name: await peerName(store, env.from_agent_id),
+      message: `${name} shared a request: “${title}”.`,
+      dedup_key: env.message_id,
+    };
+  },
+  escalation: async (env) => {
+    const body = env.body as unknown as EscalationBody;
+    const esc = body.escalation;
+    const opts = esc?.options?.length ? ` (options: ${esc.options.join(" / ")})` : "";
+    return {
+      kind: "escalation",
+      from_id: env.from_agent_id,
+      message: `${esc?.subject ?? "A decision is needed"} — ${esc?.body ?? ""}${opts}`,
+      dedup_key: env.message_id,
+    };
+  },
+};
+
 export interface ReportRecord {
   report_id: string;
   peer_agent_id: string;
@@ -492,6 +589,7 @@ const SESSIONS_FILE = "web-sessions.json";
 const POSTS_FILE = "posts.json";
 const FEED_FILE = "feed-items.json";
 const APPROVALS_FILE = "approvals.json";
+const NOTIFIED_FILE = "notified.json"; // dedup ledger for delivered notifications (ea-claude-125)
 const ESCALATIONS_FILE = "escalations.json";
 const CONTACT_MUTES_FILE = "contact-mutes.json";
 const REPORTS_FILE = "reports.json";
@@ -864,6 +962,8 @@ export class EdgeBookStore {
     if (input.direct_url !== undefined) next.direct_url = input.direct_url;
     if (input.relay_url !== undefined) next.relay_url = input.relay_url;
     if (input.notify_on_friend_request !== undefined) next.notify_on_friend_request = input.notify_on_friend_request;
+    if (input.notify_cmd !== undefined) next.notify_cmd = input.notify_cmd;
+    if (input.notify_types !== undefined) next.notify_types = input.notify_types;
     if (input.open_friend_requests !== undefined) next.open_friend_requests = input.open_friend_requests;
     if (input.inbound_max_per_peer !== undefined) next.inbound_max_per_peer = input.inbound_max_per_peer;
     if (input.inbound_max_global !== undefined) next.inbound_max_global = input.inbound_max_global;
@@ -2329,6 +2429,34 @@ export class EdgeBookStore {
     if (envelope.type === "escalation") return this.receiveEscalation(envelope);
     if (envelope.type === "escalation_response") return this.applyEscalationResponse(envelope);
     throw new EdgeBookError("unsupported_envelope", `Unsupported envelope type: ${envelope.type}`);
+  }
+
+  // Compute the transport-free notification intent for an applied inbound envelope,
+  // or null when the type is silent / unregistered. Delivery (invoking the host
+  // notify command) is the entry point's job — this stays transport-free.
+  async notificationIntent(envelope: MessageEnvelope): Promise<NotificationIntent | null> {
+    const policy = NOTIFY_POLICIES[envelope.type];
+    if (!policy) return null;
+    const intent = await policy(envelope, this);
+    if (!intent) return null;
+    // Optional whitelist: when notify_types is set, only those kinds notify.
+    const types = (await this.config()).notify_types;
+    if (Array.isArray(types) && !types.includes(intent.kind)) return null;
+    return intent;
+  }
+
+  // Notification dedup ledger (keyed by NotificationIntent.dedup_key). Guards
+  // against double-notify across entry points, hook+cron, and mailbox redelivery.
+  async wasNotified(dedupKey: string): Promise<boolean> {
+    const ledger = await readJson<string[]>(this.file(NOTIFIED_FILE), []);
+    return ledger.includes(dedupKey);
+  }
+
+  async recordNotified(dedupKey: string): Promise<void> {
+    const ledger = await readJson<string[]>(this.file(NOTIFIED_FILE), []);
+    if (ledger.includes(dedupKey)) return;
+    ledger.push(dedupKey);
+    await writeJson(this.file(NOTIFIED_FILE), ledger);
   }
 
   async audit(action: string, peerAgentId: string, details: Record<string, unknown>): Promise<string> {
