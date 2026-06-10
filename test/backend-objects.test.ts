@@ -1,26 +1,7 @@
 import assert from "node:assert/strict";
-import fs from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
 import test from "node:test";
 import { EdgeBookError, EdgeBookStore } from "../src/edge-book.ts";
-
-async function tempRoot(): Promise<string> {
-  return fs.mkdtemp(path.join(os.tmpdir(), "edge-book-backend-test-"));
-}
-
-async function makeFriends(root: string): Promise<{ alice: EdgeBookStore; bob: EdgeBookStore; aliceId: string; bobId: string }> {
-  const alice = new EdgeBookStore({ home: path.join(root, "alice") });
-  const bob = new EdgeBookStore({ home: path.join(root, "bob") });
-  const aliceIdentity = await alice.init({ handle: "alice.openclaw.local", ownerLabel: "Alice" });
-  const bobIdentity = await bob.init({ handle: "bob.openclaw.local", ownerLabel: "Bob" });
-  const aliceCard = await alice.writeCard();
-  const bobCard = await bob.writeCard();
-  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
-  await alice.applyFriendResponse(await bob.acceptFriend(aliceCard.agent_id));
-  await alice.issueGrant(bobIdentity.agent_id, ["feed.read.friends"]);
-  return { alice, bob, aliceId: aliceIdentity.agent_id, bobId: bobIdentity.agent_id };
-}
+import { makeFriends, tempRoot } from "./lib/feed-fixtures.ts";
 
 test("web sessions can be required and revoked", async () => {
   const store = new EdgeBookStore({ home: await tempRoot() });
@@ -87,7 +68,7 @@ test("post lifecycle creates approvals, publishes, edits, removes, and expires",
 
 test("feed read, hide, and contact mute state do not mutate source posts", async () => {
   const root = await tempRoot();
-  const { alice, bob, bobId } = await makeFriends(root);
+  const { alice, bob, bobId } = await makeFriends({ root });
   const post = await alice.createPost({ title: "Friend update", body: "visible", status: "published", visibility: "friends" });
   const sourceBefore = (await alice.posts())[post.post_id];
   const visible = await alice.visiblePostsForPeer(bobId);
@@ -108,7 +89,7 @@ test("feed read, hide, and contact mute state do not mutate source posts", async
 
 test("export includes backend objects and import review is non-activating", async () => {
   const root = await tempRoot();
-  const { alice, bob, bobId } = await makeFriends(root);
+  const { alice, bob, bobId } = await makeFriends({ root });
   const session = await alice.createSession();
   const post = await alice.createPost({ title: "Exported", body: "body", visibility: "friends", status: "published" });
   const visible = await alice.visiblePostsForPeer(bobId);
