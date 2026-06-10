@@ -65,8 +65,9 @@ export async function runTwoAgentHarness(baseDir?: string): Promise<Record<strin
   const aliceContacts = await alice.contacts();
   const bobAudit = await bob.auditEvents();
 
-  const aliceSeesBob = (await alice.contacts())[bobCard.agent_id].friend_profile?.name === "Bob";
-  const bobSeesAlice = (await bob.contacts())[aliceCard.agent_id].friend_profile?.name === "Alice";
+  // Both contacts were created earlier in this scenario — present by construction.
+  const aliceSeesBob = (await alice.contacts())[bobCard.agent_id]!.friend_profile?.name === "Bob";
+  const bobSeesAlice = (await bob.contacts())[aliceCard.agent_id]!.friend_profile?.name === "Alice";
 
   const assertions = {
     deniedBeforeAccept,

@@ -142,7 +142,7 @@ export function makeIndexProvider(source: IndexSource): ResolverProvider {
       if (!target.startsWith("index:")) return null;
       const opportunities = await source(target);
       if (opportunities.length === 0) return null;
-      const opp = opportunities[0];
+      const opp = opportunities[0]!; // length checked above — first element is present
       const display = opp.message.slice(0, 60);
       return {
         kind: "candidate",

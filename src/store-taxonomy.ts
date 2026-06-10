@@ -183,7 +183,10 @@ export async function createEndorsement(store: EdgeBookStore, input: {
 
 export async function signals(store: EdgeBookStore): Promise<Record<string, Signal>> {
   const raw = await readJson<Record<string, Signal>>(store.file(SIGNALS_FILE), {});
-  for (const id of Object.keys(raw)) raw[id].lifecycle = signalLifecycle(store, raw[id]);
+  for (const id of Object.keys(raw)) {
+    const sig = raw[id]!; // key comes from Object.keys(raw) — value is present
+    sig.lifecycle = signalLifecycle(store, sig);
+  }
   return raw;
 }
 
@@ -211,8 +214,9 @@ export async function expireSignals(store: EdgeBookStore): Promise<void> {
   const all = await readJson<Record<string, Signal>>(store.file(SIGNALS_FILE), {});
   let changed = false;
   for (const id of Object.keys(all)) {
-    if (all[id].lifecycle !== "expired" && Date.parse(all[id].expires_at) <= Date.now()) {
-      all[id].lifecycle = "expired"; changed = true;
+    const sig = all[id]!; // key comes from Object.keys(all) — value is present
+    if (sig.lifecycle !== "expired" && Date.parse(sig.expires_at) <= Date.now()) {
+      sig.lifecycle = "expired"; changed = true;
     }
   }
   if (changed) await store.saveSignals(all);
@@ -229,7 +233,8 @@ export async function saveEphemeral(store: EdgeBookStore, posts: Record<string, 
 export async function ephemeralPosts(store: EdgeBookStore): Promise<Record<string, EphemeralPost>> {
   const raw = await readJson<Record<string, EphemeralPost>>(store.file(EPHEMERAL_FILE), {});
   for (const id of Object.keys(raw)) {
-    raw[id].lifecycle = computeLifecycle(raw[id].expires_at, EPHEMERAL_TTL_POLICY[raw[id].post_type].hard, raw[id].lifecycle);
+    const post = raw[id]!; // key comes from Object.keys(raw) — value is present
+    post.lifecycle = computeLifecycle(post.expires_at, EPHEMERAL_TTL_POLICY[post.post_type].hard, post.lifecycle);
   }
   return raw;
 }
@@ -262,8 +267,9 @@ export async function expireEphemeral(store: EdgeBookStore): Promise<void> {
   const all = await readJson<Record<string, EphemeralPost>>(store.file(EPHEMERAL_FILE), {});
   let changed = false;
   for (const id of Object.keys(all)) {
-    const next = computeLifecycle(all[id].expires_at, EPHEMERAL_TTL_POLICY[all[id].post_type].hard, all[id].lifecycle);
-    if (next !== all[id].lifecycle) { all[id].lifecycle = next; changed = true; }
+    const post = all[id]!; // key comes from Object.keys(all) — value is present
+    const next = computeLifecycle(post.expires_at, EPHEMERAL_TTL_POLICY[post.post_type].hard, post.lifecycle);
+    if (next !== post.lifecycle) { post.lifecycle = next; changed = true; }
   }
   if (changed) await store.saveEphemeral(all);
 }
@@ -318,7 +324,8 @@ export async function deleteQuery(store: EdgeBookStore, queryId: string): Promis
   const ans = await store.answers();
   let changed = false;
   for (const id of Object.keys(ans)) {
-    if (ans[id].parent.uri === parentUri && ans[id].lifecycle !== "tombstoned") { ans[id].lifecycle = "tombstoned"; changed = true; }
+    const answer = ans[id]!; // key comes from Object.keys(ans) — value is present
+    if (answer.parent.uri === parentUri && answer.lifecycle !== "tombstoned") { answer.lifecycle = "tombstoned"; changed = true; }
   }
   if (changed) await store.saveAnswers(ans);
   await store.audit("query.delete", q.from_agent, { query_id: queryId });
