@@ -53,6 +53,7 @@ import { posts, savePosts, feedItems, saveFeedItems, approvals, saveApprovals, c
 import { escalations, saveEscalations, raiseEscalation, receiveEscalation, answerEscalation, applyEscalationResponse, expireEscalations } from "./store-escalations.ts";
 import { upsertContactFromCard, setRelationship, createFriendRequest, receiveFriendRequest, pendingFriendRequests, markFriendRequestNotified, acceptFriend, rejectFriend, applyFriendResponse, buildProfileShareEnvelope, receiveProfileShare, broadcastProfileEnvelopes, revoke, block, reports, inviteCodes, mintInviteCode, reportPeer } from "./store-friends.ts";
 import { init, setProfile, setHandle, exportIdentity, importIdentity, updateConfig, buildCard, writeCard, buildHandleClaim, buildFriendProfile, doctor, deregister, reviewLocalDataImport, exportLocalData } from "./store-identity.ts";
+import { enforceInboundRate, issueGrant, storeGrant, sendPrivilegedMessage, receivePrivilegedMessage, findUsableGrant, verifyGrantSignature, assertGrantSignature, signEnvelope, verifyEnvelope, createSession, requireSession, revokeSession } from "./store-trust.ts";
 import { IDENTITY_FILE, CONTACTS_FILE, GRANTS_FILE, OBJECTS_FILE, ATTACHMENTS_DIR, SEEN_MESSAGES_FILE, CONFIG_FILE, RELATIONSHIP_EVENTS_FILE, MESSAGES_FILE, AUDIT_FILE, INBOX_FILE, CARD_FILE, SESSIONS_FILE, POSTS_FILE, FEED_FILE, APPROVALS_FILE, NOTIFIED_FILE, ESCALATIONS_FILE, CONTACT_MUTES_FILE, REPORTS_FILE, INVITE_CODES_FILE, INBOUND_RATE_FILE, ATTESTATIONS_FILE, ENDORSEMENTS_FILE, SIGNALS_FILE, CAPABILITIES_FILE, EPHEMERAL_FILE, ANSWERS_FILE, RECEIVED_POSTS_FILE, DEFAULT_SIGNAL_TTL_MS, DEFAULT_EPHEMERAL_TTL_MS } from "./store-files.ts";
 import { EPHEMERAL_TTL_POLICY, EdgeBookError, POST_TAXONOMY, classOf } from "./types.ts";
 import type { RelationshipState, TransportMode, EdgeBookOptions, EdgeBookConfig, LocalIdentity, FieldVisibility, SocialLink, IdentityProfile, FriendProfile, AgentCard, AgentContactRecord, RelationshipEvent, CapabilityGrant, SharedObjectAttachment, SharedObject, ObjectShareBody, ResultAttestation, StrongRef, Endorsement, Signal, EphemeralType, EphemeralPost, Answer, ReceivedPost, CapabilityAdvertisement, ObjectRevokeBody, MessageEnvelope, FriendRequestBody, NotificationIntent, ReportRecord, InviteCode, FriendResponseBody, ProfileShareBody, EdgeBookVisibility, EdgeBookPostStatus, EdgeBookPostKind, LocalUserSession, EdgeBookPost, FeedItem, ApprovalRequest, EscalationKind, EscalationStatus, Escalation, EscalationBody, EscalationResponseBody, ContactMute, PostType } from "./types.ts";
@@ -260,40 +261,12 @@ export class EdgeBookStore {
     return createFriendRequest(this, targetCard, note, inviteCode);
   }
 
-  // NOTE — concurrency + sybil-defense assumptions (v1):
-  // The GLOBAL cap (inbound_max_global) is the real sybil defense: it limits total
-  // inbound load regardless of how many distinct identities an attacker mints.
-  // The per-peer cap only slows a single persistent identity; it provides weaker
-  // protection because `from_agent_id` is attacker-mintable (any key can be generated).
-  //
-  // The rate file is read-modify-write.  This is safe under the assumption that the
-  // receive loop is effectively serial for a single-owner edge agent (one active
-  // session at a time).  Concurrent receives — e.g. two simultaneous HTTP deliveries
-  // on a multi-machine deployment — could undercount hits, allowing bursts past the
-  // cap.  A shared atomic lock or external counter store is the follow-up (ea-claude-090).
   // Internal — not part of the public store API. Non-private only so the
   // extracted store-* feature modules (which receive `store` as a parameter)
   // can apply the same inbound throttle as the in-class friend-request path.
+  // Concurrency/sybil-defense notes live with the implementation in store-trust.ts.
   async enforceInboundRate(peerAgentId: string): Promise<void> {
-    const config = await this.config();
-    const windowMs = config.inbound_window_ms ?? 3_600_000;
-    const maxPeer = config.inbound_max_per_peer ?? 5;
-    const maxGlobal = config.inbound_max_global ?? 60;
-    const cutoff = Date.now() - windowMs;
-    const all = await readJson<Record<string, number[]>>(this.file(INBOUND_RATE_FILE), {});
-    for (const k of Object.keys(all)) {
-      const kept = all[k]!.filter((t) => t > cutoff); // key comes from Object.keys(all) — value is present
-      all[k] = kept;
-      if (!kept.length) delete all[k];
-    }
-    const peerCount = (all[peerAgentId] ?? []).length;
-    const globalCount = Object.values(all).reduce((n, arr) => n + arr.length, 0);
-    if (peerCount >= maxPeer || globalCount >= maxGlobal) {
-      await this.audit("inbound.rate_limited", peerAgentId, { peerCount, globalCount });
-      throw new EdgeBookError("rate_limited", "Inbound request rate limit exceeded");
-    }
-    all[peerAgentId] = [...(all[peerAgentId] ?? []), Date.now()];
-    await writeJson(this.file(INBOUND_RATE_FILE), all);
+    return enforceInboundRate(this, peerAgentId);
   }
 
   async receiveFriendRequest(envelope: MessageEnvelope): Promise<AgentContactRecord> {
@@ -374,83 +347,19 @@ export class EdgeBookStore {
   }
 
   async issueGrant(subjectAgentId: string, scopes: string[], expiresAt = ""): Promise<CapabilityGrant> {
-    const identity = await this.identity();
-    const unsigned: Omit<CapabilityGrant, "signature"> = {
-      grant_id: randomId("grant"),
-      issuer_agent_id: identity.agent_id,
-      subject_agent_id: subjectAgentId,
-      relationship_id: relationshipId(identity.agent_id, subjectAgentId),
-      scopes,
-      status: "active",
-      issued_at: now(),
-      expires_at: expiresAt,
-      revoked_at: "",
-      audit_refs: []
-    };
-    const grant = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
-    await this.storeGrant(grant);
-    await this.audit("grant.issue", subjectAgentId, { grant_id: grant.grant_id, scopes });
-    return grant;
+    return issueGrant(this, subjectAgentId, scopes, expiresAt);
   }
 
   async storeGrant(grant: CapabilityGrant): Promise<void> {
-    const grants = await this.grants();
-    grants[grant.grant_id] = grant;
-    await this.saveGrants(grants);
-    const contacts = await this.contacts();
-    const peer = grant.issuer_agent_id === (await this.identity()).agent_id ? grant.subject_agent_id : grant.issuer_agent_id;
-    const contact = contacts[peer];
-    if (contact && !contact.capability_grants.includes(grant.grant_id)) {
-      contact.capability_grants.push(grant.grant_id);
-      contact.updated_at = now();
-      contacts[peer] = contact;
-      await this.saveContacts(contacts);
-    }
+    return storeGrant(this, grant);
   }
 
   async sendPrivilegedMessage(peerAgentId: string, body: Record<string, unknown>, scope = "message.friend"): Promise<MessageEnvelope> {
-    const identity = await this.identity();
-    const contacts = await this.contacts();
-    const contact = contacts[peerAgentId];
-    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
-    if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked", `Peer ${peerAgentId} is blocked`);
-    if (contact.relationship_state !== "friend") {
-      throw new EdgeBookError("not_friend", `Cannot send friend-gated message to relationship_state=${contact.relationship_state}`);
-    }
-    const grant = await this.findUsableGrant(peerAgentId, scope);
-    if (!grant) throw new EdgeBookError("missing_grant", `No active grant for ${scope}`);
-    await this.assertGrantSignature(grant);
-    const envelope = await this.signEnvelope({
-      type: "privileged_message",
-      to_agent_id: peerAgentId,
-      relationship_id: relationshipId(identity.agent_id, peerAgentId),
-      capability_id: grant.grant_id,
-      ref: "",
-      transport: "local",
-      body
-    });
-    await appendJsonl(this.file(MESSAGES_FILE), envelope);
-    await this.audit("message.send", peerAgentId, { message_id: envelope.message_id, scope });
-    return envelope;
+    return sendPrivilegedMessage(this, peerAgentId, body, scope);
   }
 
   async receivePrivilegedMessage(envelope: MessageEnvelope): Promise<void> {
-    await this.verifyEnvelope(envelope);
-    if (envelope.type !== "privileged_message") throw new EdgeBookError("wrong_message_type", "Expected privileged_message envelope");
-    const contacts = await this.contacts();
-    const contact = contacts[envelope.from_agent_id];
-    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${envelope.from_agent_id}`);
-    if (contact.relationship_state !== "friend") {
-      throw new EdgeBookError("not_friend", `Cannot receive friend-gated message from relationship_state=${contact.relationship_state}`);
-    }
-    const grants = await this.grants();
-    const grant = grants[envelope.capability_id];
-    if (!grant || grant.status !== "active" || grant.subject_agent_id !== envelope.from_agent_id || !grant.scopes.includes("message.friend")) {
-      throw new EdgeBookError("missing_grant", "Message does not carry an active grant issued to sender");
-    }
-    await this.assertGrantSignature(grant);
-    await appendJsonl(this.file(INBOX_FILE), envelope);
-    await this.audit("message.receive", envelope.from_agent_id, { message_id: envelope.message_id });
+    return receivePrivilegedMessage(this, envelope);
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -683,45 +592,20 @@ export class EdgeBookStore {
   }
 
   async findUsableGrant(peerAgentId: string, scope: string): Promise<CapabilityGrant | undefined> {
-    const identity = await this.identity();
-    const grants = await this.grants();
-    return Object.values(grants).find((grant) =>
-      grant.issuer_agent_id === peerAgentId &&
-      grant.subject_agent_id === identity.agent_id &&
-      grant.status === "active" &&
-      grant.scopes.includes(scope) &&
-      (!grant.expires_at || Date.parse(grant.expires_at) > Date.now())
-    );
+    return findUsableGrant(this, peerAgentId, scope);
   }
 
   // ea-openclaw-030 access check #6: a grant authorizes access only if its
-  // issuer signature verifies against the issuer's accepted public key. Grants
-  // are signed on issue (signPayload) but must be re-verified on use so that a
-  // grant tampered after signing, or presented independently of its issuing
-  // envelope, fails closed. Resolves the issuer key from local identity when
-  // self-issued, else from the issuer's contact record.
+  // issuer signature verifies against the issuer's accepted public key
+  // (re-verified on use, failing closed — see store-trust.ts).
   async verifyGrantSignature(grant: CapabilityGrant): Promise<boolean> {
-    if (!grant.signature) return false;
-    const identity = await this.identity();
-    let publicKey: string | undefined;
-    if (grant.issuer_agent_id === identity.agent_id) {
-      publicKey = identity.public_key_pem;
-    } else {
-      const contacts = await this.contacts();
-      publicKey = contacts[grant.issuer_agent_id]?.public_keys?.[0]?.public_key_pem;
-    }
-    if (!publicKey) return false;
-    return verifyPayload(withoutSignature(grant), grant.signature, publicKey);
+    return verifyGrantSignature(this, grant);
   }
 
   // Throwing guard used by every friend-gated access path so the signature
-  // check lives in exactly one place (ea-openclaw-031: build the grant-check
-  // primitive once, have all sites consume it).
+  // check lives in exactly one place (ea-openclaw-031).
   async assertGrantSignature(grant: CapabilityGrant): Promise<void> {
-    if (!(await this.verifyGrantSignature(grant))) {
-      await this.audit("grant.denied", grant.issuer_agent_id, { grant_id: grant.grant_id, reason: "invalid_grant_signature" });
-      throw new EdgeBookError("invalid_grant_signature", "Grant signature does not verify against the issuer key");
-    }
+    return assertGrantSignature(this, grant);
   }
 
   // ─── Received posts (peer posts delivered via mailbox) ──────────────────────
@@ -759,39 +643,11 @@ export class EdgeBookStore {
   }
 
   async signEnvelope(input: Omit<MessageEnvelope, "message_id" | "from_agent_id" | "created_at" | "expires_at" | "signature">): Promise<MessageEnvelope> {
-    const identity = await this.identity();
-    const unsigned: Omit<MessageEnvelope, "signature"> = {
-      message_id: randomId("msg"),
-      from_agent_id: identity.agent_id,
-      created_at: now(),
-      expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-      ...input
-    };
-    return { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+    return signEnvelope(this, input);
   }
 
   async verifyEnvelope(envelope: MessageEnvelope): Promise<void> {
-    const identity = await this.identity();
-    if (envelope.to_agent_id !== identity.agent_id) throw new EdgeBookError("wrong_recipient", "Envelope recipient does not match local identity");
-    if (Date.parse(envelope.expires_at) <= Date.now()) throw new EdgeBookError("expired_message", "Message is expired");
-    const seen = await readJson<string[]>(this.file(SEEN_MESSAGES_FILE), []);
-    if (seen.includes(envelope.message_id)) throw new EdgeBookError("replay", `Replay detected for ${envelope.message_id}`);
-    const contacts = await this.contacts();
-    let publicKey = contacts[envelope.from_agent_id]?.public_keys?.[0]?.public_key_pem;
-    if (!publicKey && envelope.type === "friend_request") {
-      const card = (envelope.body as unknown as FriendRequestBody).card;
-      publicKey = card?.public_keys?.[0]?.public_key_pem;
-    }
-    if (!publicKey && envelope.type === "friend_response") {
-      const card = (envelope.body as unknown as FriendResponseBody).card;
-      publicKey = card?.public_keys?.[0]?.public_key_pem;
-    }
-    if (!publicKey) throw new EdgeBookError("unknown_key", `Unknown sender key for ${envelope.from_agent_id}`);
-    if (!verifyPayload(withoutSignature(envelope), envelope.signature, publicKey)) {
-      throw new EdgeBookError("invalid_signature", "Message signature is invalid");
-    }
-    seen.push(envelope.message_id);
-    await writeJson(this.file(SEEN_MESSAGES_FILE), seen);
+    return verifyEnvelope(this, envelope);
   }
 
   async inbox(): Promise<MessageEnvelope[]> {
@@ -864,45 +720,15 @@ export class EdgeBookStore {
   }
 
   async createSession(input: { authMethod?: LocalUserSession["auth_method"]; ttlMs?: number } = {}): Promise<LocalUserSession> {
-    const identity = await this.identity();
-    const stamp = now();
-    const session: LocalUserSession = {
-      session_id: randomId("session"),
-      owner_agent_id: identity.agent_id,
-      created_at: stamp,
-      expires_at: new Date(Date.now() + (input.ttlMs ?? 8 * 60 * 60 * 1000)).toISOString(),
-      last_seen_at: stamp,
-      auth_method: input.authMethod ?? "local-owner-token",
-      csrf_token_hash: randomId("csrf"),
-      revoked_at: ""
-    };
-    const sessions = await this.sessions();
-    sessions[session.session_id] = session;
-    await this.saveSessions(sessions);
-    await this.audit("session.create", identity.agent_id, { session_id: session.session_id, auth_method: session.auth_method });
-    return session;
+    return createSession(this, input);
   }
 
   async requireSession(sessionId: string): Promise<LocalUserSession> {
-    const sessions = await this.sessions();
-    const session = sessions[sessionId];
-    if (!session) throw new EdgeBookError("unauthorized", "Missing or unknown web session");
-    if (session.revoked_at) throw new EdgeBookError("unauthorized", "Web session was revoked");
-    if (Date.parse(session.expires_at) <= Date.now()) throw new EdgeBookError("unauthorized", "Web session expired");
-    session.last_seen_at = now();
-    sessions[sessionId] = session;
-    await this.saveSessions(sessions);
-    return session;
+    return requireSession(this, sessionId);
   }
 
   async revokeSession(sessionId: string): Promise<void> {
-    const sessions = await this.sessions();
-    const session = sessions[sessionId];
-    if (!session) return;
-    session.revoked_at = now();
-    sessions[sessionId] = session;
-    await this.saveSessions(sessions);
-    await this.audit("session.revoke", session.owner_agent_id, { session_id: sessionId });
+    return revokeSession(this, sessionId);
   }
 
   async posts(): Promise<Record<string, EdgeBookPost>> {
