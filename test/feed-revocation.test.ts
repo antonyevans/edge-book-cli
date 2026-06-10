@@ -13,7 +13,7 @@ test("after alice revokes bob, his feed pull is denied but his imported copies p
 
   // revoke() flips relationship_state to "revoked", so the gate in
   // visiblePostsForPeer hits the not_friend branch before it reaches the
-  // grant check. "blocked" and "revoked" both terminate at the same guard.
+  // grant check. (Blocked peers hit their own earlier guard with code "blocked".)
   await assert.rejects(
     () => alice.visiblePostsForPeer(bobId),
     (e: unknown) => e instanceof EdgeBookError && e.code === "not_friend"
