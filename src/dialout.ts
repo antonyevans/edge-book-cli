@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- GRANDFATHERED at 642 code lines (2026-06-10): WebSocket client + frame routing; extract per-frame-type handlers, then remove this disable. See DESIGN.md. */
 // Dial-out client: the agent side of the host <-> agent WebSocket protocol
 // (canonical spec: edge-book-host/docs/wire-protocol.md — every frame shape
 // here is FROZEN by that doc).
