@@ -15,131 +15,23 @@ import { realpathSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { broadcastPost, deliverToEndpoint, deliverToPeer, parseHome, parseHost, readEnvelope, relayBaseFromHost, requireArg, takeBoolFlag, takeFlag, takeRepeated, takeRepeatedKV } from "./cli-shared.ts";
+import type { CliContext, CliResult } from "./cli-shared.ts";
 import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
-import type { DialoutSocket } from "./dialout.ts";
 import type { SessionsRevokeFrame } from "./dialout-key.ts";
 import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash, defaultProfile, slugifyHandle } from "./edge-book.ts";
 import { renderUsage } from "./commands-doc.ts";
-import type { FieldVisibility, FriendRequestBody, SocialLink } from "./edge-book.ts";
-import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
+import type { FieldVisibility, FriendRequestBody } from "./edge-book.ts";
+import { postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
 import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
 import { makeNotifyOnEnvelope, resolveNotifyCmd } from "./notify.ts";
 import { ensureNotifierCron, defaultHermesRunner } from "./host-cron.ts";
 
 export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
-
-export interface CliContext {
-  home?: string;
-  defaultHost?: string;
-  textOnly?: boolean;
-  socketFactory?: (url: string) => DialoutSocket;
-}
-
-export interface CliResult {
-  text: string;
-  json?: unknown;
-}
+export type { CliContext, CliResult } from "./cli-shared.ts";
 
 function usage(): string {
   return renderUsage();
-}
-
-function takeFlag(args: string[], name: string): string | undefined {
-  const idx = args.indexOf(name);
-  if (idx === -1) return undefined;
-  const value = args[idx + 1];
-  args.splice(idx, 2);
-  return value;
-}
-
-function parseHome(args: string[], ctx: CliContext): string | undefined {
-  return takeFlag(args, "--home") || ctx.home;
-}
-
-function parseHost(args: string[], ctx: CliContext): string {
-  return takeFlag(args, "--host") || ctx.defaultHost || process.env.EDGE_BOOK_HOST || DEFAULT_DIALOUT_HOST;
-}
-
-// Derive the relay's https origin from the dial-out host (wss://host/agent/ws -> https://host).
-function relayBaseFromHost(host: string): string {
-  return host.replace(/\/agent\/ws\/?$/, "").replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
-}
-
-function requireArg(value: string | undefined, label: string): string {
-  if (!value) throw new EdgeBookError("missing_arg", `Missing ${label}`);
-  return value;
-}
-
-function takeBoolFlag(args: string[], name: string): boolean {
-  const idx = args.indexOf(name);
-  if (idx === -1) return false;
-  args.splice(idx, 1);
-  return true;
-}
-
-// Collect every `--social label=value` occurrence (repeatable), removing them.
-function takeRepeatedKV(args: string[], flag: string): Array<{ label: string; value: string }> {
-  const out: Array<{ label: string; value: string }> = [];
-  let idx: number;
-  while ((idx = args.indexOf(flag)) !== -1) {
-    const raw = args[idx + 1] ?? "";
-    args.splice(idx, 2);
-    const eq = raw.indexOf("=");
-    if (eq === -1) throw new EdgeBookError("bad_social", `--social expects label=value, got "${raw}"`);
-    out.push({ label: raw.slice(0, eq), value: raw.slice(eq + 1) });
-  }
-  return out;
-}
-
-// Collect every `--flag value` occurrence (repeatable plain string), removing them.
-function takeRepeated(args: string[], flag: string): string[] {
-  const out: string[] = [];
-  let idx: number;
-  while ((idx = args.indexOf(flag)) !== -1) {
-    out.push(args[idx + 1] ?? "");
-    args.splice(idx, 2);
-  }
-  return out;
-}
-
-async function readEnvelope(filePath: string) {
-  return JSON.parse(await fs.readFile(path.resolve(filePath), "utf8"));
-}
-
-async function deliverToEndpoint(envelope: Awaited<ReturnType<EdgeBookStore["signEnvelope"]>>, endpoint: string): Promise<string> {
-  await postEnvelope(endpoint, envelope);
-  return `Delivered ${envelope.type} to ${endpoint}`;
-}
-
-async function deliverToPeer(store: EdgeBookStore, envelope: Awaited<ReturnType<EdgeBookStore["signEnvelope"]>>, peerAgentId: string): Promise<string> {
-  const contacts = await store.contacts();
-  const contact = contacts[peerAgentId];
-  const direct = contact?.known_endpoints.find((entry) => entry.mode === "direct")?.endpoint;
-  if (direct) return deliverToEndpoint(envelope, direct);
-  const relay = contact?.known_endpoints.find((entry) => entry.mode === "relay")?.endpoint;
-  if (relay) {
-    await postRelayEnvelope(relay, peerAgentId, envelope);
-    return `Queued ${envelope.type} via relay ${relay}`;
-  }
-  throw new EdgeBookError("no_route", `No direct or relay endpoint for ${peerAgentId}`);
-}
-
-/** Broadcast a signed post to all friends via the mailbox. Returns the number of deliveries attempted. */
-async function broadcastPost(
-  store: EdgeBookStore,
-  host: string,
-  socketFactory: CliContext["socketFactory"],
-  post: Parameters<EdgeBookStore["signPostPublishEnvelope"]>[0]["post"],
-): Promise<number> {
-  const contacts = await store.contacts();
-  const friends = Object.values(contacts).filter((c) => c.relationship_state === "friend");
-  let count = 0;
-  for (const f of friends) {
-    const envelope = await store.signPostPublishEnvelope({ to_agent_id: f.peer_agent_id, post });
-    await deliverEnvelopeViaMailbox({ home: store.home, host, socketFactory, envelope });
-    count++;
-  }
-  return count;
 }
 
 function serverAddress(server: { address(): string | net.AddressInfo | null }): string {
