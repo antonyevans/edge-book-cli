@@ -319,6 +319,40 @@ export interface FriendRequestBody {
   invite_code?: string; // present when the requester used an invite link carrying a code
 }
 
+// ── Generic inbound notifications (ea-claude-125) ──────────────────────────
+// Edge Book stays transport-free: it renders a transport-agnostic intent describing
+// "notify the human", and an entry point (dial-out, server) delivers it via a
+// host-provided notify command. A per-type registry decides notify-vs-silent and
+// renders the message — adding a new inbound format = one registry row.
+export interface NotificationIntent {
+  kind: string;            // envelope.type
+  message: string;         // pre-rendered, human-readable, safe to display
+  from_id: string;         // envelope.from_agent_id
+  from_name?: string;      // resolved display_name (best-effort)
+  dedup_key: string;       // stable per logical notification (default: message_id)
+  meta?: Record<string, string>; // extra type-specific fields for the host command env
+}
+
+type NotifyPolicy = (
+  env: MessageEnvelope,
+  store: EdgeBookStore,
+) => Promise<NotificationIntent | null>; // null = silent
+
+const NOTIFY_POLICIES: Partial<Record<MessageEnvelope["type"], NotifyPolicy>> = {
+  friend_request: async (env) => {
+    const body = env.body as unknown as FriendRequestBody;
+    const name = body.card?.display_name || env.from_agent_id;
+    const note = body.note ? ` — “${body.note}”` : "";
+    return {
+      kind: "friend_request",
+      from_id: env.from_agent_id,
+      from_name: body.card?.display_name,
+      message: `${name} wants to connect on Edge Book${note}. Reply “yes” to connect, or ignore to leave it pending.`,
+      dedup_key: env.message_id,
+    };
+  },
+};
+
 export interface ReportRecord {
   report_id: string;
   peer_agent_id: string;
@@ -2329,6 +2363,15 @@ export class EdgeBookStore {
     if (envelope.type === "escalation") return this.receiveEscalation(envelope);
     if (envelope.type === "escalation_response") return this.applyEscalationResponse(envelope);
     throw new EdgeBookError("unsupported_envelope", `Unsupported envelope type: ${envelope.type}`);
+  }
+
+  // Compute the transport-free notification intent for an applied inbound envelope,
+  // or null when the type is silent / unregistered. Delivery (invoking the host
+  // notify command) is the entry point's job — this stays transport-free.
+  async notificationIntent(envelope: MessageEnvelope): Promise<NotificationIntent | null> {
+    const policy = NOTIFY_POLICIES[envelope.type];
+    if (!policy) return null;
+    return policy(envelope, this);
   }
 
   async audit(action: string, peerAgentId: string, details: Record<string, unknown>): Promise<string> {
