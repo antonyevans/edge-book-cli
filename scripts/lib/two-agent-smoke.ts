@@ -30,6 +30,10 @@ export interface AgentRuntime {
 export interface SmokeTransport {
   name: string;
   deliver(from: AgentRuntime, to: AgentRuntime, envelope: MessageEnvelope, applied: () => Promise<boolean>): Promise<void>;
+  // Optional browser-path fetch: pair a reader session for `agent` against the
+  // host and GET `apiPath` through the host's wss proxy. Undefined on
+  // transports with no host (local in-process).
+  fetchAs?(agent: AgentRuntime, apiPath: string): Promise<{ status: number; body: unknown }>;
   close(): Promise<void>;
 }
 
@@ -180,8 +184,59 @@ export async function runSmoke(opts: SmokeOptions): Promise<SmokeResult> {
       await alice.store.createPost({ title: "Smoke post", body: "hi friends", visibility: "friends", status: "published" });
       await alice.store.issueGrant(bob.card.agent_id, ["feed.read.friends"]);
       const posts = await alice.store.visiblePostsForPeer(bob.card.agent_id);
+      if (posts.length < 1) throw new Error("no friend-visible posts");
       return `${posts.length} friend-visible post(s)`;
     });
+
+    let engagedFeedItemId = "";
+
+    await step("feed-journey: bob imports alice's friend-visible posts into his feed", async () => {
+      const visible = await alice.store.visiblePostsForPeer(bob.card.agent_id);
+      const imported = await bob.store.importFeedPosts(alice.card.agent_id, visible, "direct");
+      if (imported.length !== visible.length) throw new Error(`imported ${imported.length}/${visible.length}`);
+      return `imported ${imported.length} feed item(s)`;
+    });
+
+    await step("feed-journey: bob engages (read + hide) without mutating alice's source post", async () => {
+      const items = Object.values(await bob.store.feedItems()).filter((f) => f.origin_agent_id === alice.card.agent_id);
+      if (!items.length) throw new Error("no imported items from alice");
+      const target = items[0];
+      engagedFeedItemId = target.feed_item_id;
+      const sourceBefore = JSON.stringify((await alice.store.posts())[target.post_id]);
+      const read = await bob.store.markFeedItemRead(target.feed_item_id);
+      if (read.read_state !== "read") throw new Error("read_state not set");
+      const hidden = await bob.store.hideFeedItem(target.feed_item_id, "smoke hide");
+      if (!hidden.hidden) throw new Error("hidden not set");
+      const sourceAfter = JSON.stringify((await alice.store.posts())[target.post_id]);
+      if (sourceBefore !== sourceAfter) throw new Error("engagement mutated alice's source post");
+      return "read+hide applied locally; source post untouched";
+    });
+
+    await step("feed-journey: re-import is idempotent and preserves engagement state", async () => {
+      const before = Object.keys(await bob.store.feedItems()).length;
+      const visible = await alice.store.visiblePostsForPeer(bob.card.agent_id);
+      await bob.store.importFeedPosts(alice.card.agent_id, visible, "direct");
+      const after = Object.keys(await bob.store.feedItems()).length;
+      if (after !== before) throw new Error(`dedup failed: feed item count ${before} -> ${after}`);
+      const engaged = (await bob.store.feedItems())[engagedFeedItemId];
+      if (!engaged) throw new Error("engaged feed item disappeared on re-import");
+      if (engaged.read_state !== "read" || !engaged.hidden) throw new Error("engagement state lost on re-import");
+      return "idempotent re-import; read/hidden state preserved";
+    });
+
+    if (transport.fetchAs) {
+      await step(`feed-host: bob's real /api/feed served through the host proxy (via ${transport.name})`, async () => {
+        const res = await transport.fetchAs!(bob, "/api/feed");
+        if (res.status !== 200) throw new Error(`status ${res.status}`);
+        const items = (res.body as { feed_items?: Record<string, { post_id: string }> }).feed_items ?? {};
+        const fromAlice = Object.values(await bob.store.feedItems()).filter((f) => f.origin_agent_id === alice.card.agent_id);
+        if (!fromAlice.length) throw new Error("precondition: bob has no imported items");
+        for (const f of fromAlice) {
+          if (!items[f.feed_item_id]) throw new Error(`imported item ${f.feed_item_id} missing from /api/feed over the wire`);
+        }
+        return `${Object.keys(items).length} feed item(s) over the wire, alice's import present`;
+      });
+    }
 
     await step("revoke: after revoking bob's object grant, his read is denied", async () =>
       expectDenied("revoked object read", async () => {

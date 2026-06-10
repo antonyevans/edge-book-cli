@@ -15,7 +15,7 @@ async function initStore() {
   return s;
 }
 
-test("friend antony-evans resolves a relay-served card", async () => {
+test("friend antony-evans resolves a relay-served card", async (t) => {
   const s = await initStore();
   const card = await s.writeCard();
   const srv = http.createServer((req, res) => {
@@ -23,6 +23,7 @@ test("friend antony-evans resolves a relay-served card", async () => {
     else { res.writeHead(404); res.end("{}"); }
   });
   await new Promise<void>((r) => srv.listen(0, r));
+  t.after(() => new Promise<void>((r) => srv.close(() => r())));
   const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
   const provider = makeRegistryProvider(async (t) => {
     const h = t.startsWith("registry:") ? t.slice("registry:".length) : t;
@@ -33,10 +34,9 @@ test("friend antony-evans resolves a relay-served card", async () => {
   assert.equal(out.agent_id, card.agent_id);
   const miss = await resolveTarget(s, "ghost", { providers: [provider] });
   assert.equal(miss.status, "not_found");
-  await new Promise<void>((r) => srv.close(() => r()));
 });
 
-test("a relay-served card with a forged signature surfaces loudly (not silently not_found)", async () => {
+test("a relay-served card with a forged signature surfaces loudly (not silently not_found)", async (t) => {
   const s = await initStore();
   const card = await s.writeCard();
   // Corrupt the signature to a wrong-but-valid base64url value → signature
@@ -47,6 +47,7 @@ test("a relay-served card with a forged signature surfaces loudly (not silently 
     else { res.writeHead(404); res.end("{}"); }
   });
   await new Promise<void>((r) => srv.listen(0, r));
+  t.after(() => new Promise<void>((r) => srv.close(() => r())));
   const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
   const provider = makeRegistryProvider(async (t) => {
     const h = t.startsWith("registry:") ? t.slice("registry:".length) : t;
@@ -58,5 +59,4 @@ test("a relay-served card with a forged signature surfaces loudly (not silently 
     (err: unknown) =>
       err instanceof EdgeBookError && /invalid_card|card_expired/.test(err.code),
   );
-  await new Promise<void>((r) => srv.close(() => r()));
 });
