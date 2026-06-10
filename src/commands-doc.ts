@@ -91,8 +91,12 @@ export const COMMAND_GROUPS: CommandGroup[] = [
     title: "Hosted reader",
     rows: [
       {
-        usage: "dialout [--host <wss-url>]",
+        usage: "dialout [--host <wss-url>] [--notify-cmd <cmd>] [--no-cron-install]",
         desc: "Connect to the host mailbox (keeps your reader online; leave running)",
+      },
+      {
+        usage: "ensure-notifier [--no-cron-install]",
+        desc: "Provision the host friend-request notifier (auto-runs on dialout; Hermes installs a cron)",
       },
       {
         usage: "pair [--host <wss-url>] [--ttl-ms <ms>]",
