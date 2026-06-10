@@ -88,29 +88,50 @@ export function makeHostTransport(opts: HostTransportOptions = {}): TransportFac
         const cookieHeader = () => [...cookies.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
 
         // 1) GET /pair to pick up the pair CSRF cookie.
-        const getRes = await fetch(`${base}/pair`);
+        // (Canonical pairing flow: edge-book-host/test/integration.test.ts)
+        const getRes = await fetch(`${base}/pair`, { signal: AbortSignal.timeout(15_000) });
         add(getRes);
         await getRes.text();
         const csrf = cookies.get("ebh_pair_csrf");
         if (!csrf) throw new Error("no pair CSRF cookie from host");
 
         // 2) The REAL agent mints a pairing code over its dial-out socket.
+        // client.pair() sends the pair_register WS frame and returns immediately —
+        // pair_register_ok is fire-and-forget in EdgeBookDialoutClient. Guard against
+        // the HTTP POST racing the WS frame by retrying up to 3 times with 100 ms
+        // backoff on non-303 responses (least-invasive fix; avoids touching src/).
         const registration = await client.pair();
 
-        // 3) Submit the code as the browser.
+        // 3) Submit the code as the browser, with retry for the pairing race.
         const form = new URLSearchParams({ csrf, code: registration.code, remember: "1" });
-        const postRes = await fetch(`${base}/pair`, {
-          method: "POST",
-          headers: { "content-type": "application/x-www-form-urlencoded", cookie: cookieHeader() },
-          body: form.toString(),
-          redirect: "manual",
-        });
-        add(postRes);
-        if (postRes.status !== 303) throw new Error(`pair submit failed: ${postRes.status}`);
+        let postRes!: Response;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          if (attempt > 0) await sleep(100 * attempt);
+          postRes = await fetch(`${base}/pair`, {
+            method: "POST",
+            headers: { "content-type": "application/x-www-form-urlencoded", cookie: cookieHeader() },
+            body: form.toString(),
+            redirect: "manual",
+            signal: AbortSignal.timeout(15_000),
+          });
+          add(postRes);
+          if (postRes.status === 303) break;
+        }
+        if (postRes.status !== 303) throw new Error(`pair submit failed after 3 attempts: ${postRes.status}`);
 
         // 4) Authenticated GET proxied through the host to the real agent store.
-        const r = await fetch(`${base}${apiPath}`, { headers: { cookie: cookieHeader() } });
-        return { status: r.status, body: await r.json() };
+        const r = await fetch(`${base}${apiPath}`, {
+          headers: { cookie: cookieHeader() },
+          signal: AbortSignal.timeout(15_000),
+        });
+        const text = await r.text();
+        let body: unknown;
+        try {
+          body = JSON.parse(text);
+        } catch {
+          throw new Error(`fetchAs: non-JSON response (status ${r.status}): ${text.slice(0, 200)}`);
+        }
+        return { status: r.status, body };
       },
       async close() {
         for (const c of clients.values()) await c.stop().catch(() => undefined);
