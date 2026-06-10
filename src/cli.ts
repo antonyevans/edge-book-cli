@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, deliverEnvelopeViaMailbox, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { DialoutSocket, SessionsRevokeFrame } from "./dialout.ts";
-import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash, defaultProfile } from "./edge-book.ts";
+import { loadCard, runTwoAgentHarness, EdgeBookError, EdgeBookStore, contentHash, defaultProfile, slugifyHandle } from "./edge-book.ts";
 import { renderUsage } from "./commands-doc.ts";
 import type { FieldVisibility, FriendRequestBody, SocialLink } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope, pullRelayEnvelopes, startRelayServer, startEdgeBookServer } from "./http.ts";
@@ -43,6 +43,11 @@ function parseHome(args: string[], ctx: CliContext): string | undefined {
 
 function parseHost(args: string[], ctx: CliContext): string {
   return takeFlag(args, "--host") || ctx.defaultHost || process.env.EDGE_BOOK_HOST || DEFAULT_DIALOUT_HOST;
+}
+
+// Derive the relay's https origin from the dial-out host (wss://host/agent/ws -> https://host).
+function relayBaseFromHost(host: string): string {
+  return host.replace(/\/agent\/ws\/?$/, "").replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
 }
 
 function requireArg(value: string | undefined, label: string): string {
@@ -139,7 +144,8 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   }
 
   if (command === "init") {
-    const handle = takeFlag(args, "--handle");
+    const rawHandle = takeFlag(args, "--handle");
+    const handle = rawHandle !== undefined ? slugifyHandle(rawHandle) : undefined;
     const displayName = takeFlag(args, "--name");
     const ownerLabel = takeFlag(args, "--owner");
     const shareOwner = takeBoolFlag(args, "--share-owner");
@@ -154,6 +160,43 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       `Set it: edge-book profile set --name "<you>" --bio "..." --social telegram=@you\n` +
       `Tune visibility: edge-book profile visibility bio=off telegram=public name=public`;
     return { text: note, json: identity };
+  }
+
+  if (command === "handle") {
+    const action = args.shift();
+    if (action === "set") {
+      const id = await store.setHandle(slugifyHandle(requireArg(args.shift(), "handle set <slug>")));
+      return { text: `Handle set: ${id.handle} (${id.agent_id})`, json: { handle: id.handle, agent_id: id.agent_id } };
+    }
+    if (action === "show") {
+      const id = await store.identity();
+      return { text: `${id.handle}\n${id.agent_id}`, json: { handle: id.handle, agent_id: id.agent_id } };
+    }
+    throw new EdgeBookError("unknown_action", `Unknown handle action: ${action} (use "set" or "show")`);
+  }
+
+  if (command === "identity") {
+    const action = args.shift();
+    if (action === "export") {
+      const bundle = await store.exportIdentity();
+      const p = takeFlag(args, "--path");
+      if (p) {
+        // The bundle carries the private key — write it owner-only (0o600).
+        const target = path.resolve(p);
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        await fs.writeFile(target, `${JSON.stringify(bundle, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+        return { text: `Identity exported → ${target}`, json: { path: target } };
+      }
+      return { text: JSON.stringify(bundle), json: bundle };
+    }
+    if (action === "import") {
+      const source = requireArg(args.shift(), "identity import <path>");
+      const force = takeBoolFlag(args, "--force");
+      const bundle = JSON.parse(await fs.readFile(path.resolve(source), "utf8"));
+      const id = await store.importIdentity(bundle, { force });
+      return { text: `Identity imported: ${id.handle} (${id.agent_id})`, json: { handle: id.handle, agent_id: id.agent_id } };
+    }
+    throw new EdgeBookError("unknown_action", `Unknown identity action: ${action} (use "export" or "import")`);
   }
 
   if (command === "profile") {
@@ -296,7 +339,8 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
 
   if (command === "resolve") {
     const target = requireArg(args.shift(), "target");
-    const result = await resolveTarget(store, target, { providers: defaultProviders() });
+    const relayBase = relayBaseFromHost(parseHost(args, ctx));
+    const result = await resolveTarget(store, target, { providers: defaultProviders(relayBase) });
     const label = result.agent_id ?? result.candidates?.[0]?.candidate_id ?? "";
     return { text: `${result.status}  ${label}\nnext: ${result.next_action}`, json: result };
   }

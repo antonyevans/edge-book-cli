@@ -114,10 +114,10 @@ test("Agent Card refresh rejects key mismatch", async () => {
 test("CLI can initialize and export a loadable card", async () => {
   const root = await tempRoot();
   const cardPath = path.join(root, "card.json");
-  await handleCli(["init", "--home", root, "--handle", "cli.openclaw.local"]);
+  await handleCli(["init", "--home", root, "--handle", "cli-agent"]);
   await handleCli(["card", "export", "--home", root, "--path", cardPath]);
   const card = await loadCard(cardPath);
-  assert.equal(card.handle, "cli.openclaw.local");
+  assert.equal(card.handle, "cli-agent");
 });
 
 test("doctor reports initialized store, valid card, and private identity mode", async () => {

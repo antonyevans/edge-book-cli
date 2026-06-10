@@ -197,8 +197,13 @@ export async function writeCandidate(store: EdgeBookStore, input: CandidateInput
   return candidate;
 }
 
-export function defaultProviders(registryLookup: RegistryLookup = async () => null): ResolverProvider[] {
-  return [localContactProvider, inviteProvider, cardUrlProvider, cardFileProvider, makeRegistryProvider(registryLookup)];
+export function defaultProviders(relayBase?: string): ResolverProvider[] {
+  const lookup: RegistryLookup = async (target) => {
+    if (!relayBase) return null;
+    const slug = target.startsWith("registry:") ? target.slice("registry:".length) : target;
+    return `${relayBase.replace(/\/$/, "")}/handle/${encodeURIComponent(slug)}`;
+  };
+  return [localContactProvider, inviteProvider, cardUrlProvider, cardFileProvider, makeRegistryProvider(lookup)];
 }
 
 export interface ResolveOptions {
@@ -255,20 +260,32 @@ export async function promoteCandidate(store: EdgeBookStore, candidateId: string
 
 export type RegistryLookup = (handle: string) => Promise<string | null>; // returns a loadCard-able target
 
+// Bare-handle slug shape: lowercase alphanumerics + internal hyphens, 3–30 chars.
+const HANDLE_SLUG = /^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/;
+
 export function makeRegistryProvider(lookup: RegistryLookup): ResolverProvider {
   return {
     name: "registry",
     priority: 50,
     async resolve(_store, target) {
-      if (!target.startsWith("registry:")) return null;
+      const isExplicit = target.startsWith("registry:");
+      const slug = isExplicit ? target.slice("registry:".length) : target;
+      if (!isExplicit && !HANDLE_SLUG.test(slug)) return null; // only bare slugs route here
       const cardTarget = await lookup(target);
       if (!cardTarget) return null;
-      const card = await loadCard(cardTarget);
+      // A registry miss (404/unreachable) means "not in registry" — fall through, don't crash resolve.
+      let card;
+      try {
+        card = await loadCard(cardTarget); // validateCard inside (sig + expiry)
+      } catch (e) {
+        if (e instanceof EdgeBookError && e.code === "card_fetch_failed") return null; // genuine registry miss → fall through
+        throw e; // invalid_card / card_expired → surface the forgery loudly
+      }
       return {
         kind: "card",
         card,
         agent_id: card.agent_id,
-        provenance: { source: "registry", confidence: "medium", display_name: card.handle, reason: "registry handle lookup" },
+        provenance: { source: "registry", confidence: "medium", display_name: card.handle, reason: "handle registry lookup" },
       };
     },
   };

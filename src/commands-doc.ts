@@ -29,6 +29,27 @@ export const COMMAND_GROUPS: CommandGroup[] = [
     ],
   },
   {
+    title: "Handle / Identity",
+    rows: [
+      {
+        usage: "handle set <slug>",
+        desc: "Claim a unique human handle (replaces the default)",
+      },
+      {
+        usage: "handle show",
+        desc: "Show your handle + DID fingerprint",
+      },
+      {
+        usage: "identity export [--path <file>]",
+        desc: "Export your identity keypair to carry to a new device",
+      },
+      {
+        usage: "identity import <path> [--force]",
+        desc: "Restore an exported identity (same DID, same handle)",
+      },
+    ],
+  },
+  {
     title: "Profile",
     rows: [
       {

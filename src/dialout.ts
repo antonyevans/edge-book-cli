@@ -140,6 +140,13 @@ export function channelIdForKey(key: DialoutKey): string {
   return crypto.createHash("sha256").update(key.agent_key).digest("hex");
 }
 
+// Decide whether the agent should claim a handle with the relay on connect.
+// Skip the default placeholder and any handle that isn't a valid slug — the
+// slug rule mirrors isValidHandle in edge-book.ts.
+export function shouldClaimHandle(handle: string | undefined): boolean {
+  return !!handle && handle !== "agent.openclaw.local" && /^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/.test(handle);
+}
+
 async function chmodBestEffort(file: string, mode: number): Promise<void> {
   if (process.platform === "win32") return;
   try {
@@ -521,6 +528,25 @@ export class EdgeBookDialoutClient {
     if ((frame as { type?: string }).type === "hello_ok") {
       this.opened?.resolve();
       this.opened = undefined;
+      // Best-effort: auto-claim a real handle so peers can find this agent.
+      // A claim failure (or default/invalid handle) never breaks the connection
+      // or mail delivery — mail still routes by DID regardless.
+      try {
+        const identity = await this.store.identity();
+        if (shouldClaimHandle(identity.handle)) {
+          const claim = await this.store.buildHandleClaim();
+          this.send({
+            type: "handle_claim",
+            request_id: `hc-${claim.claimed_at}`,
+            handle: claim.handle,
+            card: claim.card,
+            claimed_at: claim.claimed_at,
+            claim_sig: claim.claim_sig
+          });
+        }
+      } catch {
+        /* best-effort: handle claim is non-fatal, mail still routes by DID */
+      }
       return;
     }
     if ((frame as { type?: string; error?: string }).type === "hello_err") {
@@ -583,6 +609,7 @@ export class EdgeBookDialoutClient {
       await this.handleMailboxDeliver(frame as unknown as MailboxDeliverFrame);
       return;
     }
+    if (frameType === "handle_claim_ok" || frameType === "handle_claim_err") return;
     if (frameType === "error") return;
     if (frame.type !== "host.api.request" && frame.type !== "api_request") return;
     const response = await this.handleApiRequest(frame);

@@ -524,6 +524,17 @@ export function randomId(prefix: string): string {
   return `${prefix}_${crypto.randomBytes(16).toString("base64url")}`;
 }
 
+// Human-handle slug rules. MUST match the host's isValidSlug in
+// edge-book-host/src/handles.ts (same regex + reserved set).
+const HANDLE_SLUG = /^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/;
+const RESERVED_HANDLES = new Set(["add", "healthz", "metrics", "agent", "api", "handle", "auth"]);
+export function isValidHandle(handle: string): boolean {
+  return HANDLE_SLUG.test(handle) && !RESERVED_HANDLES.has(handle);
+}
+export function slugifyHandle(input: string): string {
+  return input.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
+}
+
 function stableIdFromPublicKey(publicKeyPem: string): string {
   const digest = crypto.createHash("sha256").update(publicKeyPem).digest("base64url").slice(0, 32);
   return `did:openclaw:${digest}`;
@@ -806,6 +817,43 @@ export class EdgeBookStore {
     return identity;
   }
 
+  // Set a user-chosen unique handle. Re-signs the card; does NOT rotate keys.
+  async setHandle(handle: string): Promise<LocalIdentity> {
+    if (!isValidHandle(handle)) {
+      throw new EdgeBookError("invalid_handle", `invalid_handle: must be 3-30 chars [a-z0-9-], not reserved: ${handle}`);
+    }
+    const identity = await this.identity();
+    identity.handle = handle;
+    identity.updated_at = now();
+    await writeJson(this.file(IDENTITY_FILE), identity, 0o600);
+    await this.writeCard();
+    await this.audit("identity.set_handle", identity.agent_id, { handle });
+    return identity;
+  }
+
+  // Portable identity bundle (the DID keypair + chosen handle). Carry to a new
+  // device → same DID → relay handle keeps resolving to you (spec-096).
+  async exportIdentity(): Promise<{ schema: "edge-book-identity-export/0.1"; identity: LocalIdentity }> {
+    return { schema: "edge-book-identity-export/0.1", identity: await this.identity() };
+  }
+
+  async importIdentity(bundle: { identity: LocalIdentity }, opts: { force?: boolean } = {}): Promise<LocalIdentity> {
+    await ensureHome(this.home);
+    const existing = await readJson<LocalIdentity | null>(this.file(IDENTITY_FILE), null);
+    if (existing && !opts.force) throw new EdgeBookError("identity_exists", `identity_exists: an identity already exists at ${this.home} (use --force to overwrite)`);
+    const id = bundle.identity;
+    if (!id?.public_key_pem || id.agent_id !== stableIdFromPublicKey(id.public_key_pem)) {
+      throw new EdgeBookError("invalid_import", "Bundle agent_id does not match its public key");
+    }
+    await writeJson(this.file(IDENTITY_FILE), id, 0o600);
+    if (!(await readJson<unknown | null>(this.file(CONTACTS_FILE), null))) await writeJson(this.file(CONTACTS_FILE), {});
+    if (!(await readJson<unknown | null>(this.file(GRANTS_FILE), null))) await writeJson(this.file(GRANTS_FILE), {});
+    if (!(await readJson<unknown | null>(this.file(SEEN_MESSAGES_FILE), null))) await writeJson(this.file(SEEN_MESSAGES_FILE), []);
+    await this.writeCard();
+    await this.audit("identity.import", id.agent_id, { handle: id.handle });
+    return id;
+  }
+
   async config(): Promise<EdgeBookConfig> {
     return readJson<EdgeBookConfig>(this.file(CONFIG_FILE), {});
   }
@@ -861,6 +909,19 @@ export class EdgeBookStore {
     const card = await this.buildCard(cardUrl);
     await writeJson(this.file(CARD_FILE), card);
     return card;
+  }
+
+  // Build a signed handle claim for the relay registry (spec-096). The relay
+  // verifies claim_sig + the card against the identity key before binding.
+  async buildHandleClaim(): Promise<{ handle: string; agent_did: string; card: AgentCard; claimed_at: number; claim_sig: string }> {
+    const identity = await this.identity();
+    if (!isValidHandle(identity.handle)) {
+      throw new EdgeBookError("invalid_handle", `invalid_handle: set a handle first (current: ${identity.handle})`);
+    }
+    const card = await loadCard(this.file(CARD_FILE)); // current signed card
+    const claimed_at = Date.now();
+    const claim_sig = signPayload({ handle: identity.handle, agent_did: identity.agent_id, claimed_at }, identity.private_key_pem);
+    return { handle: identity.handle, agent_did: identity.agent_id, card, claimed_at, claim_sig };
   }
 
   // The friend-only profile: every field whose visibility resolves to "friends"
@@ -2915,6 +2976,12 @@ export class EdgeBookStore {
 
 export function validateCard(card: AgentCard): void {
   if (card.schema !== "openclaw-agent-card/0.1") throw new EdgeBookError("invalid_card", "Unsupported Agent Card schema");
+  if (card.expires_at) {
+    const exp = Date.parse(card.expires_at);
+    if (!Number.isNaN(exp) && exp <= Date.now()) {
+      throw new EdgeBookError("card_expired", "Card/invite expired — ask the peer for a fresh handle or invite");
+    }
+  }
   if (!card.agent_id || !card.public_keys?.[0]?.public_key_pem) throw new EdgeBookError("invalid_card", "Agent Card is missing identity key");
   const expectedId = stableIdFromPublicKey(card.public_keys[0].public_key_pem);
   if (card.agent_id !== expectedId) throw new EdgeBookError("invalid_card", "Agent Card agent_id does not match public key");
