@@ -49,6 +49,9 @@ export interface EdgeBookConfig {
   inbound_max_per_peer?: number;   // default 5
   inbound_max_global?: number;     // default 60
   inbound_window_ms?: number;      // default 3600000 (1h)
+  // Epoch ms when the one-time handle nudge (spec-130) was emitted. Set once,
+  // never cleared — even if the human declines, the nudge must not repeat.
+  handle_nudge_at?: number;
 }
 
 export interface LocalIdentity {

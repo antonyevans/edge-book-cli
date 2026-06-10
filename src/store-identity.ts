@@ -160,6 +160,7 @@ export async function updateConfig(store: EdgeBookStore, input: EdgeBookConfig):
   if (input.inbound_max_per_peer !== undefined) next.inbound_max_per_peer = input.inbound_max_per_peer;
   if (input.inbound_max_global !== undefined) next.inbound_max_global = input.inbound_max_global;
   if (input.inbound_window_ms !== undefined) next.inbound_window_ms = input.inbound_window_ms;
+  if (input.handle_nudge_at !== undefined) next.handle_nudge_at = input.handle_nudge_at;
   await writeJson(store.file(CONFIG_FILE), next);
   return next;
 }

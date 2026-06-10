@@ -14,6 +14,7 @@ import net from "node:net";
 import { fileURLToPath } from "node:url";
 import { parseHome, parseHost, requireArg, takeBoolFlag, takeFlag } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
+import { maybeAppendHandleNudge } from "./handle-nudge.ts";
 import { handleIdentityCli } from "./cli-identity.ts";
 import { handleSocialCli } from "./cli-social.ts";
 import { handleTaxonomyCli } from "./cli-taxonomy.ts";
@@ -52,7 +53,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   if (identityResult) return identityResult;
 
   const socialResult = await handleSocialCli(command, args, ctx, home, store);
-  if (socialResult) return socialResult;
+  if (socialResult) return maybeAppendHandleNudge(store, command, socialResult);
 
   if (command === "serve") {
     const host = takeFlag(args, "--host") || "127.0.0.1";
@@ -174,7 +175,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   }
 
   const taxonomyResult = await handleTaxonomyCli(command, args, ctx, store);
-  if (taxonomyResult) return taxonomyResult;
+  if (taxonomyResult) return maybeAppendHandleNudge(store, command, taxonomyResult);
 
   throw new EdgeBookError("unknown_command", usage());
 }

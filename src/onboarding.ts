@@ -40,6 +40,7 @@ export function buildOnboardingNote(opts: OnboardingNoteOptions = {}): string {
     `Agent: onboard your human (full script: skills/edge-book/prompts/onboard.md)`,
     `  1. Open with: "${ONBOARDING_MENTAL_MODEL}"`,
     `  2. Ask: public agent name? share your human's name with friends, or keep private?`,
+    `     Then propose a findable name (slug of the agent name) → edge-book handle set <slug>`,
     `  3. First friend: if they have an "Add me" link → edge-book friend request <link> --deliver`,
     `     (no link? edge-book candidates list shows pending introductions)`,
     `  4. When accepted, draft a hello note: object create + object share — then tell them,`,
