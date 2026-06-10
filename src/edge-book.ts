@@ -6,6 +6,14 @@ import path from "node:path";
 // All shared type definitions (and EdgeBookError) live in types.ts; this file
 // re-exports them so existing importers of "./edge-book.ts" keep working.
 export * from "./types.ts";
+export { resolveHome, randomId, readJson, writeJson } from "./fs-json.ts";
+export { isValidHandle, slugifyHandle } from "./handles.ts";
+export { contentHash } from "./crypto.ts";
+export { defaultProfile, resolveFieldVisibility, resolveSocialVisibility } from "./profile.ts";
+import { resolveHome, randomId, readJson, writeJson, now, ensureHome, chmodBestEffort, appendJsonl, readJsonl } from "./fs-json.ts";
+import { isValidHandle, slugifyHandle } from "./handles.ts";
+import { contentHash, stableIdFromPublicKey, canonicalize, withoutSignature, signPayload, verifyPayload, relationshipId } from "./crypto.ts";
+import { defaultProfile, resolveFieldVisibility, resolveSocialVisibility, projectProfileFields } from "./profile.ts";
 import { EPHEMERAL_TTL_POLICY, EdgeBookError, POST_TAXONOMY, classOf } from "./types.ts";
 import type { RelationshipState, TransportMode, EdgeBookOptions, EdgeBookConfig, LocalIdentity, FieldVisibility, SocialLink, IdentityProfile, FriendProfile, AgentCard, AgentContactRecord, RelationshipEvent, CapabilityGrant, SharedObjectAttachment, SharedObject, ObjectShareBody, ResultAttestation, StrongRef, Endorsement, Signal, EphemeralType, EphemeralPost, Answer, ReceivedPost, CapabilityAdvertisement, ObjectRevokeBody, MessageEnvelope, FriendRequestBody, NotificationIntent, ReportRecord, InviteCode, FriendResponseBody, ProfileShareBody, EdgeBookVisibility, EdgeBookPostStatus, EdgeBookPostKind, LocalUserSession, EdgeBookPost, FeedItem, ApprovalRequest, EscalationKind, EscalationStatus, Escalation, EscalationBody, EscalationResponseBody, ContactMute, PostType } from "./types.ts";
 
@@ -121,177 +129,8 @@ const RECEIVED_POSTS_FILE = "received-posts.json";
 const DEFAULT_SIGNAL_TTL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_EPHEMERAL_TTL_MS = 24 * 60 * 60 * 1000;
 
-export function resolveHome(home?: string): string {
-  if (home?.trim()) return path.resolve(home.trim());
-  if (process.env.EDGE_BOOK_HOME?.trim()) return path.resolve(process.env.EDGE_BOOK_HOME.trim());
-  return path.join(os.homedir(), ".openclaw", "edge-book");
-}
-
-function now(): string {
-  return new Date().toISOString();
-}
-
-export function randomId(prefix: string): string {
-  return `${prefix}_${crypto.randomBytes(16).toString("base64url")}`;
-}
-
-// Human-handle slug rules. MUST match the host's isValidSlug in
-// edge-book-host/src/handles.ts (same regex + reserved set).
-const HANDLE_SLUG = /^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/;
-const RESERVED_HANDLES = new Set(["add", "healthz", "metrics", "agent", "api", "handle", "auth"]);
-export function isValidHandle(handle: string): boolean {
-  return HANDLE_SLUG.test(handle) && !RESERVED_HANDLES.has(handle);
-}
-export function slugifyHandle(input: string): string {
-  return input.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 30);
-}
-
-function stableIdFromPublicKey(publicKeyPem: string): string {
-  const digest = crypto.createHash("sha256").update(publicKeyPem).digest("base64url").slice(0, 32);
-  return `did:openclaw:${digest}`;
-}
-
-// Content address: sha256 over the canonical (key-sorted) JSON, base64url.
-export function contentHash(value: unknown): string {
-  return crypto.createHash("sha256").update(canonicalize(value)).digest("base64url");
-}
-
-
-function canonicalize(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalize).join(",")}]`;
-  const obj = value as Record<string, unknown>;
-  return `{${Object.keys(obj).sort().map((key) => `${JSON.stringify(key)}:${canonicalize(obj[key])}`).join(",")}}`;
-}
-
-function withoutSignature<T extends { signature?: string }>(value: T): Omit<T, "signature"> {
-  const clone = { ...value };
-  delete clone.signature;
-  return clone;
-}
-
-function signPayload(payload: unknown, privateKeyPem: string): string {
-  return crypto.sign(null, Buffer.from(canonicalize(payload)), privateKeyPem).toString("base64url");
-}
-
-function verifyPayload(payload: unknown, signature: string, publicKeyPem: string): boolean {
-  return crypto.verify(null, Buffer.from(canonicalize(payload)), publicKeyPem, Buffer.from(signature, "base64url"));
-}
-
-async function ensureHome(home: string): Promise<void> {
-  await fs.mkdir(home, { recursive: true });
-  await chmodBestEffort(home, 0o700);
-}
-
-export async function readJson<T>(file: string, fallback: T): Promise<T> {
-  try {
-    return JSON.parse(await fs.readFile(file, "utf8")) as T;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return fallback;
-    // Belt-and-suspenders: a read that raced a (now atomic) write could, on some
-    // filesystems, briefly observe a partial file. Retry once before failing.
-    if (error instanceof SyntaxError) {
-      try { return JSON.parse(await fs.readFile(file, "utf8")) as T; } catch { /* fall through */ }
-    }
-    throw error;
-  }
-}
-
-async function chmodBestEffort(file: string, mode: number): Promise<void> {
-  if (process.platform === "win32") return;
-  try {
-    await fs.chmod(file, mode);
-  } catch {
-    // Non-POSIX filesystems may not support chmod; doctor reports this separately.
-  }
-}
-
-export async function writeJson(file: string, value: unknown, mode?: number): Promise<void> {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  // Atomic write: a concurrent reader (the host proxies many /api/* calls at
-  // once) must never observe a half-written file. Write a unique temp then
-  // rename — rename is atomic on POSIX, so readers see the old or new file whole,
-  // never a truncation ("Unexpected end of JSON input"). Unique suffix avoids two
-  // concurrent writers clobbering the same temp.
-  const tmp = `${file}.tmp-${crypto.randomBytes(6).toString("hex")}`;
-  try {
-    await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-    if (mode !== undefined) await chmodBestEffort(tmp, mode);
-    await fs.rename(tmp, file);
-  } catch (error) {
-    await fs.rm(tmp, { force: true }).catch(() => undefined);
-    throw error;
-  }
-}
-
-async function appendJsonl(file: string, value: unknown): Promise<void> {
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  await fs.appendFile(file, `${JSON.stringify(value)}\n`, "utf8");
-}
-
-async function readJsonl<T>(file: string): Promise<T[]> {
-  try {
-    const text = await fs.readFile(file, "utf8");
-    const out: T[] = [];
-    for (const line of text.split(/\n/)) {
-      if (!line) continue;
-      // Tolerate a partial trailing line from a concurrent append — skip it
-      // rather than failing the whole read.
-      try { out.push(JSON.parse(line) as T); } catch { /* partial/corrupt line */ }
-    }
-    return out;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
-}
-
-function relationshipId(a: string, b: string): string {
-  return `rel_${crypto.createHash("sha256").update([a, b].sort().join("|")).digest("base64url").slice(0, 24)}`;
-}
-
-// Resolve the effective profile for an identity, migrating legacy
-// owner_label/share_owner_label when identity.profile is absent. Pure: callers
-// persist the result via setProfile when the user next edits (no write-on-read).
-export function defaultProfile(identity: LocalIdentity): IdentityProfile {
-  if (identity.profile) return identity.profile;
-  const visibility: Record<string, FieldVisibility> = {
-    // Migration (apply-new-default-to-all): legacy share on => name public;
-    // legacy share off/absent => name resolves to the new default "friends".
-    name: identity.share_owner_label ? "public" : "friends",
-  };
-  return {
-    name: identity.owner_label || undefined,
-    visibility,
-    profile_version: 1,
-  };
-}
-
-export function resolveFieldVisibility(profile: IdentityProfile, field: string): FieldVisibility {
-  return profile.visibility?.[field] ?? "friends";
-}
-
-export function resolveSocialVisibility(profile: IdentityProfile, label: string): FieldVisibility {
-  return profile.visibility?.[label] ?? profile.visibility?.["*"] ?? "friends";
-}
-
 // Shared Class-2 lifecycle: terminal states are preserved; otherwise past-expiry
 // becomes "expired" for hard-TTL types or "stale" for soft ones.
-// Project the visible profile fields for a given inclusion predicate. Shared by
-// buildCard (predicate: public-only) and buildFriendProfile (predicate: friends+public).
-function projectProfileFields(
-  profile: IdentityProfile,
-  includeField: (vis: FieldVisibility) => boolean,
-): { name?: string; bio?: string; location?: string; socials?: SocialLink[] } {
-  const out: { name?: string; bio?: string; location?: string; socials?: SocialLink[] } = {};
-  if (profile.name && includeField(resolveFieldVisibility(profile, "name"))) out.name = profile.name;
-  if (profile.bio && includeField(resolveFieldVisibility(profile, "bio"))) out.bio = profile.bio;
-  if (profile.location && includeField(resolveFieldVisibility(profile, "location"))) out.location = profile.location;
-  const socials = (profile.socials ?? []).filter((s) => includeField(resolveSocialVisibility(profile, s.label)));
-  if (socials.length) out.socials = socials;
-  return out;
-}
-
 export function computeLifecycle(
   expiresAt: string,
   hard: boolean,
