@@ -22,6 +22,7 @@ test("after alice revokes bob, his feed pull is denied but his imported copies p
   // The grant half of the cascade: revoke must also kill the grants, not just
   // flip relationship_state (the not_friend guard shadows the grant check above).
   const grants = Object.values(await alice.grants());
+  assert.ok(grants.length >= 1, "at least one grant exists to assert against");
   assert.ok(grants.every((g) => g.status === "revoked"), "all of alice's grants revoked");
 
   // Graceful degrade: bob's already-imported items remain in HIS local feed —
