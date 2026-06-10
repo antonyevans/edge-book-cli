@@ -21,6 +21,7 @@ import { attestations, saveAttestations, saveEndorsements, saveSignals, saveCapa
 import { objects, saveObjects, getObject, createObject, issueObjectGrant, canReadObject, readObject, readAttachmentBytes, sharedObjectsFor, shareObjectEnvelope, receiveObjectShare, revokeObjectGrant, revokeObjectEnvelope, receiveObjectRevoke } from "./store-objects.ts";
 import { posts, savePosts, feedItems, saveFeedItems, approvals, saveApprovals, contactMutes, saveContactMutes, createApproval, resolveApproval, createPost, approvePost, editPost, removePost, expirePost, ensureLocalFeedItem, visiblePostsForPeer, importFeedPosts, markFeedItemRead, hideFeedItem, muteContact, unmuteContact } from "./store-posts.ts";
 import { escalations, saveEscalations, raiseEscalation, receiveEscalation, answerEscalation, applyEscalationResponse, expireEscalations } from "./store-escalations.ts";
+import { upsertContactFromCard, setRelationship, createFriendRequest, receiveFriendRequest, pendingFriendRequests, markFriendRequestNotified, acceptFriend, rejectFriend, applyFriendResponse, buildProfileShareEnvelope, receiveProfileShare, broadcastProfileEnvelopes, revoke, block, reports, inviteCodes, mintInviteCode, reportPeer } from "./store-friends.ts";
 import { IDENTITY_FILE, CONTACTS_FILE, GRANTS_FILE, OBJECTS_FILE, ATTACHMENTS_DIR, SEEN_MESSAGES_FILE, CONFIG_FILE, RELATIONSHIP_EVENTS_FILE, MESSAGES_FILE, AUDIT_FILE, INBOX_FILE, CARD_FILE, SESSIONS_FILE, POSTS_FILE, FEED_FILE, APPROVALS_FILE, NOTIFIED_FILE, ESCALATIONS_FILE, CONTACT_MUTES_FILE, REPORTS_FILE, INVITE_CODES_FILE, INBOUND_RATE_FILE, ATTESTATIONS_FILE, ENDORSEMENTS_FILE, SIGNALS_FILE, CAPABILITIES_FILE, EPHEMERAL_FILE, ANSWERS_FILE, RECEIVED_POSTS_FILE, DEFAULT_SIGNAL_TTL_MS, DEFAULT_EPHEMERAL_TTL_MS } from "./store-files.ts";
 import { EPHEMERAL_TTL_POLICY, EdgeBookError, POST_TAXONOMY, classOf } from "./types.ts";
 import type { RelationshipState, TransportMode, EdgeBookOptions, EdgeBookConfig, LocalIdentity, FieldVisibility, SocialLink, IdentityProfile, FriendProfile, AgentCard, AgentContactRecord, RelationshipEvent, CapabilityGrant, SharedObjectAttachment, SharedObject, ObjectShareBody, ResultAttestation, StrongRef, Endorsement, Signal, EphemeralType, EphemeralPost, Answer, ReceivedPost, CapabilityAdvertisement, ObjectRevokeBody, MessageEnvelope, FriendRequestBody, NotificationIntent, ReportRecord, InviteCode, FriendResponseBody, ProfileShareBody, EdgeBookVisibility, EdgeBookPostStatus, EdgeBookPostKind, LocalUserSession, EdgeBookPost, FeedItem, ApprovalRequest, EscalationKind, EscalationStatus, Escalation, EscalationBody, EscalationResponseBody, ContactMute, PostType } from "./types.ts";
@@ -407,93 +408,15 @@ export class EdgeBookStore {
   }
 
   async upsertContactFromCard(card: AgentCard, state?: RelationshipState): Promise<AgentContactRecord> {
-    validateCard(card);
-    const contacts = await this.contacts();
-    const existing = contacts[card.agent_id];
-    if (existing?.relationship_state === "blocked" && state !== "blocked") {
-      throw new EdgeBookError("blocked_peer", "Blocked peer cannot refresh privileged contact state");
-    }
-    const stamp = now();
-    const next: AgentContactRecord = {
-      peer_agent_id: card.agent_id,
-      aliases: Array.from(new Set([...(existing?.aliases ?? []), card.handle].filter(Boolean))),
-      display_name: card.display_name,
-      // Carry the peer's shared human name (undefined if they didn't opt in, or
-      // dropped on refresh if they turned sharing off).
-      owner_label: card.owner_label,
-      // Preserve a previously-received friend profile across card refreshes.
-      ...(existing?.friend_profile ? { friend_profile: existing.friend_profile } : {}),
-      // When transitioning INTO request_received (a fresh inbound request), clear
-      // any stale notified_at so the human is re-notified. For all other state
-      // changes (card refreshes, accept, etc.) carry the stamp forward as before.
-      ...(state !== "request_received" && existing?.notified_at ? { notified_at: existing.notified_at } : {}),
-      advertised_capabilities: card.advertised_capabilities,
-      card_url: card.card_url,
-      known_endpoints: card.transports,
-      public_keys: card.public_keys,
-      relationship_state: state ?? existing?.relationship_state ?? "none",
-      capability_grants: existing?.capability_grants ?? [],
-      last_card_hash: card.card_hash,
-      last_card_version: card.card_version,
-      last_card_refresh_at: stamp,
-      last_successful_delivery_at: existing?.last_successful_delivery_at ?? "",
-      audit_refs: existing?.audit_refs ?? [],
-      created_at: existing?.created_at ?? stamp,
-      updated_at: stamp
-    };
-    contacts[card.agent_id] = next;
-    await this.saveContacts(contacts);
-    await this.audit("contact.upsert", card.agent_id, { state: next.relationship_state });
-    return next;
+    return upsertContactFromCard(this, card, state);
   }
 
   async setRelationship(peerAgentId: string, nextState: RelationshipState, type: RelationshipEvent["type"], reason = ""): Promise<RelationshipEvent> {
-    const identity = await this.identity();
-    const contacts = await this.contacts();
-    const contact = contacts[peerAgentId];
-    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
-    const previous = contact.relationship_state;
-    contact.relationship_state = nextState;
-    contact.updated_at = now();
-    contacts[peerAgentId] = contact;
-    await this.saveContacts(contacts);
-
-    const unsigned: Omit<RelationshipEvent, "signature"> = {
-      event_id: randomId("evt"),
-      type,
-      from_agent_id: identity.agent_id,
-      to_agent_id: peerAgentId,
-      relationship_id: relationshipId(identity.agent_id, peerAgentId),
-      previous_state: previous,
-      next_state: nextState,
-      human_approval_ref: "local-test-harness-or-cli",
-      reason,
-      created_at: now()
-    };
-    const event = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
-    await appendJsonl(this.file(RELATIONSHIP_EVENTS_FILE), event);
-    await this.audit(`relationship.${type}`, peerAgentId, { previous, next: nextState, reason });
-    return event;
+    return setRelationship(this, peerAgentId, nextState, type, reason);
   }
 
   async createFriendRequest(targetCard: AgentCard, note = "", inviteCode = ""): Promise<MessageEnvelope> {
-    const identity = await this.identity();
-    validateCard(targetCard);
-    const existing = (await this.contacts())[targetCard.agent_id];
-    if (existing?.relationship_state === "blocked") throw new EdgeBookError("blocked_peer", "Cannot request a blocked peer");
-    await this.upsertContactFromCard(targetCard, "request_sent");
-    await this.setRelationship(targetCard.agent_id, "request_sent", "FriendRequest", note);
-    const card = await this.writeCard();
-    const body: FriendRequestBody = { card, note, ...(inviteCode ? { invite_code: inviteCode } : {}) };
-    return this.signEnvelope({
-      type: "friend_request",
-      to_agent_id: targetCard.agent_id,
-      relationship_id: relationshipId(identity.agent_id, targetCard.agent_id),
-      capability_id: "",
-      ref: "",
-      transport: "local",
-      body: body as unknown as Record<string, unknown>
-    });
+    return createFriendRequest(this, targetCard, note, inviteCode);
   }
 
   // NOTE — concurrency + sybil-defense assumptions (v1):
@@ -532,248 +455,70 @@ export class EdgeBookStore {
   }
 
   async receiveFriendRequest(envelope: MessageEnvelope): Promise<AgentContactRecord> {
-    await this.verifyEnvelope(envelope);
-    if (envelope.type !== "friend_request") throw new EdgeBookError("wrong_message_type", "Expected friend_request envelope");
-    await this.enforceInboundRate(envelope.from_agent_id);
-    const body = envelope.body as unknown as FriendRequestBody;
-    validateCard(body.card);
-    if (body.card.agent_id !== envelope.from_agent_id) throw new EdgeBookError("agent_id_mismatch", "Friend request card does not match sender");
-    // Invite-only gate: when open_friend_requests is explicitly false, require either
-    // a prior solicited/active relationship or a valid invite code.
-    // Only "request_sent" (we reached out first, so their reply is expected) and
-    // "friend" (already connected) bypass the code requirement.  States like
-    // "rejected", "revoked", and "blocked" are NOT a bypass — those peers must
-    // supply a fresh invite code just like a cold stranger would.
-    if ((await this.config()).open_friend_requests === false) {
-      const ALLOWED_INVITE_BYPASS: RelationshipState[] = ["request_sent", "friend"];
-      const known = (await this.contacts())[envelope.from_agent_id]?.relationship_state;
-      const allowed =
-        (known !== undefined && ALLOWED_INVITE_BYPASS.includes(known)) ||
-        (body.invite_code ? await this.consumeInviteCode(body.invite_code) : false);
-      if (!allowed) {
-        await this.audit("inbound.unsolicited_dropped", envelope.from_agent_id, {});
-        throw new EdgeBookError("unsolicited_dropped", "Invite-only: unsolicited request without a valid invite code");
-      }
-    }
-    const contact = await this.upsertContactFromCard(body.card, "request_received");
-    await this.setRelationship(envelope.from_agent_id, "request_received", "FriendRequest", body.note);
-    await appendJsonl(this.file(INBOX_FILE), envelope);
-    // Dedup: if a pending friend_accept already exists for this peer (e.g. from a
-    // prior request that was revoked and re-sent with a fresh message_id), reuse it
-    // rather than accumulating stale duplicates that would each re-run acceptFriend.
-    const existingApprovals = await this.approvals();
-    const alreadyPending = Object.values(existingApprovals).some(
-      (a) => a.status === "pending" && a.type === "friend_accept" && a.object_id === envelope.from_agent_id,
-    );
-    if (!alreadyPending) {
-      await this.createApproval({
-        type: "friend_accept",
-        objectType: "contact",
-        objectId: envelope.from_agent_id,
-        summary: `Friend request from ${body.card.display_name}`,
-        riskLevel: "low",
-        requestedByAgentId: envelope.from_agent_id,
-      });
-    }
-    return contact;
+    return receiveFriendRequest(this, envelope);
   }
 
   // Inbound friend requests the human hasn't been told about yet. Empty when the
   // agent has notifications disabled. Read-only — the notifier cron consumes this.
   async pendingFriendRequests(): Promise<AgentContactRecord[]> {
-    const config = await this.config();
-    if (config.notify_on_friend_request === false) return [];
-    const contacts = await this.contacts();
-    return Object.values(contacts).filter(
-      (c) => c.relationship_state === "request_received" && !c.notified_at,
-    );
+    return pendingFriendRequests(this);
   }
 
   // Stamp a request as notified so it won't surface again (idempotent sweep,
   // mirrors expireEscalations).
   async markFriendRequestNotified(peerAgentId: string): Promise<void> {
-    const contacts = await this.contacts();
-    const contact = contacts[peerAgentId];
-    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
-    if (contact.notified_at) return;
-    contact.notified_at = now();
-    contact.updated_at = now();
-    contacts[peerAgentId] = contact;
-    await this.saveContacts(contacts);
-    await this.audit("friend.notified", peerAgentId, {});
+    return markFriendRequestNotified(this, peerAgentId);
   }
 
   async acceptFriend(peerAgentId: string, reason = "accepted"): Promise<MessageEnvelope> {
-    const identity = await this.identity();
-    const contacts = await this.contacts();
-    const contact = contacts[peerAgentId];
-    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
-    if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked_peer", "Cannot accept a blocked peer");
-    await this.setRelationship(peerAgentId, "friend", "Accept", reason);
-    // `profile.read.friend` is minted now but intentionally NOT enforced in this
-    // phase: the push exchange (profile_share) gates on relationship_state ===
-    // "friend", not on the grant. The scope is reserved so a future pull-based
-    // profile-read path (the reader `friend_accept` wiring, Plan C) can enforce
-    // it without re-granting existing friendships. Until that consumer lands it
-    // is a forward-compat token, not a live access check.
-    // `escalation.raise` lets a confirmed friend raise an escalation to this
-    // agent's human (ea-claude-094) — friending is the authorization to ask.
-    const grant = await this.issueGrant(peerAgentId, ["message.friend", "feed.read.friends", "profile.read.friend", "escalation.raise"]);
-    const card = await this.writeCard();
-    const profile = await this.buildFriendProfile();
-    return this.signEnvelope({
-      type: "friend_response",
-      to_agent_id: peerAgentId,
-      relationship_id: relationshipId(identity.agent_id, peerAgentId),
-      capability_id: grant.grant_id,
-      ref: "",
-      transport: "local",
-      body: { accepted: true, card, grant, profile, reason } satisfies FriendResponseBody
-    });
+    return acceptFriend(this, peerAgentId, reason);
   }
 
   async rejectFriend(peerAgentId: string, reason = "rejected"): Promise<MessageEnvelope> {
-    const identity = await this.identity();
-    const contacts = await this.contacts();
-    const contact = contacts[peerAgentId];
-    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
-    if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked_peer", "Cannot reject a blocked peer");
-    await this.setRelationship(peerAgentId, "rejected", "Reject", reason);
-    const card = await this.writeCard();
-    return this.signEnvelope({
-      type: "friend_response",
-      to_agent_id: peerAgentId,
-      relationship_id: relationshipId(identity.agent_id, peerAgentId),
-      capability_id: "",
-      ref: "",
-      transport: "local",
-      body: { accepted: false, card, reason } satisfies FriendResponseBody,
-    });
+    return rejectFriend(this, peerAgentId, reason);
   }
 
   async applyFriendResponse(envelope: MessageEnvelope): Promise<MessageEnvelope | null> {
-    await this.verifyEnvelope(envelope);
-    if (envelope.type !== "friend_response") throw new EdgeBookError("wrong_message_type", "Expected friend_response envelope");
-    const body = envelope.body as unknown as FriendResponseBody;
-    validateCard(body.card);
-    if (body.card.agent_id !== envelope.from_agent_id) throw new EdgeBookError("agent_id_mismatch", "Friend response card does not match sender");
-    await this.upsertContactFromCard(body.card, body.accepted ? "friend" : "rejected");
-    await this.setRelationship(envelope.from_agent_id, body.accepted ? "friend" : "rejected", body.accepted ? "Accept" : "Reject", body.reason);
-    if (body.grant) await this.storeGrant(body.grant);
-    if (body.accepted && body.profile) {
-      const publicKey = body.card.public_keys?.[0]?.public_key_pem;
-      if (!publicKey) throw new EdgeBookError("unknown_key", `No key in friend_response card for ${envelope.from_agent_id}`);
-      if (body.profile.agent_id !== envelope.from_agent_id) throw new EdgeBookError("agent_id_mismatch", "friend_response profile agent_id does not match sender");
-      validateFriendProfile(body.profile, publicKey);
-      await this.storeFriendProfile(envelope.from_agent_id, body.profile);
-    }
-    // Now that both sides are friends, send our own profile back.
-    if (body.accepted) return this.buildProfileShareEnvelope(envelope.from_agent_id);
-    return null;
+    return applyFriendResponse(this, envelope);
   }
 
   // Persist a received FriendProfile onto the peer contact (last-writer-wins by
   // profile_version). Returns true if applied, false if stale.
-  private async storeFriendProfile(peerAgentId: string, profile: FriendProfile): Promise<boolean> {
-    const contacts = await this.contacts();
-    const contact = contacts[peerAgentId];
-    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
-    const current = contact.friend_profile?.profile_version ?? -1;
-    if (profile.profile_version <= current) return false;
-    contact.friend_profile = profile;
-    contact.updated_at = now();
-    contacts[peerAgentId] = contact;
-    await this.saveContacts(contacts);
-    await this.audit("profile.received", peerAgentId, { profile_version: profile.profile_version });
-    return true;
-  }
+
 
   // Build a signed profile_share envelope carrying our current FriendProfile to a
   // confirmed friend.
   async buildProfileShareEnvelope(peerAgentId: string): Promise<MessageEnvelope> {
-    const identity = await this.identity();
-    const contacts = await this.contacts();
-    const contact = contacts[peerAgentId];
-    if (!contact || contact.relationship_state !== "friend") {
-      throw new EdgeBookError("not_friend", `Not friends with ${peerAgentId}; cannot share profile`);
-    }
-    const profile = await this.buildFriendProfile();
-    return this.signEnvelope({
-      type: "profile_share",
-      to_agent_id: peerAgentId,
-      relationship_id: relationshipId(identity.agent_id, peerAgentId),
-      capability_id: "",
-      ref: "",
-      transport: "local",
-      body: { profile } satisfies ProfileShareBody,
-    });
+    return buildProfileShareEnvelope(this, peerAgentId);
   }
 
   async receiveProfileShare(envelope: MessageEnvelope): Promise<void> {
-    await this.verifyEnvelope(envelope);
-    if (envelope.type !== "profile_share") throw new EdgeBookError("wrong_message_type", "Expected profile_share envelope");
-    const contacts = await this.contacts();
-    const contact = contacts[envelope.from_agent_id];
-    if (!contact || contact.relationship_state !== "friend") {
-      throw new EdgeBookError("not_friend", "profile_share from a non-friend");
-    }
-    const body = envelope.body as unknown as ProfileShareBody;
-    if (body.profile.agent_id !== envelope.from_agent_id) {
-      throw new EdgeBookError("agent_id_mismatch", "FriendProfile agent_id does not match sender");
-    }
-    const publicKey = contact.public_keys?.[0]?.public_key_pem;
-    if (!publicKey) throw new EdgeBookError("unknown_key", `No key for ${envelope.from_agent_id}`);
-    validateFriendProfile(body.profile, publicKey);
-    await this.storeFriendProfile(envelope.from_agent_id, body.profile);
+    return receiveProfileShare(this, envelope);
   }
 
   // Build a profile_share for every current friend (caller delivers them).
   async broadcastProfileEnvelopes(): Promise<MessageEnvelope[]> {
-    const contacts = await this.contacts();
-    const friends = Object.values(contacts).filter((c) => c.relationship_state === "friend");
-    const out: MessageEnvelope[] = [];
-    for (const friend of friends) {
-      out.push(await this.buildProfileShareEnvelope(friend.peer_agent_id));
-    }
-    return out;
+    return broadcastProfileEnvelopes(this);
   }
 
   async revoke(peerAgentId: string): Promise<void> {
-    await this.setRelationship(peerAgentId, "revoked", "Revoke", "revoked");
-    const grants = await this.grants();
-    for (const grant of Object.values(grants)) {
-      if (grant.subject_agent_id === peerAgentId || grant.issuer_agent_id === peerAgentId) {
-        grant.status = "revoked";
-        grant.revoked_at = now();
-      }
-    }
-    await this.saveGrants(grants);
+    return revoke(this, peerAgentId);
   }
 
   async block(peerAgentId: string): Promise<void> {
-    await this.setRelationship(peerAgentId, "blocked", "Block", "blocked");
+    return block(this, peerAgentId);
   }
 
   async reports(): Promise<ReportRecord[]> {
-    return readJson<ReportRecord[]>(this.file(REPORTS_FILE), []);
+    return reports(this);
   }
 
   async inviteCodes(): Promise<InviteCode[]> {
-    return readJson<InviteCode[]>(this.file(INVITE_CODES_FILE), []);
+    return inviteCodes(this);
   }
 
   async mintInviteCode(opts: { ttlMs?: number; maxUses?: number } = {}): Promise<InviteCode> {
-    const invite: InviteCode = {
-      code: randomId("invite"),
-      created_at: now(),
-      expires_at: opts.ttlMs ? new Date(Date.now() + opts.ttlMs).toISOString() : "",
-      max_uses: opts.maxUses ?? 0,
-      uses: 0,
-    };
-    const codes = await this.inviteCodes();
-    codes.push(invite);
-    await writeJson(this.file(INVITE_CODES_FILE), codes);
-    return invite;
+    return mintInviteCode(this, opts);
   }
 
   // NOTE — serial-receive assumption (v1):
@@ -782,45 +527,10 @@ export class EdgeBookStore {
   // check, and both increment — effectively spending the code twice.  This is safe for
   // a single-owner serial receive loop; a locking primitive is needed for concurrent
   // multi-machine deployments (ties to the same ea-claude-090 follow-up).
-  private async consumeInviteCode(code: string): Promise<boolean> {
-    const codes = await this.inviteCodes();
-    const idx = codes.findIndex((c) => c.code === code);
-    if (idx === -1) return false;
-    const invite = codes[idx];
-    // Check expiry
-    if (invite.expires_at && new Date(invite.expires_at) < new Date()) return false;
-    // Check max_uses (0 = unlimited)
-    if (invite.max_uses > 0 && invite.uses >= invite.max_uses) return false;
-    invite.uses += 1;
-    codes[idx] = invite;
-    await writeJson(this.file(INVITE_CODES_FILE), codes);
-    return true;
-  }
+
 
   async reportPeer(peerAgentId: string, reason = "", opts: { block?: boolean } = {}): Promise<ReportRecord> {
-    const auditRef = await this.audit("peer.reported", peerAgentId, { reason, block: Boolean(opts.block) });
-    // Attempt the block before building the record so rec.blocked reflects
-    // whether a block ACTUALLY happened (contact must exist for block() to fire).
-    let actuallyBlocked = false;
-    if (opts.block) {
-      const contacts = await this.contacts();
-      if (contacts[peerAgentId]) {
-        await this.block(peerAgentId);
-        actuallyBlocked = true;
-      }
-    }
-    const rec: ReportRecord = {
-      report_id: randomId("report"),
-      peer_agent_id: peerAgentId,
-      reason,
-      blocked: actuallyBlocked,
-      created_at: now(),
-      audit_refs: [auditRef],
-    };
-    const existingReports = await readJson<ReportRecord[]>(this.file(REPORTS_FILE), []);
-    existingReports.push(rec);
-    await writeJson(this.file(REPORTS_FILE), existingReports);
-    return rec;
+    return reportPeer(this, peerAgentId, reason, opts);
   }
 
   async issueGrant(subjectAgentId: string, scopes: string[], expiresAt = ""): Promise<CapabilityGrant> {
