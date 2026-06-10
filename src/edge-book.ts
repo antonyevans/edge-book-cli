@@ -19,6 +19,8 @@ export { runTwoAgentHarness, runFeedPrivacyHarness } from "./harness.ts";
 import { validateCard, validateFriendProfile, loadCard } from "./cards.ts";
 import { attestations, saveAttestations, saveEndorsements, saveSignals, saveCapabilities, createAttestation, verifyAttestation, verifyCapability, verifyEphemeral, verifyAnswer, verifySignal, verifyEndorsement, endorsements, createEndorsement, signals, createSignal, expireSignals, saveEphemeral, ephemeralPosts, createEphemeral, expireEphemeral, cancelEphemeral, saveAnswers, answers, createAnswer, deleteQuery, capabilities, advertiseCapability, deprecateCapability, receivedPosts, saveReceivedPosts, receivedByCategory, receivePostPublish, signPostPublishEnvelope } from "./store-taxonomy.ts";
 import { objects, saveObjects, getObject, createObject, issueObjectGrant, canReadObject, readObject, readAttachmentBytes, sharedObjectsFor, shareObjectEnvelope, receiveObjectShare, revokeObjectGrant, revokeObjectEnvelope, receiveObjectRevoke } from "./store-objects.ts";
+import { posts, savePosts, feedItems, saveFeedItems, approvals, saveApprovals, contactMutes, saveContactMutes, createApproval, resolveApproval, createPost, approvePost, editPost, removePost, expirePost, ensureLocalFeedItem, visiblePostsForPeer, importFeedPosts, markFeedItemRead, hideFeedItem, muteContact, unmuteContact } from "./store-posts.ts";
+import { escalations, saveEscalations, raiseEscalation, receiveEscalation, answerEscalation, applyEscalationResponse, expireEscalations } from "./store-escalations.ts";
 import { IDENTITY_FILE, CONTACTS_FILE, GRANTS_FILE, OBJECTS_FILE, ATTACHMENTS_DIR, SEEN_MESSAGES_FILE, CONFIG_FILE, RELATIONSHIP_EVENTS_FILE, MESSAGES_FILE, AUDIT_FILE, INBOX_FILE, CARD_FILE, SESSIONS_FILE, POSTS_FILE, FEED_FILE, APPROVALS_FILE, NOTIFIED_FILE, ESCALATIONS_FILE, CONTACT_MUTES_FILE, REPORTS_FILE, INVITE_CODES_FILE, INBOUND_RATE_FILE, ATTESTATIONS_FILE, ENDORSEMENTS_FILE, SIGNALS_FILE, CAPABILITIES_FILE, EPHEMERAL_FILE, ANSWERS_FILE, RECEIVED_POSTS_FILE, DEFAULT_SIGNAL_TTL_MS, DEFAULT_EPHEMERAL_TTL_MS } from "./store-files.ts";
 import { EPHEMERAL_TTL_POLICY, EdgeBookError, POST_TAXONOMY, classOf } from "./types.ts";
 import type { RelationshipState, TransportMode, EdgeBookOptions, EdgeBookConfig, LocalIdentity, FieldVisibility, SocialLink, IdentityProfile, FriendProfile, AgentCard, AgentContactRecord, RelationshipEvent, CapabilityGrant, SharedObjectAttachment, SharedObject, ObjectShareBody, ResultAttestation, StrongRef, Endorsement, Signal, EphemeralType, EphemeralPost, Answer, ReceivedPost, CapabilityAdvertisement, ObjectRevokeBody, MessageEnvelope, FriendRequestBody, NotificationIntent, ReportRecord, InviteCode, FriendResponseBody, ProfileShareBody, EdgeBookVisibility, EdgeBookPostStatus, EdgeBookPostKind, LocalUserSession, EdgeBookPost, FeedItem, ApprovalRequest, EscalationKind, EscalationStatus, Escalation, EscalationBody, EscalationResponseBody, ContactMute, PostType } from "./types.ts";
@@ -1389,35 +1391,35 @@ export class EdgeBookStore {
   }
 
   async posts(): Promise<Record<string, EdgeBookPost>> {
-    return readJson<Record<string, EdgeBookPost>>(this.file(POSTS_FILE), {});
+    return posts(this);
   }
 
   async savePosts(posts: Record<string, EdgeBookPost>): Promise<void> {
-    await writeJson(this.file(POSTS_FILE), posts);
+    return savePosts(this, posts);
   }
 
   async feedItems(): Promise<Record<string, FeedItem>> {
-    return readJson<Record<string, FeedItem>>(this.file(FEED_FILE), {});
+    return feedItems(this);
   }
 
   async saveFeedItems(items: Record<string, FeedItem>): Promise<void> {
-    await writeJson(this.file(FEED_FILE), items);
+    return saveFeedItems(this, items);
   }
 
   async approvals(): Promise<Record<string, ApprovalRequest>> {
-    return readJson<Record<string, ApprovalRequest>>(this.file(APPROVALS_FILE), {});
+    return approvals(this);
   }
 
   async saveApprovals(approvals: Record<string, ApprovalRequest>): Promise<void> {
-    await writeJson(this.file(APPROVALS_FILE), approvals);
+    return saveApprovals(this, approvals);
   }
 
   async contactMutes(): Promise<Record<string, ContactMute>> {
-    return readJson<Record<string, ContactMute>>(this.file(CONTACT_MUTES_FILE), {});
+    return contactMutes(this);
   }
 
   async saveContactMutes(mutes: Record<string, ContactMute>): Promise<void> {
-    await writeJson(this.file(CONTACT_MUTES_FILE), mutes);
+    return saveContactMutes(this, mutes);
   }
 
   async createApproval(input: {
@@ -1428,43 +1430,11 @@ export class EdgeBookStore {
     riskLevel?: ApprovalRequest["risk_level"];
     requestedByAgentId?: string;
   }): Promise<ApprovalRequest> {
-    const identity = await this.identity();
-    const approval: ApprovalRequest = {
-      approval_id: randomId("approval"),
-      type: input.type,
-      requested_by_agent_id: input.requestedByAgentId || identity.agent_id,
-      object_type: input.objectType,
-      object_id: input.objectId,
-      summary: input.summary,
-      risk_level: input.riskLevel || "medium",
-      status: "pending",
-      created_at: now(),
-      resolved_at: "",
-      resolved_by: "",
-      audit_refs: []
-    };
-    const approvals = await this.approvals();
-    approvals[approval.approval_id] = approval;
-    await this.saveApprovals(approvals);
-    approval.audit_refs.push(await this.audit("approval.create", approval.requested_by_agent_id, { approval_id: approval.approval_id, type: approval.type }));
-    approvals[approval.approval_id] = approval;
-    await this.saveApprovals(approvals);
-    return approval;
+    return createApproval(this, input);
   }
 
   async resolveApproval(approvalId: string, approved: boolean): Promise<ApprovalRequest> {
-    const approvals = await this.approvals();
-    const approval = approvals[approvalId];
-    if (!approval) throw new EdgeBookError("unknown_approval", `Unknown approval: ${approvalId}`);
-    if (approval.status !== "pending") throw new EdgeBookError("approval_resolved", `Approval already ${approval.status}`);
-    approval.status = approved ? "approved" : "rejected";
-    approval.resolved_at = now();
-    approval.resolved_by = "local-owner";
-    approvals[approvalId] = approval;
-    approval.audit_refs.push(await this.audit("approval.resolve", approval.requested_by_agent_id, { approval_id: approvalId, approved }));
-    approvals[approvalId] = approval;
-    await this.saveApprovals(approvals);
-    return approval;
+    return resolveApproval(this, approvalId, approved);
   }
 
   // ──────────────────────────────────────────────────────────────────────
@@ -1475,18 +1445,14 @@ export class EdgeBookStore {
   // ──────────────────────────────────────────────────────────────────────
 
   async escalations(): Promise<Record<string, Escalation>> {
-    return readJson<Record<string, Escalation>>(this.file(ESCALATIONS_FILE), {});
+    return escalations(this);
   }
 
   async saveEscalations(escalations: Record<string, Escalation>): Promise<void> {
-    await writeJson(this.file(ESCALATIONS_FILE), escalations);
+    return saveEscalations(this, escalations);
   }
 
-  private async putEscalation(escalation: Escalation): Promise<void> {
-    const all = await this.escalations();
-    all[escalation.escalation_id] = escalation;
-    await this.saveEscalations(all);
-  }
+
 
   // Raise an escalation. Omit `to` to ask your own human (local — no envelope).
   // Pass `to` (a friend's agent_id) to ask their human — returns a signed
@@ -1502,179 +1468,28 @@ export class EdgeBookStore {
     to?: string;
     ttlMs?: number;
   }): Promise<{ escalation: Escalation; envelope?: MessageEnvelope }> {
-    const identity = await this.identity();
-    const ttlMs = input.ttlMs ?? 7 * 24 * 60 * 60 * 1000; // default 7d (mailbox TTL)
-    const escalation: Escalation = {
-      escalation_id: randomId("esc"),
-      raised_by_agent_id: identity.agent_id,
-      collaborators: input.collaborators ?? [],
-      to_human_owner_id: "",
-      kind: input.kind,
-      subject: input.subject,
-      body: input.body,
-      options: input.options ?? [],
-      context_refs: input.contextRefs ?? [],
-      status: "pending",
-      risk_level: input.riskLevel ?? "medium",
-      created_at: now(),
-      expires_at: new Date(Date.now() + ttlMs).toISOString(),
-      answer_text: "",
-      answer_choice: "",
-      answered_at: "",
-      answered_by: "",
-      audit_refs: [],
-    };
-
-    if (!input.to) {
-      // Local: this agent asks its own owner.
-      escalation.to_human_owner_id = identity.owner_label || identity.agent_id;
-      escalation.audit_refs.push(await this.audit("escalation.raise", identity.agent_id, { escalation_id: escalation.escalation_id, kind: escalation.kind, local: true }));
-      await this.putEscalation(escalation);
-      return { escalation };
-    }
-
-    // Remote: ask a friend's human. Gate on friend-state + escalation.raise grant.
-    const contacts = await this.contacts();
-    const contact = contacts[input.to];
-    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${input.to}`);
-    if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked", `Peer ${input.to} is blocked`);
-    if (contact.relationship_state !== "friend") {
-      throw new EdgeBookError("not_friend", `Cannot escalate to relationship_state=${contact.relationship_state}`);
-    }
-    const grant = await this.findUsableGrant(input.to, "escalation.raise");
-    if (!grant) throw new EdgeBookError("missing_grant", `No active escalation.raise grant for ${input.to}`);
-    await this.assertGrantSignature(grant);
-
-    const envelope = await this.signEnvelope({
-      type: "escalation",
-      to_agent_id: input.to,
-      relationship_id: relationshipId(identity.agent_id, input.to),
-      capability_id: grant.grant_id,
-      ref: escalation.escalation_id,
-      transport: "local",
-      // Clone into the signed body — the local copy below mutates audit_refs,
-      // which must not retroactively alter the signed payload.
-      body: { escalation: structuredClone(escalation) } satisfies EscalationBody,
-    });
-    escalation.audit_refs.push(await this.audit("escalation.raise", input.to, { escalation_id: escalation.escalation_id, kind: escalation.kind, message_id: envelope.message_id }));
-    await this.putEscalation(escalation); // requester keeps its own copy to track
-    return { escalation, envelope };
+    return raiseEscalation(this, input);
   }
 
   // Receive a remote escalation, materialise it for this agent's human.
   async receiveEscalation(envelope: MessageEnvelope): Promise<Escalation> {
-    await this.verifyEnvelope(envelope);
-    if (envelope.type !== "escalation") throw new EdgeBookError("wrong_message_type", "Expected escalation envelope");
-    const contacts = await this.contacts();
-    const contact = contacts[envelope.from_agent_id];
-    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${envelope.from_agent_id}`);
-    if (contact.relationship_state !== "friend") {
-      throw new EdgeBookError("not_friend", `Cannot receive escalation from relationship_state=${contact.relationship_state}`);
-    }
-    const grants = await this.grants();
-    const grant = grants[envelope.capability_id];
-    if (!grant || grant.status !== "active" || grant.subject_agent_id !== envelope.from_agent_id || !grant.scopes.includes("escalation.raise")) {
-      throw new EdgeBookError("missing_grant", "Escalation does not carry an active escalation.raise grant issued to sender");
-    }
-    await this.assertGrantSignature(grant);
-
-    const identity = await this.identity();
-    const body = envelope.body as unknown as EscalationBody;
-    const incoming = body.escalation;
-    if (incoming.raised_by_agent_id !== envelope.from_agent_id) {
-      throw new EdgeBookError("agent_id_mismatch", "Escalation raised_by does not match sender");
-    }
-    // Re-stamp fields the receiver owns; keep the sender's id/content/options.
-    const escalation: Escalation = {
-      ...incoming,
-      to_human_owner_id: identity.owner_label || identity.agent_id,
-      status: "pending",
-      answer_text: "",
-      answer_choice: "",
-      answered_at: "",
-      answered_by: "",
-      audit_refs: [],
-    };
-    escalation.audit_refs.push(await this.audit("escalation.receive", envelope.from_agent_id, { escalation_id: escalation.escalation_id, kind: escalation.kind }));
-    await this.putEscalation(escalation);
-    return escalation;
+    return receiveEscalation(this, envelope);
   }
 
   // The human answers. For a remote-origin escalation, returns an
   // `escalation_response` envelope to route back to the requesting agent.
   async answerEscalation(escalationId: string, input: { text?: string; choice?: string }): Promise<Escalation & { envelope?: MessageEnvelope }> {
-    const identity = await this.identity();
-    const all = await this.escalations();
-    const escalation = all[escalationId];
-    if (!escalation) throw new EdgeBookError("unknown_escalation", `Unknown escalation: ${escalationId}`);
-    if (escalation.status !== "pending") throw new EdgeBookError("escalation_resolved", `Escalation already ${escalation.status}`);
-    if ((escalation.kind === "decision" || escalation.kind === "approval") && escalation.options.length > 0) {
-      if (!input.choice || !escalation.options.includes(input.choice)) {
-        throw new EdgeBookError("invalid_option", `Answer must be one of the offered options: ${escalation.options.join(", ")}`);
-      }
-    }
-    escalation.status = "answered";
-    escalation.answer_text = input.text ?? "";
-    escalation.answer_choice = input.choice ?? "";
-    escalation.answered_at = now();
-    escalation.answered_by = "local-owner";
-    escalation.audit_refs.push(await this.audit("escalation.answer", escalation.raised_by_agent_id, { escalation_id: escalationId }));
-    all[escalationId] = escalation;
-    await this.saveEscalations(all);
-
-    // Route back only if a *remote* agent raised this (we are answering on behalf
-    // of our own human for someone else's request).
-    let envelope: MessageEnvelope | undefined;
-    if (escalation.raised_by_agent_id !== identity.agent_id) {
-      envelope = await this.signEnvelope({
-        type: "escalation_response",
-        to_agent_id: escalation.raised_by_agent_id,
-        relationship_id: relationshipId(identity.agent_id, escalation.raised_by_agent_id),
-        capability_id: "",
-        ref: escalationId,
-        transport: "local",
-        body: {
-          escalation_id: escalationId,
-          status: escalation.status,
-          answer_text: escalation.answer_text,
-          answer_choice: escalation.answer_choice,
-          answered_at: escalation.answered_at,
-        } satisfies EscalationResponseBody,
-      });
-    }
-    return { ...escalation, envelope };
+    return answerEscalation(this, escalationId, input);
   }
 
   // The requesting agent applies a routed-back answer to its own copy.
   async applyEscalationResponse(envelope: MessageEnvelope): Promise<Escalation> {
-    await this.verifyEnvelope(envelope);
-    if (envelope.type !== "escalation_response") throw new EdgeBookError("wrong_message_type", "Expected escalation_response envelope");
-    const body = envelope.body as unknown as EscalationResponseBody;
-    const all = await this.escalations();
-    const escalation = all[body.escalation_id];
-    if (!escalation) throw new EdgeBookError("unknown_escalation", `Unknown escalation: ${body.escalation_id}`);
-    escalation.status = body.status;
-    escalation.answer_text = body.answer_text;
-    escalation.answer_choice = body.answer_choice;
-    escalation.answered_at = body.answered_at;
-    escalation.answered_by = "local-owner";
-    escalation.audit_refs.push(await this.audit("escalation.response", envelope.from_agent_id, { escalation_id: body.escalation_id, status: body.status }));
-    all[body.escalation_id] = escalation;
-    await this.saveEscalations(all);
-    return escalation;
+    return applyEscalationResponse(this, envelope);
   }
 
   // Sweep: pending escalations past their expiry become `expired`.
   async expireEscalations(): Promise<void> {
-    const all = await this.escalations();
-    let changed = false;
-    for (const escalation of Object.values(all)) {
-      if (escalation.status === "pending" && Date.parse(escalation.expires_at) <= Date.now()) {
-        escalation.status = "expired";
-        changed = true;
-      }
-    }
-    if (changed) await this.saveEscalations(all);
+    return expireEscalations(this);
   }
 
   async createPost(input: {
@@ -1688,243 +1503,51 @@ export class EdgeBookStore {
     replyOrHelpChannel?: string;
     expiresAt?: string;
   }): Promise<EdgeBookPost> {
-    const identity = await this.identity();
-    const stamp = now();
-    const sourceBasis = input.sourceBasis || "human-authored";
-    const requestedStatus = input.status || (sourceBasis === "agent-authored" ? "pending_approval" : "draft");
-    const post: EdgeBookPost = {
-      post_id: randomId("post"),
-      author_agent_id: identity.agent_id,
-      human_owner_id: identity.owner_label || identity.agent_id,
-      kind: input.kind || "note",
-      title: input.title,
-      body: input.body,
-      tags: input.tags || [],
-      visibility: input.visibility || "private",
-      source_basis: sourceBasis,
-      status: requestedStatus,
-      created_at: stamp,
-      updated_at: stamp,
-      published_at: requestedStatus === "published" ? stamp : "",
-      expires_at: input.expiresAt || "",
-      approval_ref: "",
-      permissions_used: [],
-      audit_refs: [],
-      reply_or_help_channel: input.replyOrHelpChannel || ""
-    };
-    const posts = await this.posts();
-    posts[post.post_id] = post;
-    await this.savePosts(posts);
-    if (post.status === "pending_approval") {
-      const approval = await this.createApproval({
-        type: "publish_post",
-        objectType: "post",
-        objectId: post.post_id,
-        summary: `Publish ${post.visibility} post: ${post.title}`,
-        riskLevel: post.visibility === "public_if_enabled" ? "high" : "medium"
-      });
-      post.approval_ref = approval.approval_id;
-      posts[post.post_id] = post;
-      await this.savePosts(posts);
-    }
-    post.audit_refs.push(await this.audit("post.create", identity.agent_id, { post_id: post.post_id, status: post.status, visibility: post.visibility }));
-    posts[post.post_id] = post;
-    await this.savePosts(posts);
-    if (post.status === "published") await this.ensureLocalFeedItem(post);
-    return post;
+    return createPost(this, input);
   }
 
   async approvePost(postId: string): Promise<EdgeBookPost> {
-    const posts = await this.posts();
-    const post = posts[postId];
-    if (!post) throw new EdgeBookError("unknown_post", `Unknown post: ${postId}`);
-    if (post.status === "removed") throw new EdgeBookError("removed_post", "Cannot approve a removed post");
-    if (post.status === "expired") throw new EdgeBookError("expired_post", "Cannot approve an expired post");
-    if (post.approval_ref) await this.resolveApproval(post.approval_ref, true);
-    post.status = "published";
-    post.source_basis = post.source_basis === "agent-authored" ? "human-approved" : post.source_basis;
-    post.updated_at = now();
-    post.published_at = post.published_at || post.updated_at;
-    posts[postId] = post;
-    await this.savePosts(posts);
-    await this.ensureLocalFeedItem(post);
-    post.audit_refs.push(await this.audit("post.approve", post.author_agent_id, { post_id: postId, visibility: post.visibility }));
-    posts[postId] = post;
-    await this.savePosts(posts);
-    return post;
+    return approvePost(this, postId);
   }
 
   async editPost(postId: string, input: { title?: string; body?: string; tags?: string[]; visibility?: EdgeBookVisibility }): Promise<EdgeBookPost> {
-    const posts = await this.posts();
-    const post = posts[postId];
-    if (!post) throw new EdgeBookError("unknown_post", `Unknown post: ${postId}`);
-    if (post.status === "removed") throw new EdgeBookError("removed_post", "Cannot edit a removed post");
-    if (input.title !== undefined) post.title = input.title;
-    if (input.body !== undefined) post.body = input.body;
-    if (input.tags !== undefined) post.tags = input.tags;
-    if (input.visibility !== undefined) post.visibility = input.visibility;
-    post.status = post.status === "published" ? "edited" : post.status;
-    post.updated_at = now();
-    post.audit_refs.push(await this.audit("post.edit", post.author_agent_id, { post_id: postId }));
-    posts[postId] = post;
-    await this.savePosts(posts);
-    return post;
+    return editPost(this, postId, input);
   }
 
   async removePost(postId: string, reason = "removed by local owner"): Promise<EdgeBookPost> {
-    const posts = await this.posts();
-    const post = posts[postId];
-    if (!post) throw new EdgeBookError("unknown_post", `Unknown post: ${postId}`);
-    post.status = "removed";
-    post.updated_at = now();
-    post.audit_refs.push(await this.audit("post.remove", post.author_agent_id, { post_id: postId, reason }));
-    posts[postId] = post;
-    await this.savePosts(posts);
-    return post;
+    return removePost(this, postId, reason);
   }
 
   async expirePost(postId: string, reason = "expired"): Promise<EdgeBookPost> {
-    const posts = await this.posts();
-    const post = posts[postId];
-    if (!post) throw new EdgeBookError("unknown_post", `Unknown post: ${postId}`);
-    post.status = "expired";
-    post.updated_at = now();
-    post.audit_refs.push(await this.audit("post.expire", post.author_agent_id, { post_id: postId, reason }));
-    posts[postId] = post;
-    await this.savePosts(posts);
-    return post;
+    return expirePost(this, postId, reason);
   }
 
   async ensureLocalFeedItem(post: EdgeBookPost): Promise<FeedItem> {
-    const identity = await this.identity();
-    const items = await this.feedItems();
-    const existing = Object.values(items).find((item) => item.post_id === post.post_id && item.origin_agent_id === identity.agent_id);
-    if (existing) return existing;
-    const item: FeedItem = {
-      feed_item_id: randomId("feed"),
-      post_id: post.post_id,
-      origin_agent_id: identity.agent_id,
-      origin_home: "local",
-      relationship_id: "",
-      visibility_checked_at: now(),
-      delivery_route: "local",
-      read_state: "unread",
-      hidden: false,
-      muted_reason: "",
-      received_at: now(),
-      audit_refs: []
-    };
-    item.audit_refs.push(await this.audit("feed.local_add", identity.agent_id, { feed_item_id: item.feed_item_id, post_id: post.post_id }));
-    items[item.feed_item_id] = item;
-    await this.saveFeedItems(items);
-    return item;
+    return ensureLocalFeedItem(this, post);
   }
 
   async visiblePostsForPeer(peerAgentId: string): Promise<EdgeBookPost[]> {
-    const identity = await this.identity();
-    const contacts = await this.contacts();
-    const contact = contacts[peerAgentId];
-    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
-    if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked", `Peer ${peerAgentId} is blocked`);
-    if (contact.relationship_state !== "friend") throw new EdgeBookError("not_friend", `Feed denied for relationship_state=${contact.relationship_state}`);
-    const grants = await this.grants();
-    const grant = Object.values(grants).find((candidate) =>
-      candidate.issuer_agent_id === identity.agent_id &&
-      candidate.subject_agent_id === peerAgentId &&
-      candidate.status === "active" &&
-      candidate.scopes.includes("feed.read.friends") &&
-      (!candidate.expires_at || Date.parse(candidate.expires_at) > Date.now())
-    );
-    if (!grant) throw new EdgeBookError("missing_grant", "No active feed.read.friends grant for peer");
-    await this.assertGrantSignature(grant);
-    const posts = Object.values(await this.posts());
-    return posts
-      .filter((post) => post.visibility === "friends" && ["published", "edited"].includes(post.status))
-      .filter((post) => !post.expires_at || Date.parse(post.expires_at) > Date.now())
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    return visiblePostsForPeer(this, peerAgentId);
   }
 
   async importFeedPosts(peerAgentId: string, posts: EdgeBookPost[], route: FeedItem["delivery_route"] = "local"): Promise<FeedItem[]> {
-    const contacts = await this.contacts();
-    const contact = contacts[peerAgentId];
-    if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
-    if (contact.relationship_state !== "friend") throw new EdgeBookError("not_friend", `Cannot import feed from relationship_state=${contact.relationship_state}`);
-    const items = await this.feedItems();
-    const imported: FeedItem[] = [];
-    for (const post of posts) {
-      const existing = Object.values(items).find((item) => item.post_id === post.post_id && item.origin_agent_id === peerAgentId);
-      if (existing) {
-        imported.push(existing);
-        continue;
-      }
-      const item: FeedItem = {
-        feed_item_id: randomId("feed"),
-        post_id: post.post_id,
-        origin_agent_id: peerAgentId,
-        origin_home: route === "relay" ? "relay" : "direct",
-        relationship_id: relationshipId((await this.identity()).agent_id, peerAgentId),
-        visibility_checked_at: now(),
-        delivery_route: route,
-        read_state: "unread",
-        hidden: false,
-        muted_reason: "",
-        received_at: now(),
-        audit_refs: []
-      };
-      item.audit_refs.push(await this.audit("feed.import_item", peerAgentId, { feed_item_id: item.feed_item_id, post_id: post.post_id, route }));
-      items[item.feed_item_id] = item;
-      imported.push(item);
-    }
-    await this.saveFeedItems(items);
-    await this.audit("feed.import", peerAgentId, { count: imported.length, route });
-    return imported;
+    return importFeedPosts(this, peerAgentId, posts, route);
   }
 
   async markFeedItemRead(feedItemId: string): Promise<FeedItem> {
-    const items = await this.feedItems();
-    const item = items[feedItemId];
-    if (!item) throw new EdgeBookError("unknown_feed_item", `Unknown feed item: ${feedItemId}`);
-    item.read_state = "read";
-    item.audit_refs.push(await this.audit("feed.mark_read", item.origin_agent_id, { feed_item_id: feedItemId }));
-    items[feedItemId] = item;
-    await this.saveFeedItems(items);
-    return item;
+    return markFeedItemRead(this, feedItemId);
   }
 
   async hideFeedItem(feedItemId: string, reason = ""): Promise<FeedItem> {
-    const items = await this.feedItems();
-    const item = items[feedItemId];
-    if (!item) throw new EdgeBookError("unknown_feed_item", `Unknown feed item: ${feedItemId}`);
-    item.hidden = true;
-    item.muted_reason = reason;
-    item.audit_refs.push(await this.audit("feed.hide", item.origin_agent_id, { feed_item_id: feedItemId, reason }));
-    items[feedItemId] = item;
-    await this.saveFeedItems(items);
-    return item;
+    return hideFeedItem(this, feedItemId, reason);
   }
 
   async muteContact(peerAgentId: string, reason = ""): Promise<ContactMute> {
-    const contacts = await this.contacts();
-    if (!contacts[peerAgentId]) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
-    const mutes = await this.contactMutes();
-    const mute: ContactMute = {
-      peer_agent_id: peerAgentId,
-      muted_at: now(),
-      muted_reason: reason,
-      audit_refs: []
-    };
-    mute.audit_refs.push(await this.audit("contact.mute", peerAgentId, { reason }));
-    mutes[peerAgentId] = mute;
-    await this.saveContactMutes(mutes);
-    return mute;
+    return muteContact(this, peerAgentId, reason);
   }
 
   async unmuteContact(peerAgentId: string): Promise<void> {
-    const mutes = await this.contactMutes();
-    if (!mutes[peerAgentId]) return;
-    delete mutes[peerAgentId];
-    await this.saveContactMutes(mutes);
-    await this.audit("contact.unmute", peerAgentId, {});
+    return unmuteContact(this, peerAgentId);
   }
 
   async reviewLocalDataImport(data: Record<string, unknown>): Promise<Record<string, unknown>> {
