@@ -10,6 +10,8 @@ import type { CliContext, CliResult } from "./cli-shared.ts";
 import { deliverEnvelopeViaMailbox } from "./dialout.ts";
 import { EdgeBookError, EdgeBookStore, defaultProfile, slugifyHandle } from "./edge-book.ts";
 import type { FieldVisibility } from "./edge-book.ts";
+import { buildOnboardingNote, recordInviteCandidate } from "./onboarding.ts";
+import type { OnboardingNoteOptions } from "./onboarding.ts";
 
 export async function handleIdentityCli(command: string, args: string[], ctx: CliContext, home: string | undefined, store: EdgeBookStore): Promise<CliResult | null> {
   if (command === "init") {
@@ -20,7 +22,22 @@ export async function handleIdentityCli(command: string, args: string[], ctx: Cl
     const shareOwner = takeBoolFlag(args, "--share-owner");
     const directUrl = takeFlag(args, "--direct-url");
     const relayUrl = takeFlag(args, "--relay-url");
+    const fromInvite = takeFlag(args, "--from-invite");
     const identity = await store.init({ handle, displayName, ownerLabel, shareOwnerLabel: shareOwner, directUrl, relayUrl });
+    // spec-129: a bad invite must never block identity creation — soft-catch.
+    const onboardingOpts: OnboardingNoteOptions = {};
+    let onboardingJson: Record<string, string> | undefined;
+    if (fromInvite !== undefined) {
+      try {
+        const invite = await recordInviteCandidate(store, fromInvite);
+        onboardingOpts.invite = invite;
+        onboardingJson = { invite_candidate_id: invite.candidateId, invite_display_name: invite.displayName };
+      } catch (error) {
+        const code = error instanceof EdgeBookError ? error.code : "bad_invite";
+        onboardingOpts.inviteError = code;
+        onboardingJson = { invite_error: code };
+      }
+    }
     const note =
       `Initialized ${identity.agent_id} at ${store.home}\n\n` +
       `Two-tier profile:\n` +
@@ -32,8 +49,9 @@ export async function handleIdentityCli(command: string, args: string[], ctx: Cl
       `  Set a host notify command — Edge Book stays transport-free and pipes the message to it.\n` +
       `  edge-book dialout --notify-cmd "<deliver-to-your-channel>"\n` +
       `  (or set EDGE_BOOK_NOTIFY_CMD, or config.notify_cmd). Without it, inbound items are silent\n` +
-      `  until a fallback poller surfaces them.`;
-    return { text: note, json: identity };
+      `  until a fallback poller surfaces them.\n\n` +
+      buildOnboardingNote(onboardingOpts);
+    return { text: note, json: onboardingJson ? { ...identity, onboarding: onboardingJson } : identity };
   }
 
   if (command === "handle") {
