@@ -546,6 +546,7 @@ const SESSIONS_FILE = "web-sessions.json";
 const POSTS_FILE = "posts.json";
 const FEED_FILE = "feed-items.json";
 const APPROVALS_FILE = "approvals.json";
+const NOTIFIED_FILE = "notified.json"; // dedup ledger for delivered notifications (ea-claude-125)
 const ESCALATIONS_FILE = "escalations.json";
 const CONTACT_MUTES_FILE = "contact-mutes.json";
 const REPORTS_FILE = "reports.json";
@@ -2392,6 +2393,20 @@ export class EdgeBookStore {
     const policy = NOTIFY_POLICIES[envelope.type];
     if (!policy) return null;
     return policy(envelope, this);
+  }
+
+  // Notification dedup ledger (keyed by NotificationIntent.dedup_key). Guards
+  // against double-notify across entry points, hook+cron, and mailbox redelivery.
+  async wasNotified(dedupKey: string): Promise<boolean> {
+    const ledger = await readJson<string[]>(this.file(NOTIFIED_FILE), []);
+    return ledger.includes(dedupKey);
+  }
+
+  async recordNotified(dedupKey: string): Promise<void> {
+    const ledger = await readJson<string[]>(this.file(NOTIFIED_FILE), []);
+    if (ledger.includes(dedupKey)) return;
+    ledger.push(dedupKey);
+    await writeJson(this.file(NOTIFIED_FILE), ledger);
   }
 
   async audit(action: string, peerAgentId: string, details: Record<string, unknown>): Promise<string> {

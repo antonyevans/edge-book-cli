@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { NotificationIntent } from "./edge-book.ts";
+import type { EdgeBookStore, MessageEnvelope, NotificationIntent } from "./edge-book.ts";
 
 // Delivery of a NotificationIntent via a HOST-PROVIDED command (ea-claude-125).
 // Edge Book stays transport-free: it never knows the channel. The operator
@@ -61,4 +61,40 @@ export async function deliverNotification(intent: NotificationIntent, opts: Deli
     child.stdin?.on("error", () => undefined);
     child.stdin?.end(intent.message ?? "");
   });
+}
+
+export interface NotifyInboundResult {
+  notified: boolean;
+  reason?: string; // "silent" | "already_notified" | "no_notify_cmd" | delivery error
+}
+
+// Orchestrates one inbound envelope → notification: compute the transport-free
+// intent, dedup against the ledger, deliver via the host command, then record +
+// (for standing-state types) coordinate with the fallback cron. Errors leave the
+// item un-recorded so the cron/next attempt retries.
+export async function notifyInbound(
+  store: EdgeBookStore,
+  envelope: MessageEnvelope,
+  opts: DeliverOptions,
+): Promise<NotifyInboundResult> {
+  if (!opts.cmd || !opts.cmd.trim()) return { notified: false, reason: "no_notify_cmd" };
+
+  const intent = await store.notificationIntent(envelope);
+  if (!intent) return { notified: false, reason: "silent" };
+  if (await store.wasNotified(intent.dedup_key)) return { notified: false, reason: "already_notified" };
+
+  const res = await deliverNotification(intent, opts);
+  if (!res.delivered) {
+    await store.audit("notify.failed", intent.from_id, { kind: intent.kind, dedup_key: intent.dedup_key, error: res.error ?? "" });
+    return { notified: false, reason: res.error };
+  }
+
+  await store.recordNotified(intent.dedup_key);
+  // Standing-state coordination: stamp notified_at so the fallback `friend pending`
+  // cron skips a request the hook already delivered.
+  if (intent.kind === "friend_request") {
+    try { await store.markFriendRequestNotified(intent.from_id); } catch { /* contact may have changed */ }
+  }
+  await store.audit("notify.delivered", intent.from_id, { kind: intent.kind, dedup_key: intent.dedup_key, channel: "hook" });
+  return { notified: true };
 }
