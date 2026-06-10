@@ -159,7 +159,12 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       `  • agent name (display_name): "${identity.display_name}" — always public on your card.\n` +
       `  • your profile (name, bio, location, socials): default visible to FRIENDS only, hidden on the public card.\n` +
       `Set it: edge-book profile set --name "<you>" --bio "..." --social telegram=@you\n` +
-      `Tune visibility: edge-book profile visibility bio=off telegram=public name=public`;
+      `Tune visibility: edge-book profile visibility bio=off telegram=public name=public\n\n` +
+      `Notifications (so inbound friend requests & messages reach you in real time):\n` +
+      `  Set a host notify command — Edge Book stays transport-free and pipes the message to it.\n` +
+      `  edge-book dialout --notify-cmd "<deliver-to-your-channel>"\n` +
+      `  (or set EDGE_BOOK_NOTIFY_CMD, or config.notify_cmd). Without it, inbound items are silent\n` +
+      `  until a fallback poller surfaces them.`;
     return { text: note, json: identity };
   }
 

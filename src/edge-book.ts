@@ -29,6 +29,9 @@ export interface EdgeBookConfig {
   // Edge Book stays transport-free — the command owns the channel. May also be
   // supplied via --notify-cmd flag or EDGE_BOOK_NOTIFY_CMD env (flag > env > config).
   notify_cmd?: string;
+  // Optional whitelist of inbound kinds to notify on. When set, only these kinds
+  // produce a notification; when unset, all registered notify policies apply.
+  notify_types?: string[];
   // Abuse floor. open_friend_requests default true (treat undefined as true):
   // accept unsolicited friend requests. false => invite-only (drop unsolicited
   // requests that carry no valid invite code and have no prior relationship).
@@ -960,6 +963,7 @@ export class EdgeBookStore {
     if (input.relay_url !== undefined) next.relay_url = input.relay_url;
     if (input.notify_on_friend_request !== undefined) next.notify_on_friend_request = input.notify_on_friend_request;
     if (input.notify_cmd !== undefined) next.notify_cmd = input.notify_cmd;
+    if (input.notify_types !== undefined) next.notify_types = input.notify_types;
     if (input.open_friend_requests !== undefined) next.open_friend_requests = input.open_friend_requests;
     if (input.inbound_max_per_peer !== undefined) next.inbound_max_per_peer = input.inbound_max_per_peer;
     if (input.inbound_max_global !== undefined) next.inbound_max_global = input.inbound_max_global;
@@ -2433,7 +2437,12 @@ export class EdgeBookStore {
   async notificationIntent(envelope: MessageEnvelope): Promise<NotificationIntent | null> {
     const policy = NOTIFY_POLICIES[envelope.type];
     if (!policy) return null;
-    return policy(envelope, this);
+    const intent = await policy(envelope, this);
+    if (!intent) return null;
+    // Optional whitelist: when notify_types is set, only those kinds notify.
+    const types = (await this.config()).notify_types;
+    if (Array.isArray(types) && !types.includes(intent.kind)) return null;
+    return intent;
   }
 
   // Notification dedup ledger (keyed by NotificationIntent.dedup_key). Guards
