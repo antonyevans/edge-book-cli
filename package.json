@@ -10,6 +10,7 @@
   "scripts": {
     "build": "tsup",
     "test": "node --test test/*.test.ts",
+    "typecheck": "tsc -p . --noEmit",
     "harness": "node bin/edge-book.js harness two-agent",
     "harness:e2e": "node scripts/convergence-e2e.ts",
     "prepare": "git config core.hooksPath .githooks || true",

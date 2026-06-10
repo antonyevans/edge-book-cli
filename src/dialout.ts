@@ -286,7 +286,9 @@ function apiUrl(baseUrl: string, frame: DialoutApiRequest): string {
   return `${baseUrl}${normalizeApiPath(frame.path)}${frame.query || ""}`;
 }
 
-function requestBody(frame: DialoutApiRequest, method: string): Buffer | undefined {
+// Return type is Uint8Array<ArrayBuffer> (which Buffer.from satisfies) rather than
+// Buffer so the result is assignable to fetch's BodyInit under strict lib types.
+function requestBody(frame: DialoutApiRequest, method: string): Uint8Array<ArrayBuffer> | undefined {
   if (method === "GET" || method === "HEAD") return undefined;
   if (typeof frame.body_b64 === "string") return Buffer.from(frame.body_b64, "base64");
   return Buffer.from(JSON.stringify(frame.body ?? {}), "utf8");
