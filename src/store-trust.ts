@@ -16,10 +16,10 @@
 //     active message.friend grant on BOTH send and receive.
 import { EdgeBookStore } from "./edge-book.ts";
 import { EdgeBookError } from "./types.ts";
-import type { CapabilityGrant, FriendRequestBody, FriendResponseBody, LocalUserSession, MessageEnvelope } from "./types.ts";
+import type { AgentContactRecord, CapabilityGrant, Escalation, FriendRequestBody, FriendResponseBody, LocalUserSession, MessageEnvelope } from "./types.ts";
 import { relationshipId, signPayload, verifyPayload, withoutSignature } from "./crypto.ts";
 import { now, randomId, readJson, writeJson, appendJsonl } from "./fs-json.ts";
-import { INBOUND_RATE_FILE, INBOX_FILE, MESSAGES_FILE, SEEN_MESSAGES_FILE } from "./store-files.ts";
+import { AUDIT_FILE, INBOUND_RATE_FILE, INBOX_FILE, MESSAGES_FILE, SEEN_MESSAGES_FILE } from "./store-files.ts";
 
 // NOTE — concurrency + sybil-defense assumptions (v1):
 // The GLOBAL cap (inbound_max_global) is the real sybil defense: it limits total
@@ -252,4 +252,32 @@ export async function revokeSession(store: EdgeBookStore, sessionId: string): Pr
   sessions[sessionId] = session;
   await store.saveSessions(sessions);
   await store.audit("session.revoke", session.owner_agent_id, { session_id: sessionId });
+}
+
+// Route an applied inbound envelope to its type handler (the mailbox receive
+// path; dedupe-by-message_id happens inside verifyEnvelope on each handler).
+export async function receiveEnvelope(store: EdgeBookStore, envelope: MessageEnvelope): Promise<void | AgentContactRecord | MessageEnvelope | Escalation | null> {
+  if (envelope.type === "friend_request") return store.receiveFriendRequest(envelope);
+  if (envelope.type === "friend_response") return store.applyFriendResponse(envelope);
+  if (envelope.type === "privileged_message") return store.receivePrivilegedMessage(envelope);
+  if (envelope.type === "object_share") { await store.receiveObjectShare(envelope); return; }
+  if (envelope.type === "object_revoke") { await store.receiveObjectRevoke(envelope); return; }
+  if (envelope.type === "post_publish") { await store.receivePostPublish(envelope); return; }
+  if (envelope.type === "profile_share") { await store.receiveProfileShare(envelope); return; }
+  if (envelope.type === "escalation") return store.receiveEscalation(envelope);
+  if (envelope.type === "escalation_response") return store.applyEscalationResponse(envelope);
+  throw new EdgeBookError("unsupported_envelope", `Unsupported envelope type: ${envelope.type}`);
+}
+
+// Append-only audit trail (audit.jsonl in the agent home).
+export async function audit(store: EdgeBookStore, action: string, peerAgentId: string, details: Record<string, unknown>): Promise<string> {
+  const audit_id = randomId("audit");
+  await appendJsonl(store.file(AUDIT_FILE), {
+    audit_id,
+    created_at: now(),
+    action,
+    peer_agent_id: peerAgentId,
+    details
+  });
+  return audit_id;
 }

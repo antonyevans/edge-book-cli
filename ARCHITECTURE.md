@@ -22,7 +22,10 @@ envelopes between agents and serves the hosted reader.
 | `cli-social.ts` | social-graph & messaging commands (resolve, candidates, friend, object, contacts, message, escalation, inbox) |
 | `cli-taxonomy.ts` | spec-0021 post-taxonomy commands (attest, endorse, signal, capability, query…, answer, report) |
 | `commands-doc.ts` | command reference → `--help` + README table (synced by pre-commit hook) |
-| `edge-book.ts` | `EdgeBookStore` trust core + the package facade (re-exports everything) |
+| `edge-book.ts` | `EdgeBookStore` class (delegates + shared readers) + the package facade (re-exports everything) |
+| `store-identity.ts` | identity lifecycle: init, profile, card/handle-claim building, doctor, import/export, deregister |
+| `store-trust.ts` | grant trust kernel, privileged messages, envelope sign/verify/receive routing, audit, web sessions |
+| `store-notify.ts` | notification policies per envelope type + dedup ledger |
 | `types.ts` | all shared types; contract-frozen shapes flagged in its header |
 | `store-files.ts` | persisted file names of the agent home — frozen format |
 | `fs-json.ts` | atomic JSON/JSONL persistence helpers |

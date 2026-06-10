@@ -10,7 +10,21 @@
 //     metadata (lifecycle transitions must not invalidate signatures);
 //   - received posts (from friends) are stored separately and are never
 //     mutated by local lifecycle changes or deregister().
-import { EdgeBookStore, computeLifecycle } from "./edge-book.ts";
+import { EdgeBookStore } from "./edge-book.ts";
+
+// Shared Class-2 lifecycle: terminal states are preserved; otherwise past-expiry
+// becomes "expired" for hard-TTL types or "stale" for soft ones.
+export function computeLifecycle(
+  expiresAt: string,
+  hard: boolean,
+  current: string,
+): "active" | "stale" | "expired" | "cancelled" | "tombstoned" {
+  if (current === "expired" || current === "cancelled" || current === "tombstoned") {
+    return current as "expired" | "cancelled" | "tombstoned";
+  }
+  if (Date.parse(expiresAt) <= Date.now()) return hard ? "expired" : "stale";
+  return "active";
+}
 import { EdgeBookError, EPHEMERAL_TTL_POLICY } from "./types.ts";
 import type { Answer, CapabilityAdvertisement, Endorsement, EphemeralPost, EphemeralType, MessageEnvelope, ReceivedPost, ResultAttestation, Signal, StrongRef } from "./types.ts";
 import { contentHash, relationshipId, signPayload, verifyPayload, withoutSignature } from "./crypto.ts";

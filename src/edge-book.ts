@@ -1,4 +1,3 @@
-/* eslint-disable max-lines -- GRANDFATHERED at 1005 code lines (2026-06-10): EdgeBookStore facade + remaining inline logic; continue store-*.ts extraction, then remove this disable. See DESIGN.md. */
 // EdgeBookStore — the agent's trust core and the package's public facade.
 //
 // FACADE: everything this package historically exported from "edge-book.ts"
@@ -15,6 +14,11 @@
 //   handles.ts           human-handle slug rules (must match host)
 //   profile.ts           two-tier profile projection (spec-098)
 //   cards.ts             AgentCard/FriendProfile validation + loading
+//   store-identity.ts    identity lifecycle: init, profile, card building,
+//                        doctor, import/export, deregister
+//   store-trust.ts       grant trust kernel, privileged messages, envelope
+//                        sign/verify/receive routing, audit, web sessions
+//   store-notify.ts      notification policies + dedup ledger
 //   store-friends.ts     friend-graph lifecycle, invites, reports
 //   store-objects.ts     shared objects + object.read grants (spec-0020)
 //   store-taxonomy.ts    spec-0021 post types (signals/ephemeral/answers/...)
@@ -22,15 +26,10 @@
 //   store-escalations.ts agent->human escalations (spec-094)
 //   harness.ts           two-agent smoke harnesses
 //
-// WHAT STAYS IN THIS FILE (deliberately — one entangled trust concern):
-// identity/init/card building, the grant trust kernel (issue/verify/assert
-// grant signatures, findUsableGrant), privileged messages, envelope
-// signing/verification/receipt routing, notifications, audit, web sessions,
-// and import/export. These share key material and audit flow; splitting them
-// would scatter a single security boundary.
-import crypto from "node:crypto";
-import fs from "node:fs/promises";
-import os from "node:os";
+// WHAT STAYS IN THIS FILE: the EdgeBookStore class (delegates + the tiny
+// readers every module shares: identity/config/contacts/grants/sessions/
+// inbox/auditEvents) and the facade re-exports. Add new behavior in a
+// store-*.ts feature module, not inline here.
 import path from "node:path";
 
 // All shared type definitions (and EdgeBookError) live in types.ts; this file
@@ -40,10 +39,9 @@ export { resolveHome, randomId, readJson, writeJson } from "./fs-json.ts";
 export { isValidHandle, slugifyHandle } from "./handles.ts";
 export { contentHash } from "./crypto.ts";
 export { defaultProfile, resolveFieldVisibility, resolveSocialVisibility } from "./profile.ts";
-import { resolveHome, randomId, readJson, writeJson, now, ensureHome, chmodBestEffort, appendJsonl, readJsonl } from "./fs-json.ts";
+import { resolveHome, randomId, readJson, writeJson, now, appendJsonl, readJsonl } from "./fs-json.ts";
 import { isValidHandle, slugifyHandle } from "./handles.ts";
-import { contentHash, stableIdFromPublicKey, canonicalize, withoutSignature, signPayload, verifyPayload, relationshipId } from "./crypto.ts";
-import { defaultProfile, resolveFieldVisibility, resolveSocialVisibility, projectProfileFields } from "./profile.ts";
+import { defaultProfile, resolveFieldVisibility, resolveSocialVisibility } from "./profile.ts";
 export { validateCard, validateFriendProfile, loadCard } from "./cards.ts";
 export { runTwoAgentHarness, runFeedPrivacyHarness } from "./harness.ts";
 import { validateCard, validateFriendProfile, loadCard } from "./cards.ts";
@@ -53,99 +51,13 @@ import { posts, savePosts, feedItems, saveFeedItems, approvals, saveApprovals, c
 import { escalations, saveEscalations, raiseEscalation, receiveEscalation, answerEscalation, applyEscalationResponse, expireEscalations } from "./store-escalations.ts";
 import { upsertContactFromCard, setRelationship, createFriendRequest, receiveFriendRequest, pendingFriendRequests, markFriendRequestNotified, acceptFriend, rejectFriend, applyFriendResponse, buildProfileShareEnvelope, receiveProfileShare, broadcastProfileEnvelopes, revoke, block, reports, inviteCodes, mintInviteCode, reportPeer } from "./store-friends.ts";
 import { init, setProfile, setHandle, exportIdentity, importIdentity, updateConfig, buildCard, writeCard, buildHandleClaim, buildFriendProfile, doctor, deregister, reviewLocalDataImport, exportLocalData } from "./store-identity.ts";
-import { enforceInboundRate, issueGrant, storeGrant, sendPrivilegedMessage, receivePrivilegedMessage, findUsableGrant, verifyGrantSignature, assertGrantSignature, signEnvelope, verifyEnvelope, createSession, requireSession, revokeSession } from "./store-trust.ts";
-import { IDENTITY_FILE, CONTACTS_FILE, GRANTS_FILE, OBJECTS_FILE, ATTACHMENTS_DIR, SEEN_MESSAGES_FILE, CONFIG_FILE, RELATIONSHIP_EVENTS_FILE, MESSAGES_FILE, AUDIT_FILE, INBOX_FILE, CARD_FILE, SESSIONS_FILE, POSTS_FILE, FEED_FILE, APPROVALS_FILE, NOTIFIED_FILE, ESCALATIONS_FILE, CONTACT_MUTES_FILE, REPORTS_FILE, INVITE_CODES_FILE, INBOUND_RATE_FILE, ATTESTATIONS_FILE, ENDORSEMENTS_FILE, SIGNALS_FILE, CAPABILITIES_FILE, EPHEMERAL_FILE, ANSWERS_FILE, RECEIVED_POSTS_FILE, DEFAULT_SIGNAL_TTL_MS, DEFAULT_EPHEMERAL_TTL_MS } from "./store-files.ts";
-import { EPHEMERAL_TTL_POLICY, EdgeBookError, POST_TAXONOMY, classOf } from "./types.ts";
+import { enforceInboundRate, issueGrant, storeGrant, sendPrivilegedMessage, receivePrivilegedMessage, findUsableGrant, verifyGrantSignature, assertGrantSignature, signEnvelope, verifyEnvelope, receiveEnvelope, audit, createSession, requireSession, revokeSession } from "./store-trust.ts";
+import { notificationIntent, wasNotified, recordNotified } from "./store-notify.ts";
+import { IDENTITY_FILE, CONTACTS_FILE, GRANTS_FILE, CONFIG_FILE, AUDIT_FILE, INBOX_FILE, SESSIONS_FILE } from "./store-files.ts";
+import { EdgeBookError } from "./types.ts";
 import type { RelationshipState, TransportMode, EdgeBookOptions, EdgeBookConfig, LocalIdentity, FieldVisibility, SocialLink, IdentityProfile, FriendProfile, AgentCard, AgentContactRecord, RelationshipEvent, CapabilityGrant, SharedObjectAttachment, SharedObject, ObjectShareBody, ResultAttestation, StrongRef, Endorsement, Signal, EphemeralType, EphemeralPost, Answer, ReceivedPost, CapabilityAdvertisement, ObjectRevokeBody, MessageEnvelope, FriendRequestBody, NotificationIntent, ReportRecord, InviteCode, FriendResponseBody, ProfileShareBody, EdgeBookVisibility, EdgeBookPostStatus, EdgeBookPostKind, LocalUserSession, EdgeBookPost, FeedItem, ApprovalRequest, EscalationKind, EscalationStatus, Escalation, EscalationBody, EscalationResponseBody, ContactMute, PostType } from "./types.ts";
 
-type NotifyPolicy = (
-  env: MessageEnvelope,
-  store: EdgeBookStore,
-) => Promise<NotificationIntent | null>; // null = silent
-
-// Resolve a peer's display name from local contacts, falling back to the agent id.
-async function peerName(store: EdgeBookStore, agentId: string): Promise<string | undefined> {
-  return (await store.contacts())[agentId]?.display_name || undefined;
-}
-
-const NOTIFY_POLICIES: Partial<Record<MessageEnvelope["type"], NotifyPolicy>> = {
-  friend_request: async (env, store) => {
-    // Honour the per-type opt-out (default ON: treat undefined as enabled).
-    if ((await store.config()).notify_on_friend_request === false) return null;
-    const body = env.body as unknown as FriendRequestBody;
-    const name = body.card?.display_name || env.from_agent_id;
-    const note = body.note ? ` — “${body.note}”` : "";
-    return {
-      kind: "friend_request",
-      from_id: env.from_agent_id,
-      from_name: body.card?.display_name,
-      message: `${name} wants to connect on Edge Book${note}. Reply “yes” to connect, or ignore to leave it pending.`,
-      dedup_key: env.message_id,
-    };
-  },
-  privileged_message: async (env, store) => {
-    const body = env.body as { text?: unknown };
-    const name = (await peerName(store, env.from_agent_id)) || env.from_agent_id;
-    const text = typeof body.text === "string" ? body.text : "";
-    const preview = text.length > 280 ? `${text.slice(0, 279)}…` : text;
-    return {
-      kind: "privileged_message",
-      from_id: env.from_agent_id,
-      from_name: await peerName(store, env.from_agent_id),
-      message: `${name}: ${preview}`,
-      dedup_key: env.message_id,
-    };
-  },
-  friend_response: async (env) => {
-    const body = env.body as unknown as FriendResponseBody;
-    const name = body.card?.display_name || env.from_agent_id;
-    const verb = body.accepted ? "accepted" : "declined";
-    return {
-      kind: "friend_response",
-      from_id: env.from_agent_id,
-      from_name: body.card?.display_name,
-      message: `${name} ${verb} your friend request on Edge Book.`,
-      dedup_key: env.message_id,
-    };
-  },
-  object_share: async (env, store) => {
-    const body = env.body as unknown as ObjectShareBody;
-    const name = (await peerName(store, env.from_agent_id)) || env.from_agent_id;
-    const title = body.object?.request?.title || "an item";
-    return {
-      kind: "object_share",
-      from_id: env.from_agent_id,
-      from_name: await peerName(store, env.from_agent_id),
-      message: `${name} shared a request: “${title}”.`,
-      dedup_key: env.message_id,
-    };
-  },
-  escalation: async (env) => {
-    const body = env.body as unknown as EscalationBody;
-    const esc = body.escalation;
-    const opts = esc?.options?.length ? ` (options: ${esc.options.join(" / ")})` : "";
-    return {
-      kind: "escalation",
-      from_id: env.from_agent_id,
-      message: `${esc?.subject ?? "A decision is needed"} — ${esc?.body ?? ""}${opts}`,
-      dedup_key: env.message_id,
-    };
-  },
-};
-
-// Shared Class-2 lifecycle: terminal states are preserved; otherwise past-expiry
-// becomes "expired" for hard-TTL types or "stale" for soft ones.
-export function computeLifecycle(
-  expiresAt: string,
-  hard: boolean,
-  current: string,
-): "active" | "stale" | "expired" | "cancelled" | "tombstoned" {
-  if (current === "expired" || current === "cancelled" || current === "tombstoned") {
-    return current as "expired" | "cancelled" | "tombstoned";
-  }
-  if (Date.parse(expiresAt) <= Date.now()) return hard ? "expired" : "stale";
-  return "active";
-}
+export { computeLifecycle } from "./store-taxonomy.ts";
 
 export class EdgeBookStore {
   home: string;
@@ -655,56 +567,26 @@ export class EdgeBookStore {
   }
 
   async receiveEnvelope(envelope: MessageEnvelope): Promise<void | AgentContactRecord | MessageEnvelope | Escalation | null> {
-    if (envelope.type === "friend_request") return this.receiveFriendRequest(envelope);
-    if (envelope.type === "friend_response") return this.applyFriendResponse(envelope);
-    if (envelope.type === "privileged_message") return this.receivePrivilegedMessage(envelope);
-    if (envelope.type === "object_share") { await this.receiveObjectShare(envelope); return; }
-    if (envelope.type === "object_revoke") { await this.receiveObjectRevoke(envelope); return; }
-    if (envelope.type === "post_publish") { await this.receivePostPublish(envelope); return; }
-    if (envelope.type === "profile_share") { await this.receiveProfileShare(envelope); return; }
-    if (envelope.type === "escalation") return this.receiveEscalation(envelope);
-    if (envelope.type === "escalation_response") return this.applyEscalationResponse(envelope);
-    throw new EdgeBookError("unsupported_envelope", `Unsupported envelope type: ${envelope.type}`);
+    return receiveEnvelope(this, envelope);
   }
 
   // Compute the transport-free notification intent for an applied inbound envelope,
-  // or null when the type is silent / unregistered. Delivery (invoking the host
-  // notify command) is the entry point's job — this stays transport-free.
+  // or null when the type is silent / unregistered (policies: store-notify.ts).
   async notificationIntent(envelope: MessageEnvelope): Promise<NotificationIntent | null> {
-    const policy = NOTIFY_POLICIES[envelope.type];
-    if (!policy) return null;
-    const intent = await policy(envelope, this);
-    if (!intent) return null;
-    // Optional whitelist: when notify_types is set, only those kinds notify.
-    const types = (await this.config()).notify_types;
-    if (Array.isArray(types) && !types.includes(intent.kind)) return null;
-    return intent;
+    return notificationIntent(this, envelope);
   }
 
-  // Notification dedup ledger (keyed by NotificationIntent.dedup_key). Guards
-  // against double-notify across entry points, hook+cron, and mailbox redelivery.
+  // Notification dedup ledger (keyed by NotificationIntent.dedup_key).
   async wasNotified(dedupKey: string): Promise<boolean> {
-    const ledger = await readJson<string[]>(this.file(NOTIFIED_FILE), []);
-    return ledger.includes(dedupKey);
+    return wasNotified(this, dedupKey);
   }
 
   async recordNotified(dedupKey: string): Promise<void> {
-    const ledger = await readJson<string[]>(this.file(NOTIFIED_FILE), []);
-    if (ledger.includes(dedupKey)) return;
-    ledger.push(dedupKey);
-    await writeJson(this.file(NOTIFIED_FILE), ledger);
+    return recordNotified(this, dedupKey);
   }
 
   async audit(action: string, peerAgentId: string, details: Record<string, unknown>): Promise<string> {
-    const audit_id = randomId("audit");
-    await appendJsonl(this.file(AUDIT_FILE), {
-      audit_id,
-      created_at: now(),
-      action,
-      peer_agent_id: peerAgentId,
-      details
-    });
-    return audit_id;
+    return audit(this, action, peerAgentId, details);
   }
 
   async auditEvents(): Promise<Array<Record<string, unknown>>> {
