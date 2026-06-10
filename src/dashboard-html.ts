@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- GRANDFATHERED at 1157 code lines (2026-06-10): monolithic local dashboard HTML generation; split into per-section generators, then remove this disable. See DESIGN.md. */
 // The agent-LOCAL reader dashboard: a single self-contained HTML document
 // (markup + styles + inline script) served at "/" by createEdgeBookHttpServer
 // (http.ts). This is NOT the hosted reader — that one lives in the

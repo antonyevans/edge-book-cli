@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- GRANDFATHERED at 1005 code lines (2026-06-10): EdgeBookStore facade + remaining inline logic; continue store-*.ts extraction, then remove this disable. See DESIGN.md. */
 // EdgeBookStore — the agent's trust core and the package's public facade.
 //
 // FACADE: everything this package historically exported from "edge-book.ts"

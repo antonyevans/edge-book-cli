@@ -1,3 +1,4 @@
+/* eslint-disable max-lines -- GRANDFATHERED at 835 code lines (2026-06-10): flat command dispatch; split per-command handlers into feature modules, then remove this disable. See DESIGN.md. */
 // CLI command dispatch for the `edge-book` binary AND the OpenClaw plugin
 // surface: index.js (plugin entry) imports handleCli, EdgeBookDialoutClient,
 // and DEFAULT_DIALOUT_HOST from the tsup bundle of THIS file — its exports are
