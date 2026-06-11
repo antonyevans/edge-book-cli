@@ -66,6 +66,15 @@ test("validateFixture rejects malformed fixtures with errors naming the problem"
   assert.throws(() => validateFixture(null, "broken.json"), /broken\.json/);
 });
 
+test("validateFixture rejects notify_cmd and unknown recipient.config keys (fixtures are data, not code)", () => {
+  const base = { schema: "edge-book-replay-fixture/0.1", title: "t", identities: { a: { seed: "0".repeat(64), handle: "a" } }, steps: [{ local: { action: "accept_friend", peer: "a" } }] };
+  assert.throws(
+    () => validateFixture({ ...base, recipient: { config: { notify_cmd: "evil.sh" } } }, "cfg"),
+    /notify_cmd is not an allowed fixture config key/,
+  );
+  assert.doesNotThrow(() => validateFixture({ ...base, recipient: { config: { open_friend_requests: true } } }, "cfg"));
+});
+
 test("synthetic identities are seed-deterministic (same seed, same key — never a real user key)", () => {
   const a1 = keyPairFromSeed(SEED_A);
   const a2 = keyPairFromSeed(SEED_A);

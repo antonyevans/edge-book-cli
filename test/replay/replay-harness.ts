@@ -150,6 +150,16 @@ export function validateFixture(raw: unknown, name = "(inline)"): ReplayFixture 
       fail(name, `steps[${i}] must have either "deliver" or "local"`);
     }
   });
+  // Fixtures are data, not code (review hardening, PR #15): recipient.config
+  // may only carry behavior toggles. notify_cmd is a shell command (notify.ts
+  // runs it via sh -c) and must never arrive via a committed fixture.
+  const recipient = f.recipient as Record<string, unknown> | undefined;
+  if (recipient && recipient.config && typeof recipient.config === "object") {
+    const allowed = new Set(["open_friend_requests", "notify_on_friend_request", "support_inbox"]);
+    for (const key of Object.keys(recipient.config as Record<string, unknown>)) {
+      if (!allowed.has(key)) fail(name, `recipient.config.${key} is not an allowed fixture config key (fixtures are data, not code)`);
+    }
+  }
   return raw as ReplayFixture;
 }
 
