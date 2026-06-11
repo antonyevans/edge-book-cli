@@ -46,3 +46,102 @@ test("updateConfig persists greeter_welcome_object_id", async () => {
   await store.updateConfig({ notify_on_friend_request: true });
   assert.equal((await store.config()).greeter_welcome_object_id, "obj-test-123");
 });
+
+import { runGreeterPass, greeterWelcomeKey, GREETER_WELCOME_TITLE, GREETER_WELCOME_BODY } from "../src/store-greeter.ts";
+
+async function makeAgent(root: string, name: string) {
+  const home = path.join(root, name);
+  const store = new EdgeBookStore({ home });
+  await store.init({ handle: `${name}.openclaw.local`, displayName: name });
+  const card = await store.writeCard();
+  return { home, store, card };
+}
+
+// A greeter store with n inbound requests sitting in request_received.
+async function greeterWithPending(n: number) {
+  const root = await tempRoot();
+  const greeter = await makeAgent(root, "greeter");
+  const requesters: Awaited<ReturnType<typeof makeAgent>>[] = [];
+  for (let i = 0; i < n; i++) {
+    const r = await makeAgent(root, `newbie${i}`);
+    const env = await r.store.createFriendRequest(greeter.card);
+    await greeter.store.receiveFriendRequest(env);
+    requesters.push(r);
+  }
+  return { greeter, requesters };
+}
+
+test("runGreeterPass without greeter_mode → greeter_mode_required, nothing accepted", async () => {
+  const { greeter, requesters } = await greeterWithPending(1);
+  await assert.rejects(
+    () => runGreeterPass(greeter.store),
+    (e: unknown) => e instanceof EdgeBookError && e.code === "greeter_mode_required",
+  );
+  const contact = (await greeter.store.contacts())[requesters[0].card.agent_id];
+  assert.equal(contact.relationship_state, "request_received", "gate must accept nothing");
+});
+
+test("two pending → both friend, one welcome object, two shares of the same object, ledger keys recorded", async () => {
+  const { greeter, requesters } = await greeterWithPending(2);
+  await greeter.store.updateConfig({ greeter_mode: true });
+  const entries = await runGreeterPass(greeter.store);
+  assert.equal(entries.length, 2);
+  const welcomeId = (await greeter.store.config()).greeter_welcome_object_id;
+  assert.ok(welcomeId, "welcome object id persisted to config");
+  for (const r of requesters) {
+    const entry = entries.find((e) => e.agent_id === r.card.agent_id);
+    assert.ok(entry, `entry for ${r.card.agent_id}`);
+    assert.equal(entry.accepted, true);
+    assert.equal(entry.welcomed, true);
+    assert.equal(entry.accept_envelope?.type, "friend_response");
+    assert.equal(entry.share_envelope?.type, "object_share");
+    assert.equal(entry.share_envelope?.ref, welcomeId, "both shares reference the same object");
+    assert.equal((await greeter.store.contacts())[r.card.agent_id].relationship_state, "friend");
+    assert.equal(await greeter.store.wasNotified(greeterWelcomeKey(r.card.agent_id)), true);
+  }
+  assert.equal(Object.keys(await greeter.store.objects()).length, 1, "welcome object exists exactly once");
+});
+
+test("partial-failure re-run: ledger has <a> but not <b> → only <b> gets the welcome share", async () => {
+  const { greeter, requesters } = await greeterWithPending(2);
+  await greeter.store.updateConfig({ greeter_mode: true });
+  const [a, b] = requesters;
+  await greeter.store.recordNotified(greeterWelcomeKey(a.card.agent_id));
+  const entries = await runGreeterPass(greeter.store);
+  const entryA = entries.find((e) => e.agent_id === a.card.agent_id)!;
+  const entryB = entries.find((e) => e.agent_id === b.card.agent_id)!;
+  assert.equal(entryA.accepted, true);
+  assert.equal(entryA.welcomed, false, "a is in the ledger — no double-send");
+  assert.equal(entryA.share_envelope, undefined);
+  assert.equal(entryB.accepted, true);
+  assert.equal(entryB.welcomed, true);
+  assert.equal(entryB.share_envelope?.type, "object_share");
+});
+
+test("crash recovery: an already-accepted friend missing its ledger key is welcomed on the next pass", async () => {
+  const { greeter, requesters } = await greeterWithPending(1);
+  await greeter.store.updateConfig({ greeter_mode: true });
+  // Simulate a crash between accept and welcome on a prior pass: friend, no ledger key.
+  await greeter.store.acceptFriend(requesters[0].card.agent_id);
+  const entries = await runGreeterPass(greeter.store);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].accepted, false, "no re-accept of an existing friend");
+  assert.equal(entries[0].welcomed, true);
+  assert.equal(entries[0].share_envelope?.type, "object_share");
+});
+
+test("a second pass is a no-op (idempotent)", async () => {
+  const { greeter } = await greeterWithPending(1);
+  await greeter.store.updateConfig({ greeter_mode: true });
+  await runGreeterPass(greeter.store);
+  assert.deepEqual(await runGreeterPass(greeter.store), []);
+});
+
+test("welcome copy avoids infrastructure vocabulary", () => {
+  assert.equal(GREETER_WELCOME_TITLE, "Welcome to Edge Book");
+  const text = `${GREETER_WELCOME_TITLE}\n${GREETER_WELCOME_BODY}`;
+  for (const banned of ["Hermes", "mailbox", "envelope", "relay", "DID"]) {
+    assert.ok(!text.includes(banned), `banned infrastructure word in welcome copy: ${banned}`);
+  }
+  assert.ok(!/\bgrants?\b/i.test(text), "grant-as-noun is banned in welcome copy");
+});
