@@ -9,8 +9,9 @@ import type { CliContext, CliResult } from "./cli-shared.ts";
 import { deliverEnvelopeViaMailbox } from "./dialout.ts";
 import { loadCard, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import type { FriendRequestBody } from "./edge-book.ts";
-import { postRelayEnvelope, pullRelayEnvelopes } from "./http.ts";
+import { postRelayEnvelope, pullRelayEnvelopes } from "./http-relay.ts";
 import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
+import { runGreeterPass } from "./store-greeter.ts";
 import fs from "node:fs/promises";
 
 export async function handleSocialCli(command: string, args: string[], ctx: CliContext, home: string | undefined, store: EdgeBookStore): Promise<CliResult | null> {
@@ -148,6 +149,30 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
       const peer = requireArg(args.shift(), "peer-agent-id");
       await store.markFriendRequestNotified(peer);
       return { text: `Marked ${peer} notified` };
+    }
+    if (action === "auto-accept") {
+      // spec-132 greeter: accept every pending request and send the welcome
+      // share. Hard-gated on greeter_mode (runGreeterPass throws
+      // greeter_mode_required). Delivery wiring copies `friend accept --deliver`.
+      const deliver = takeBoolFlag(args, "--deliver");
+      const hostUrl = parseHost(args, ctx);
+      const entries = await runGreeterPass(store);
+      if (deliver) {
+        for (const entry of entries) {
+          for (const envelope of [entry.accept_envelope, entry.share_envelope]) {
+            if (!envelope) continue;
+            try {
+              await deliverToPeer(store, envelope, envelope.to_agent_id);
+            } catch (error) {
+              if (!(error instanceof EdgeBookError) || error.code !== "no_route") throw error;
+              // Dial-out peer (no inbound endpoint): deliver over the host mailbox.
+              await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+            }
+          }
+        }
+      }
+      const json = entries.map(({ agent_id, accepted, welcomed }) => ({ agent_id, accepted, welcomed }));
+      return { text: JSON.stringify(json, null, 2), json };
     }
     if (action === "notify-config") {
       const on = takeBoolFlag(args, "--on");

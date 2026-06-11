@@ -5,12 +5,12 @@
 // in dispatch order. Returns null when the command is not one of its own.
 import fs from "node:fs/promises";
 import path from "node:path";
-import { deliverToPeer, parseHost, requireArg, takeBoolFlag, takeFlag, takeRepeatedKV } from "./cli-shared.ts";
+import { deliverToPeer, parseHost, relayBaseFromHost, requireArg, takeBoolFlag, takeFlag, takeRepeatedKV } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
 import { deliverEnvelopeViaMailbox } from "./dialout.ts";
 import { EdgeBookError, EdgeBookStore, defaultProfile, slugifyHandle } from "./edge-book.ts";
 import type { FieldVisibility } from "./edge-book.ts";
-import { buildOnboardingNote, recordInviteCandidate } from "./onboarding.ts";
+import { buildOnboardingNote, recordInviteCandidate, seedGreeterCandidate } from "./onboarding.ts";
 import type { OnboardingNoteOptions } from "./onboarding.ts";
 
 export async function handleIdentityCli(command: string, args: string[], ctx: CliContext, home: string | undefined, store: EdgeBookStore): Promise<CliResult | null> {
@@ -23,6 +23,10 @@ export async function handleIdentityCli(command: string, args: string[], ctx: Cl
     const directUrl = takeFlag(args, "--direct-url");
     const relayUrl = takeFlag(args, "--relay-url");
     const fromInvite = takeFlag(args, "--from-invite");
+    // spec-132: greeter candidate opt-outs + relay base for the handle URL.
+    // EDGE_BOOK_RELAY_BASE wins; otherwise derive https origin from the dialout host.
+    const noGreeter = takeBoolFlag(args, "--no-greeter") || process.env.EDGE_BOOK_NO_GREETER === "1";
+    const relayBase = process.env.EDGE_BOOK_RELAY_BASE || relayBaseFromHost(parseHost(args, ctx));
     const identity = await store.init({ handle, displayName, ownerLabel, shareOwnerLabel: shareOwner, directUrl, relayUrl });
     // spec-129: a bad invite must never block identity creation — soft-catch.
     const onboardingOpts: OnboardingNoteOptions = {};
@@ -37,6 +41,13 @@ export async function handleIdentityCli(command: string, args: string[], ctx: Cl
         onboardingOpts.inviteError = code;
         onboardingJson = { invite_error: code };
       }
+    }
+    // spec-132: seed the greeter candidate so a cold-path init never lands in
+    // an empty room. Coexists with any --from-invite candidate. Local write
+    // only — zero network at init.
+    if (!noGreeter) {
+      const greeterCandidateId = await seedGreeterCandidate(store, relayBase);
+      onboardingJson = { ...(onboardingJson ?? {}), greeter_candidate_id: greeterCandidateId };
     }
     const note =
       `Initialized ${identity.agent_id} at ${store.home}\n\n` +

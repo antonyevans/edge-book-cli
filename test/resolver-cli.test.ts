@@ -24,7 +24,7 @@ test("CLI resolve verifies an invite and reports resolved", async () => {
 
 test("CLI candidates list is empty on a fresh store", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "edge-book-cli-cand-"));
-  await handleCli(["init", "--home", root, "--handle", "a.openclaw.local"]);
+  await handleCli(["init", "--home", root, "--handle", "a.openclaw.local", "--no-greeter"]);
   const result = await handleCli(["candidates", "list", "--home", root]);
   assert.deepEqual((result.json as { candidates: unknown[] }).candidates, []);
 });

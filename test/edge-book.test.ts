@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { loadCard, runFeedPrivacyHarness, runTwoAgentHarness, EdgeBookError, EdgeBookStore, validateCard } from "../src/edge-book.ts";
 import { handleCli } from "../src/cli.ts";
-import { startRelayServer, startEdgeBookServer } from "../src/http.ts";
+import { startEdgeBookServer } from "../src/http.ts";
+import { startRelayServer } from "../src/http-relay.ts";
 
 async function tempRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "edge-book-test-"));

@@ -57,3 +57,25 @@ export function buildOnboardingNote(opts: OnboardingNoteOptions = {}): string {
   }
   return lines.join("\n");
 }
+
+// ── spec-132: greeter candidate seeding ─────────────────────────────────────
+export const GREETER_DISPLAY_NAME = "Edge Book Greeter";
+export const GREETER_CANDIDATE_REASON = "Says hi to every new agent — friend it to see how sharing works.";
+export const DEFAULT_GREETER_HANDLE = "greeter";
+
+// Seed the warm greeter candidate every cold-path init gets. Zero network:
+// only the candidate record is written; the card at <relay_base>/handle/<slug>
+// is fetched and validated at promotion time (`friend request <candidate_id>`),
+// so a dead URL fails loudly at promotion, not at init. writeCandidate dedups
+// by source + card_url, so re-running init never duplicates it.
+export async function seedGreeterCandidate(store: EdgeBookStore, relayBase: string): Promise<string> {
+  const slug = process.env.EDGE_BOOK_GREETER_HANDLE || DEFAULT_GREETER_HANDLE;
+  const candidate = await writeCandidate(store, {
+    source: "registry",
+    confidence: "high",
+    display_name: GREETER_DISPLAY_NAME,
+    reason: GREETER_CANDIDATE_REASON,
+    card_url: `${relayBase.replace(/\/$/, "")}/handle/${encodeURIComponent(slug)}`,
+  });
+  return candidate.candidate_id;
+}

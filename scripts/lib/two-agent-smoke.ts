@@ -12,6 +12,7 @@ import path from "node:path";
 import { EdgeBookStore, EdgeBookError } from "../../src/edge-book.ts";
 import type { AgentCard, MessageEnvelope } from "../../src/edge-book.ts";
 import { writeCandidate, promoteCandidate, resolveTarget, defaultProviders } from "../../src/resolver.ts";
+import { runGreeterPass } from "../../src/store-greeter.ts";
 
 export interface SmokeStep {
   name: string;
@@ -254,6 +255,25 @@ export async function runSmoke(opts: SmokeOptions): Promise<SmokeResult> {
       if (envelope.type !== "friend_request") throw new Error(`unexpected envelope ${envelope.type}`);
       if (!(await alice.store.contacts())[carol.card.agent_id]) throw new Error("carol contact not created");
       return "carol promoted to contact";
+    });
+
+    await step(`greeter: bob (greeter_mode) auto-accepts alice's request and delivers the welcome share (via ${transport.name})`, async () => {
+      await bob.store.updateConfig({ greeter_mode: true });
+      const reqEnv = await alice.store.createFriendRequest(bob.card);
+      await transport.deliver(alice, bob, reqEnv, async () => (await relationship(bob.store, alice.card.agent_id)) === "request_received");
+      const entries = await runGreeterPass(bob.store);
+      const entry = entries.find((e) => e.agent_id === alice.card.agent_id);
+      if (!entry?.accepted || !entry.welcomed || !entry.accept_envelope || !entry.share_envelope) {
+        throw new Error(`unexpected greeter pass: ${JSON.stringify(entries.map(({ agent_id, accepted, welcomed }) => ({ agent_id, accepted, welcomed })))}`);
+      }
+      const welcomeId = (await bob.store.config()).greeter_welcome_object_id;
+      if (!welcomeId) throw new Error("welcome object id not pinned in config");
+      await transport.deliver(bob, alice, entry.accept_envelope, async () => (await relationship(alice.store, bob.card.agent_id)) === "friend");
+      await transport.deliver(bob, alice, entry.share_envelope, async () => alice.store.canReadObject(welcomeId, alice.card.agent_id));
+      if ((await relationship(alice.store, bob.card.agent_id)) !== "friend") throw new Error("alice not friend after auto-accept");
+      if (!(await alice.store.canReadObject(welcomeId, alice.card.agent_id))) throw new Error("welcome object not readable by alice");
+      await bob.store.updateConfig({ greeter_mode: false });
+      return `auto-accepted ${alice.card.agent_id.slice(0, 12)}; welcome ${welcomeId} readable`;
     });
 
     await step("block: after blocking bob, a privileged message is explicitly denied", async () =>

@@ -22,9 +22,10 @@ import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, listSessions, revokeOneSes
 import type { SessionsRevokeFrame } from "./dialout-key.ts";
 import { runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import { renderUsage } from "./commands-doc.ts";
-import { startRelayServer, startEdgeBookServer } from "./http.ts";
+import { startEdgeBookServer } from "./http.ts";
+import { startRelayServer } from "./http-relay.ts";
 import { makeNotifyOnEnvelope, resolveNotifyCmd } from "./notify.ts";
-import { ensureNotifierCron, defaultHermesRunner } from "./host-cron.ts";
+import { ensureNotifierCron, ensureGreeterCron, defaultHermesRunner } from "./host-cron.ts";
 
 export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
 export type { CliContext, CliResult } from "./cli-shared.ts";
@@ -52,8 +53,16 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   const identityResult = await handleIdentityCli(command, args, ctx, home, store);
   if (identityResult) return identityResult;
 
+  // Capture the social sub-action before handleSocialCli shifts it off args:
+  // `friend auto-accept` is machine-invoked (greeter cron) and its text output
+  // is a machine-readable JSON contract for cron logs — the handle nudge
+  // belongs to human conversation surfaces only (spec-132 ruling), so skip it.
+  const socialAction = args[0];
   const socialResult = await handleSocialCli(command, args, ctx, home, store);
-  if (socialResult) return maybeAppendHandleNudge(store, command, socialResult);
+  if (socialResult) {
+    if (command === "friend" && socialAction === "auto-accept") return socialResult;
+    return maybeAppendHandleNudge(store, command, socialResult);
+  }
 
   if (command === "serve") {
     const host = takeFlag(args, "--host") || "127.0.0.1";
@@ -85,8 +94,8 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     // Idempotently self-install the host notifier on a recognized host (e.g. Hermes
     // delivers via cron). Detection-gated, disable with --no-cron-install /
     // EDGE_BOOK_NO_CRON_INSTALL. A failure here must never break the dial-out.
+    const disabled = takeBoolFlag(args, "--no-cron-install") || process.env.EDGE_BOOK_NO_CRON_INSTALL === "1";
     try {
-      const disabled = takeBoolFlag(args, "--no-cron-install") || process.env.EDGE_BOOK_NO_CRON_INSTALL === "1";
       // `home` can be undefined when neither --home nor ctx.home is set; ensureNotifierCron
       // tolerates that at runtime (any failure is caught below). Documented cast to keep
       // pre-existing behavior unchanged — see FINDINGS.md §1.
@@ -95,6 +104,17 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       else if (res.status === "error") console.log(`  ↳ notifier cron install skipped: ${res.detail}`);
     } catch (e) {
       console.log(`  ↳ notifier cron install skipped: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // spec-132: the greeter cron installs ONLY when this agent is the greeter
+    // (double gate: the command itself also refuses without greeter_mode).
+    try {
+      if ((await store.config()).greeter_mode === true) {
+        const res = ensureGreeterCron({ runner: defaultHermesRunner(), home: home as string, disabled });
+        if (res.status === "installed") console.log(`  ↳ greeter cron self-installed ("Edge Book — greeter", every 5m)`);
+        else if (res.status === "error") console.log(`  ↳ greeter cron install skipped: ${res.detail}`);
+      }
+    } catch (e) {
+      console.log(`  ↳ greeter cron install skipped: ${e instanceof Error ? e.message : String(e)}`);
     }
     await new Promise(() => undefined);
   }
@@ -113,6 +133,17 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       error: `Could not install notifier cron: ${res.detail ?? ""}`,
     };
     return { text: msg[res.status] ?? res.status, json: res };
+  }
+
+  if (command === "greeter") {
+    // spec-132: config gate for the greeter agent. Mirrors the friend
+    // notify-config flag pattern (cli-social.ts) exactly.
+    const on = takeBoolFlag(args, "--on");
+    const off = takeBoolFlag(args, "--off");
+    if (on && off) throw new EdgeBookError("bad_flags", "greeter takes either --on or --off, not both");
+    if (!on && !off) throw new EdgeBookError("missing_arg", "greeter needs --on or --off");
+    const cfg = await store.updateConfig({ greeter_mode: on ? true : false });
+    return { text: `greeter_mode = ${cfg.greeter_mode}`, json: cfg };
   }
 
   if (command === "pair") {

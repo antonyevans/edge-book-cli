@@ -17,7 +17,7 @@ async function tempRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "edge-book-onboarding-test-"));
 }
 
-test("init without --from-invite prints the handoff block and omits onboarding JSON", async () => {
+test("init without --from-invite prints the handoff block; onboarding JSON has only the greeter candidate", async () => {
   const home = await tempRoot();
   const result = await handleCli(["init", "--home", home, "--name", "Test Agent"]);
   assert.ok(result.text.includes("permissioned room between agents"), "mental-model line missing from init output");
@@ -27,7 +27,12 @@ test("init without --from-invite prints the handoff block and omits onboarding J
   assert.ok(result.text.includes("Two-tier profile"));
   const json = result.json as Record<string, unknown>;
   assert.ok(json.agent_id, "identity fields must still be in JSON");
-  assert.ok(!("onboarding" in json), "onboarding key must be omitted entirely without --from-invite");
+  // spec-132: a default init seeds the greeter candidate, so onboarding now
+  // carries greeter_candidate_id — but no invite keys without --from-invite.
+  const onboarding = json.onboarding as Record<string, string> | undefined;
+  assert.ok(onboarding?.greeter_candidate_id, "greeter candidate must be seeded by default (spec-132)");
+  assert.ok(!onboarding?.invite_candidate_id, "no invite keys without --from-invite");
+  assert.ok(!onboarding?.invite_error, "no invite error without --from-invite");
 });
 
 test("init --from-invite records a promotable candidate with source invite", async () => {
@@ -40,7 +45,7 @@ test("init --from-invite records a promotable candidate with source invite", asy
   assert.ok(inviteUrl.includes("#code="), "test invite must carry a code fragment");
 
   const home = path.join(root, "newbie");
-  const result = await handleCli(["init", "--home", home, "--name", "Newbie", "--from-invite", inviteUrl]);
+  const result = await handleCli(["init", "--home", home, "--name", "Newbie", "--no-greeter", "--from-invite", inviteUrl]);
   const json = result.json as { agent_id?: string; onboarding?: { invite_candidate_id?: string; invite_display_name?: string } };
   assert.ok(json.agent_id, "identity created");
   assert.ok(json.onboarding?.invite_candidate_id, "onboarding.invite_candidate_id missing");
@@ -66,7 +71,7 @@ test("init --from-invite records a promotable candidate with source invite", asy
 
 test("init --from-invite with a bad link still creates identity and writes no candidate", async () => {
   const home = await tempRoot();
-  const result = await handleCli(["init", "--home", home, "--name", "Newbie", "--from-invite", "edgebook:invite:!!!not-a-card!!!"]);
+  const result = await handleCli(["init", "--home", home, "--name", "Newbie", "--no-greeter", "--from-invite", "edgebook:invite:!!!not-a-card!!!"]);
   const json = result.json as { agent_id?: string; onboarding?: { invite_error?: string } };
   assert.ok(json.agent_id, "a bad invite must never block identity creation");
   assert.ok(json.onboarding?.invite_error, "onboarding.invite_error missing");
