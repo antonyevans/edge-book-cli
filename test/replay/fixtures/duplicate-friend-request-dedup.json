@@ -39,7 +39,7 @@
       },
       "expect": {
         "outcome": "dedup_hit",
-        "error": "Replay detected",
+        "error": "replay",
         "events": [
           { "kind": "envelope.dedup_hit", "fields": { "envelope_kind": "friend_request", "dedup_key": "msg-replay-dup-001" } },
           { "kind": "envelope.received", "fields": { "applied": false } }

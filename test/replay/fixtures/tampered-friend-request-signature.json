@@ -23,7 +23,7 @@
       },
       "expect": {
         "outcome": "signature_failed",
-        "error": "signature is invalid",
+        "error": "invalid_signature",
         "events": [
           { "kind": "envelope.signature_failed", "fields": { "envelope_kind": "friend_request", "dedup_key": "msg-replay-sig-001" } },
           { "kind": "envelope.received", "fields": { "applied": false } }
