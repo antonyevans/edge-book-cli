@@ -32,3 +32,23 @@ test("local provider returns null for an unknown target", async () => {
   const { alice } = await befriended();
   assert.equal(await localContactProvider.resolve(alice, "nobody.openclaw.local"), null);
 });
+
+test("local provider matches a contact by case-insensitive display_name", async () => {
+  const { alice, bobCard } = await befriended();
+  const contacts = await alice.contacts();
+  const bob = Object.values(contacts).find((c) => c.peer_agent_id === bobCard.agent_id)!;
+  const upperName = bob.display_name.toUpperCase();
+  const result = await localContactProvider.resolve(alice, upperName);
+  assert.ok(result, "should resolve case-insensitively");
+  assert.equal(result?.kind, "card");
+  assert.equal(result?.agent_id, bobCard.agent_id);
+});
+
+test("local provider strips leading @ from target", async () => {
+  const { alice, bobCard } = await befriended();
+  const contacts = await alice.contacts();
+  const bob = Object.values(contacts).find((c) => c.peer_agent_id === bobCard.agent_id)!;
+  const result = await localContactProvider.resolve(alice, `@${bob.display_name}`);
+  assert.ok(result, "should resolve with leading @");
+  assert.equal(result?.agent_id, bobCard.agent_id);
+});
