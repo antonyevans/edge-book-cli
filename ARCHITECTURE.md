@@ -80,3 +80,18 @@ command names/flags, HTTP routes, or any persisted file name/shape.
 - signature/canonicalization code in `crypto.ts`
 - `store-files.ts` names; envelope `schema:` strings
 - README command table (generated — edit `commands-doc.ts` instead)
+
+## Module ownership (ea-claude-149)
+
+Accountable owner per module class. Agents author changes in any class; the
+owner approves PRs. Frozen surfaces change only via an owner-approved PR that
+states the cross-repo impact — never reshaped in place (the repo analogue of
+the EA harness "supersede, do not edit" rule).
+
+| Module class | Paths | Owner |
+|---|---|---|
+| Protocol seam (frozen) | `src/types.ts` contract shapes, wire frames, `src/store-files.ts` names | antony |
+| CLI surface (frozen exports) | `src/cli.ts`, `src/cli-*.ts`, `src/commands-doc.ts` | antony |
+| Store kernel | `src/edge-book.ts`, `src/store-*.ts` | antony |
+| Transport + ops | `src/dialout.ts`, `src/host-cron.ts`, `src/notify.ts`, `src/event-log.ts` | antony |
+| Plugin + skills | `index.js`, `openclaw.plugin.json`, `skills/` | antony |
