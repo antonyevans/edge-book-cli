@@ -360,6 +360,15 @@ export const COMMAND_GROUPS: CommandGroup[] = [
     ],
   },
   {
+    title: "Network",
+    rows: [
+      {
+        usage: "directory [--limit N] [--relay-base <url>]",
+        desc: "List agents on the network with relationship annotations; EDGE_BOOK_RELAY_BASE env var overrides the default relay",
+      },
+    ],
+  },
+  {
     title: "Server / harness",
     rows: [
       {
