@@ -377,3 +377,37 @@ test("outbox with an empty ledger says so and exits cleanly", async () => {
   const result = await handleCli(["outbox", "--host", "ws://fake"], { home, socketFactory: factoryFor(new FakeStatusHost("receipts")) });
   assert.match(result.text, /Outbox is empty/);
 });
+
+// ── spec-097 §D: old-host degradation for the outbox command ─────────────────
+
+test("outbox against an old host (error frame) prints local-only unknown states immediately, exit 0", async () => {
+  const host = new FakeStatusHost("legacy-error");
+  const { aliceHome, bobId, factory } = await friendedPair(host);
+  const aliceStore = new EdgeBookStore({ home: aliceHome });
+  const object = await aliceStore.createObject({ title: "t", body: "b" });
+  await handleCli(["object", "share", bobId, object.object_id, "--deliver", "--host", "ws://fake"],
+    { home: aliceHome, socketFactory: factory });
+
+  const started = Date.now();
+  // handleCli resolving (not throwing) IS exit 0 — runCli only sets exitCode on throw.
+  const result = await handleCli(["outbox", "--host", "ws://fake"], { home: aliceHome, socketFactory: factory });
+  assert.ok(Date.now() - started < 2000, "error-frame fast path: no 5s timeout wait");
+  assert.match(result.text, /unknown \(host does not support receipts\)/);
+  assert.match(result.text, /object_share/, "local ledger entries still listed");
+  assert.doesNotMatch(result.text, /⚠/, "no stale warning without host truth");
+});
+
+test("outbox --json against an old host marks every entry unknown-unsupported", async () => {
+  const host = new FakeStatusHost("legacy-error");
+  const { aliceHome, bobId, factory } = await friendedPair(host);
+  const aliceStore = new EdgeBookStore({ home: aliceHome });
+  const object = await aliceStore.createObject({ title: "t", body: "b" });
+  await handleCli(["object", "share", bobId, object.object_id, "--deliver", "--host", "ws://fake"],
+    { home: aliceHome, socketFactory: factory });
+
+  const result = await handleCli(["outbox", "--json", "--host", "ws://fake"], { home: aliceHome, socketFactory: factory });
+  const parsed = JSON.parse(result.text) as { entries: Array<{ state: string; stale: boolean }> };
+  assert.equal(parsed.entries.length, 1);
+  assert.equal(parsed.entries[0]!.state, "unknown (host does not support receipts)");
+  assert.equal(parsed.entries[0]!.stale, false);
+});
