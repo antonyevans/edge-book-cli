@@ -7,7 +7,7 @@
 // public function is called by a same-named one-line delegate method on
 // EdgeBookStore.
 import { EdgeBookStore } from "./edge-book.ts";
-import type { EscalationBody, FriendRequestBody, FriendResponseBody, MessageEnvelope, NotificationIntent, ObjectShareBody } from "./types.ts";
+import type { EscalationBody, FriendRequestBody, FriendResponseBody, MessageEnvelope, NotificationIntent, ObjectShareBody, SupportBundleBody } from "./types.ts";
 import { readJson, writeJson } from "./fs-json.ts";
 import { NOTIFIED_FILE } from "./store-files.ts";
 
@@ -81,6 +81,18 @@ const NOTIFY_POLICIES: Partial<Record<MessageEnvelope["type"], NotifyPolicy>> = 
       kind: "escalation",
       from_id: env.from_agent_id,
       message: `${esc?.subject ?? "A decision is needed"} — ${esc?.body ?? ""}${opts}`,
+      dedup_key: env.message_id,
+    };
+  },
+  support_bundle: async (env) => {
+    // spec-134 operator inbox. Message carries ids/refs only — never the report.
+    const body = env.body as unknown as SupportBundleBody;
+    const name = body.card?.display_name || env.from_agent_id;
+    return {
+      kind: "support_bundle",
+      from_id: env.from_agent_id,
+      from_name: body.card?.display_name,
+      message: `${name} sent a support bundle (ref ${env.trace_id ?? env.message_id}). Review: edge-book support pending`,
       dedup_key: env.message_id,
     };
   },

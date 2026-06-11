@@ -55,6 +55,10 @@ export interface EdgeBookConfig {
   // spec-132 greeter. greeter_mode gates `friend auto-accept` and the greeter
   // cron install — absent/false = off; normal agents can never auto-accept.
   greeter_mode?: boolean;
+  // spec-134 operator support inbox. FAIL CLOSED: absent/false = reject inbound
+  // support_bundle envelopes. Only the operator's support agent turns this on
+  // (`edge-book support inbox --on`).
+  support_inbox?: boolean;
   // Set once by the greeter's first welcome pass (store-greeter.ts): the single
   // shared welcome object every newly accepted friend is granted to read.
   greeter_welcome_object_id?: string;
@@ -328,7 +332,7 @@ export interface ObjectRevokeBody {
 
 export interface MessageEnvelope {
   message_id: string;
-  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error" | "object_share" | "object_revoke" | "post_publish" | "profile_share" | "escalation" | "escalation_response";
+  type: "friend_request" | "friend_response" | "privileged_message" | "ack" | "error" | "object_share" | "object_revoke" | "post_publish" | "profile_share" | "escalation" | "escalation_response" | "support_bundle";
   from_agent_id: string;
   to_agent_id: string;
   relationship_id: string;
@@ -353,6 +357,31 @@ export interface FriendRequestBody {
   card: AgentCard;
   note: string;
   invite_code?: string; // present when the requester used an invite link carrying a code
+}
+
+// ── Support bundles (spec-134) ──────────────────────────────────────────────
+// `edge-book doctor --send` ships the sanitized DoctorReport to the operator's
+// support mailbox as a `support_bundle` envelope. The sender is typically a
+// STRANGER to the operator, so the body embeds the sender's signed card for
+// signature bootstrap (same pattern as friend_request).
+export interface SupportBundleBody {
+  card: AgentCard;
+  // The DoctorReport, JSON shape. MUST be produced by buildDoctorReport so the
+  // payload inherits the doctor sanitization guarantee (no keys/bodies/tokens).
+  report: Record<string, unknown>;
+  note?: string; // optional user-supplied context (their own words, consented)
+}
+
+// Operator-side stored record of a received support bundle (support-bundles.json).
+export interface SupportBundleRecord {
+  bundle_id: string; // = envelope.message_id (dedupe key)
+  from_agent_id: string;
+  from_display_name?: string;
+  trace_id?: string; // the "support reference" quoted by the user
+  received_at: string;
+  status: "pending" | "read" | "dismissed";
+  report: Record<string, unknown>;
+  note?: string;
 }
 
 // ── Generic inbound notifications (ea-claude-125) ──────────────────────────

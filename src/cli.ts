@@ -6,8 +6,9 @@
 // Layout: handleCli is one flat if-chain ordered like the command reference in
 // commands-doc.ts (which generates --help and the README table; the pre-commit
 // hook keeps the README in sync). Per-feature command blocks live in
-// cli-identity.ts / cli-social.ts / cli-taxonomy.ts (each returns null when the
-// command is not its own, preserving dispatch order); host/server commands
+// cli-identity.ts / cli-social.ts / cli-support.ts / cli-taxonomy.ts (each
+// returns null when the command is not its own, preserving dispatch order);
+// host/server commands
 // (serve, dialout, pair, sessions, relay, harness) stay inline here.
 import { realpathSync } from "node:fs";
 import net from "node:net";
@@ -17,6 +18,7 @@ import type { CliContext, CliResult } from "./cli-shared.ts";
 import { maybeAppendHandleNudge } from "./handle-nudge.ts";
 import { handleIdentityCli } from "./cli-identity.ts";
 import { handleSocialCli } from "./cli-social.ts";
+import { handleSupportCli } from "./cli-support.ts";
 import { handleTaxonomyCli } from "./cli-taxonomy.ts";
 import { handleDirectoryCli } from "./cli-directory.ts";
 import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, listSessions, mailboxStatus, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
@@ -69,6 +71,9 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     if (command === "friend" && socialAction === "auto-accept") return socialResult;
     return maybeAppendHandleNudge(store, command, socialResult);
   }
+
+  const supportResult = await handleSupportCli(command, args, ctx, home, store);
+  if (supportResult) return supportResult;
 
   if (command === "serve") {
     const host = takeFlag(args, "--host") || "127.0.0.1";

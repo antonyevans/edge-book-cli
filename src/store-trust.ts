@@ -16,7 +16,8 @@
 //     active message.friend grant on BOTH send and receive.
 import { EdgeBookStore } from "./edge-book.ts";
 import { EdgeBookError } from "./types.ts";
-import type { AgentContactRecord, CapabilityGrant, Escalation, FriendRequestBody, FriendResponseBody, LocalUserSession, MessageEnvelope } from "./types.ts";
+import type { AgentContactRecord, CapabilityGrant, Escalation, FriendRequestBody, LocalUserSession, MessageEnvelope, SupportBundleRecord } from "./types.ts";
+import { receiveSupportBundle } from "./store-support.ts";
 import { relationshipId, signPayload, verifyPayload, withoutSignature } from "./crypto.ts";
 import { now, randomId, readJson, writeJson, appendJsonl } from "./fs-json.ts";
 import { AUDIT_FILE, INBOUND_RATE_FILE, INBOX_FILE, MESSAGES_FILE, SEEN_MESSAGES_FILE } from "./store-files.ts";
@@ -177,14 +178,18 @@ export async function assertGrantSignature(store: EdgeBookStore, grant: Capabili
   }
 }
 
-export async function signEnvelope(store: EdgeBookStore, input: Omit<MessageEnvelope, "message_id" | "from_agent_id" | "created_at" | "expires_at" | "signature">): Promise<MessageEnvelope> {
+export async function signEnvelope(store: EdgeBookStore, input: Omit<MessageEnvelope, "message_id" | "from_agent_id" | "created_at" | "expires_at" | "signature"> & { expires_at?: string }): Promise<MessageEnvelope> {
   const identity = await store.identity();
+  // expires_at is ADDITIVE-optional (spec-134): default stays the historical
+  // 10 minutes; store-and-forward kinds (support_bundle) pass a longer window
+  // so a bundle queued for an offline operator still verifies on delivery.
+  const { expires_at, ...rest } = input;
   const unsigned: Omit<MessageEnvelope, "signature"> = {
     message_id: randomId("msg"),
     from_agent_id: identity.agent_id,
     created_at: now(),
-    expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-    ...input,
+    expires_at: expires_at ?? new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+    ...rest,
     // Trace correlation (ea-claude-138): every new outbound envelope carries a
     // trace_id INSIDE the signed payload (tamper-evident; back-compat — old
     // receivers canonicalize whatever fields they parsed, so verification
@@ -194,6 +199,16 @@ export async function signEnvelope(store: EdgeBookStore, input: Omit<MessageEnve
     trace_id: input.trace_id?.slice(0, 128) || randomId("trace")
   };
   return { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
+}
+
+// Stranger-bootstrap kinds carry the sender's card in the body so the receiver
+// can verify the signature before any contact exists: friend_request,
+// friend_response, and support_bundle (spec-134). The card itself is validated
+// by the type's receive handler; here we only need its first public key.
+function embeddedCardKey(envelope: MessageEnvelope): string | undefined {
+  if (envelope.type !== "friend_request" && envelope.type !== "friend_response" && envelope.type !== "support_bundle") return undefined;
+  const card = (envelope.body as unknown as FriendRequestBody).card;
+  return card?.public_keys?.[0]?.public_key_pem;
 }
 
 export async function verifyEnvelope(store: EdgeBookStore, envelope: MessageEnvelope): Promise<void> {
@@ -207,15 +222,7 @@ export async function verifyEnvelope(store: EdgeBookStore, envelope: MessageEnve
     throw new EdgeBookError("replay", `Replay detected for ${envelope.message_id}`);
   }
   const contacts = await store.contacts();
-  let publicKey = contacts[envelope.from_agent_id]?.public_keys?.[0]?.public_key_pem;
-  if (!publicKey && envelope.type === "friend_request") {
-    const card = (envelope.body as unknown as FriendRequestBody).card;
-    publicKey = card?.public_keys?.[0]?.public_key_pem;
-  }
-  if (!publicKey && envelope.type === "friend_response") {
-    const card = (envelope.body as unknown as FriendResponseBody).card;
-    publicKey = card?.public_keys?.[0]?.public_key_pem;
-  }
+  const publicKey = contacts[envelope.from_agent_id]?.public_keys?.[0]?.public_key_pem ?? embeddedCardKey(envelope);
   if (!publicKey) throw new EdgeBookError("unknown_key", `Unknown sender key for ${envelope.from_agent_id}`);
   if (!verifyPayload(withoutSignature(envelope), envelope.signature, publicKey)) {
     // Flight recorder (spec-133): signature verification failure.
@@ -270,8 +277,11 @@ export async function revokeSession(store: EdgeBookStore, sessionId: string): Pr
 
 // Route an applied inbound envelope to its type handler (the mailbox receive
 // path; dedupe-by-message_id happens inside verifyEnvelope on each handler).
-export async function receiveEnvelope(store: EdgeBookStore, envelope: MessageEnvelope): Promise<void | AgentContactRecord | MessageEnvelope | Escalation | null> {
+export async function receiveEnvelope(store: EdgeBookStore, envelope: MessageEnvelope): Promise<void | AgentContactRecord | MessageEnvelope | Escalation | SupportBundleRecord | null> {
   if (envelope.type === "friend_request") return store.receiveFriendRequest(envelope);
+  // Direct import (no EdgeBookStore delegate): edge-book.ts is at its size cap —
+  // see the store-support.ts header.
+  if (envelope.type === "support_bundle") return receiveSupportBundle(store, envelope);
   if (envelope.type === "friend_response") return store.applyFriendResponse(envelope);
   if (envelope.type === "privileged_message") return store.receivePrivilegedMessage(envelope);
   if (envelope.type === "object_share") { await store.receiveObjectShare(envelope); return; }
