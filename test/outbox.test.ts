@@ -168,8 +168,8 @@ async function friendedPair(host: FakeStatusHost): Promise<{ root: string; alice
   const bobHome = path.join(root, "bob");
   const aliceStore = new EdgeBookStore({ home: aliceHome });
   const bobStore = new EdgeBookStore({ home: bobHome });
-  await aliceStore.init({ handle: "alice.local", ownerLabel: "Alice" });
-  await bobStore.init({ handle: "bob.local", ownerLabel: "Bob" });
+  await aliceStore.init({ handle: "alice.local", displayName: "Alice", ownerLabel: "Alice" });
+  await bobStore.init({ handle: "bob.local", displayName: "Bob", ownerLabel: "Bob" });
   const aliceCard = await aliceStore.writeCard();
   const bobCard = await bobStore.writeCard();
   await bobStore.receiveFriendRequest(await aliceStore.createFriendRequest(bobCard));
@@ -311,4 +311,69 @@ test("friend request --deliver over the mailbox uses honest wording and records 
   const entries = await readOutbox(carolHome);
   assert.equal(entries.length, 1);
   assert.equal(entries[0]!.envelope_type, "friend_request");
+});
+
+// ── spec-097 C.3: the `edge-book outbox` command ─────────────────────────────
+
+test("outbox prints per-entry state and a LOUD warning for stale-queued mail; --json round-trips", async () => {
+  const host = new FakeStatusHost("receipts");
+  const { aliceHome, bobId, factory } = await friendedPair(host);
+  const aliceStore = new EdgeBookStore({ home: aliceHome });
+  const object = await aliceStore.createObject({ title: "t", body: "b" });
+  // Send one (records m0), then make the host report it stale-queued.
+  await handleCli(["object", "share", bobId, object.object_id, "--deliver", "--host", "ws://fake"],
+    { home: aliceHome, socketFactory: factory });
+  host.statuses.set("m0", { state: "queued", queued_ms: 11 * 60 * 1000, recipient_live: false });
+
+  const result = await handleCli(["outbox", "--host", "ws://fake"], { home: aliceHome, socketFactory: factory });
+  assert.match(result.text, /object_share/);
+  assert.match(result.text, /queued/);
+  assert.match(result.text, /⚠ undelivered for /, "loud stale warning present");
+  assert.match(result.text, /different identity; ask them for a fresh invite/, "the June 9 diagnosis, automated");
+
+  const jsonResult = await handleCli(["outbox", "--json", "--host", "ws://fake"], { home: aliceHome, socketFactory: factory });
+  const parsed = JSON.parse(jsonResult.text) as { entries: Array<{ id: string; state: string; stale: boolean; queued_ms?: number }> };
+  assert.equal(parsed.entries[0]!.id, "m0");
+  assert.equal(parsed.entries[0]!.state, "queued");
+  assert.equal(parsed.entries[0]!.stale, true);
+  assert.equal(parsed.entries[0]!.queued_ms, 11 * 60 * 1000);
+});
+
+test("outbox warns when recipient_live=false even under the stale-time threshold", async () => {
+  const host = new FakeStatusHost("receipts");
+  const { aliceHome, bobId, factory } = await friendedPair(host);
+  const aliceStore = new EdgeBookStore({ home: aliceHome });
+  const object = await aliceStore.createObject({ title: "t", body: "b" });
+  await handleCli(["object", "share", bobId, object.object_id, "--deliver", "--host", "ws://fake"],
+    { home: aliceHome, socketFactory: factory });
+  host.statuses.set("m0", { state: "queued", queued_ms: 5_000, recipient_live: false });
+
+  const result = await handleCli(["outbox", "--host", "ws://fake"], { home: aliceHome, socketFactory: factory });
+  assert.match(result.text, /⚠ undelivered/, "recipient_live=false alone triggers the warning");
+});
+
+test("outbox shows contact display names where known and acked state for delivered mail", async () => {
+  const host = new FakeStatusHost("receipts");
+  const { aliceHome, bobId, factory } = await friendedPair(host);
+  const aliceStore = new EdgeBookStore({ home: aliceHome });
+  const object = await aliceStore.createObject({ title: "t", body: "b" });
+  await handleCli(["object", "share", bobId, object.object_id, "--deliver", "--host", "ws://fake"],
+    { home: aliceHome, socketFactory: factory });
+  host.statuses.set("m0", { state: "acked" });
+
+  const result = await handleCli(["outbox", "--host", "ws://fake"], { home: aliceHome, socketFactory: factory });
+  assert.match(result.text, /acked/);
+  const contacts = await aliceStore.contacts();
+  const display = contacts[bobId]?.display_name;
+  assert.ok(display, "test pair has a contact display name");
+  assert.ok(result.text.includes(display!), "recipient shown by display name, not bare DID");
+  assert.doesNotMatch(result.text, /⚠/, "acked mail never warns");
+});
+
+test("outbox with an empty ledger says so and exits cleanly", async () => {
+  const home = await tempHome();
+  const store = new EdgeBookStore({ home });
+  await store.init({ handle: "lonely.local" });
+  const result = await handleCli(["outbox", "--host", "ws://fake"], { home, socketFactory: factoryFor(new FakeStatusHost("receipts")) });
+  assert.match(result.text, /Outbox is empty/);
 });

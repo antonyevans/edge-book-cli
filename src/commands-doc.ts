@@ -110,6 +110,10 @@ export const COMMAND_GROUPS: CommandGroup[] = [
         usage: "sessions revoke [--device <id>] [--host <wss-url>]",
         desc: "Revoke one device session (or all if no --device)",
       },
+      {
+        usage: "outbox [--json] [--host <wss-url>]",
+        desc: "Delivery state of recently sent envelopes (queued / delivered / acked) with stale-queue warnings",
+      },
     ],
   },
   {
