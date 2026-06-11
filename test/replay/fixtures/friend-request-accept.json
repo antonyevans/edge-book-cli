@@ -1,0 +1,41 @@
+{
+  "schema": "edge-book-replay-fixture/0.1",
+  "title": "happy path: friend request received, then accepted",
+  "description": "Synthetic baseline: an inbound friend_request lands through the dial-out mailbox path, the recipient accepts, and the contact reaches relationship_state=friend with the matching flight-recorder entries.",
+  "identities": {
+    "mallory": {
+      "seed": "1111111111111111111111111111111111111111111111111111111111111111",
+      "handle": "mallory.replay.local",
+      "display_name": "Mallory (synthetic)"
+    }
+  },
+  "recipient": { "handle": "replay-user.openclaw.local", "display_name": "Replay User" },
+  "steps": [
+    {
+      "deliver": {
+        "from": "mallory",
+        "type": "friend_request",
+        "message_id": "msg-replay-fr-001",
+        "trace_id": "trace-replay-fr-001",
+        "created_at": "2026-06-01T00:00:00.000Z",
+        "expires_at": "2099-01-01T00:00:00.000Z",
+        "body": { "note": "synthetic reproduction: hello from mallory" }
+      },
+      "expect": {
+        "outcome": "accepted",
+        "events": [
+          { "kind": "envelope.received", "fields": { "envelope_kind": "friend_request", "applied": true } },
+          { "kind": "friend.request_received", "fields": { "dedup_key": "msg-replay-fr-001" } }
+        ],
+        "relationship_state": "request_received"
+      }
+    },
+    {
+      "local": { "action": "accept_friend", "peer": "mallory" },
+      "expect": {
+        "events": [{ "kind": "friend.accepted" }],
+        "relationship_state": "friend"
+      }
+    }
+  ]
+}
