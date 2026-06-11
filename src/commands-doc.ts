@@ -161,6 +161,10 @@ export const COMMAND_GROUPS: CommandGroup[] = [
         desc: "Mark a pending request as already surfaced to the human",
       },
       {
+        usage: "friend auto-accept [--deliver]",
+        desc: "Greeter only: accept all pending requests and send the welcome share (requires greeter --on)",
+      },
+      {
         usage: "friend notify-config --on|--off",
         desc: "Enable or disable inbound friend-request notifications",
       },

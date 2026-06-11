@@ -145,3 +145,51 @@ test("welcome copy avoids infrastructure vocabulary", () => {
   }
   assert.ok(!/\bgrants?\b/i.test(text), "grant-as-noun is banned in welcome copy");
 });
+
+test("CLI: friend auto-accept without greeter_mode → greeter_mode_required", async () => {
+  const home = await tempRoot();
+  await handleCli(["init", "--home", home]);
+  await assert.rejects(
+    () => handleCli(["friend", "auto-accept", "--home", home]),
+    (e: unknown) => e instanceof EdgeBookError && e.code === "greeter_mode_required",
+  );
+});
+
+test("CLI: friend auto-accept returns JSON [{agent_id, accepted, welcomed}] for cron logs", async () => {
+  const { greeter, requesters } = await greeterWithPending(1);
+  await handleCli(["greeter", "--on", "--home", greeter.home]);
+  const result = await handleCli(["friend", "auto-accept", "--home", greeter.home]);
+  const json = result.json as Array<{ agent_id: string; accepted: boolean; welcomed: boolean }>;
+  assert.equal(json.length, 1);
+  assert.deepEqual(json[0], { agent_id: requesters[0].card.agent_id, accepted: true, welcomed: true });
+  assert.deepEqual(JSON.parse(result.text), json, "text output is the same JSON (cron-log friendly)");
+  // The pass really ran: contact is friend, welcome object pinned.
+  assert.equal((await greeter.store.contacts())[requesters[0].card.agent_id].relationship_state, "friend");
+  assert.ok((await greeter.store.config()).greeter_welcome_object_id);
+});
+
+test("CLI: friend auto-accept output stays pure JSON even when the handle nudge would fire", async () => {
+  // Fresh init leaves the placeholder handle, so the spec-130 nudge would
+  // normally append prose to `friend` output. auto-accept is exempt
+  // (spec-132 ruling): its text output is a machine-readable cron-log
+  // contract — the nudge belongs to human conversation surfaces.
+  const home = await tempRoot();
+  await handleCli(["init", "--home", home, "--name", "Greeter Agent"]);
+  await handleCli(["greeter", "--on", "--home", home]);
+  const result = await handleCli(["friend", "auto-accept", "--home", home]);
+  assert.doesNotThrow(() => JSON.parse(result.text), "text must parse as pure JSON, no trailing prose");
+  assert.ok(!result.text.includes("handle set"), "no handle nudge on machine output");
+  // The exemption must not consume the one-time nudge: a human-surface
+  // command afterwards still gets it.
+  const pending = await handleCli(["friend", "pending", "--home", home]);
+  assert.ok(pending.text.includes("handle set"), "nudge still fires on human surfaces");
+});
+
+test("CLI: friend auto-accept with nothing pending returns an empty list", async () => {
+  const home = await tempRoot();
+  await handleCli(["init", "--home", home]);
+  await handleCli(["greeter", "--on", "--home", home]);
+  const result = await handleCli(["friend", "auto-accept", "--home", home]);
+  assert.deepEqual(result.json, []);
+  assert.equal(result.text.trim(), "[]");
+});

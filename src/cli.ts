@@ -53,8 +53,16 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   const identityResult = await handleIdentityCli(command, args, ctx, home, store);
   if (identityResult) return identityResult;
 
+  // Capture the social sub-action before handleSocialCli shifts it off args:
+  // `friend auto-accept` is machine-invoked (greeter cron) and its text output
+  // is a machine-readable JSON contract for cron logs — the handle nudge
+  // belongs to human conversation surfaces only (spec-132 ruling), so skip it.
+  const socialAction = args[0];
   const socialResult = await handleSocialCli(command, args, ctx, home, store);
-  if (socialResult) return maybeAppendHandleNudge(store, command, socialResult);
+  if (socialResult) {
+    if (command === "friend" && socialAction === "auto-accept") return socialResult;
+    return maybeAppendHandleNudge(store, command, socialResult);
+  }
 
   if (command === "serve") {
     const host = takeFlag(args, "--host") || "127.0.0.1";
