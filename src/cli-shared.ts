@@ -6,8 +6,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { DEFAULT_DIALOUT_HOST, deliverEnvelopeViaMailbox } from "./dialout.ts";
 import type { DialoutSocket } from "./dialout.ts";
-import { EdgeBookError, EdgeBookStore } from "./edge-book.ts";
+import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "./edge-book.ts";
 import { postEnvelope, postRelayEnvelope } from "./http-relay.ts";
+import { recordOutboxEntry } from "./store-outbox.ts";
 
 export interface CliContext {
   home?: string;
@@ -101,6 +102,32 @@ export async function deliverToPeer(store: EdgeBookStore, envelope: Awaited<Retu
   throw new EdgeBookError("no_route", `No direct or relay endpoint for ${peerAgentId}`);
 }
 
+// Deliver over the host mailbox, record the outbox ledger entry, and render
+// honest state wording (spec-097 §C.2): "Sent" when the recipient's agent is
+// live, "Queued" when not, and the caller's legacy wording when the host
+// predates receipts (recipient_live absent from the ack). Every mailbox
+// --deliver path routes through here so all of them record without copies.
+export async function deliverViaMailboxRecorded(
+  envelope: MessageEnvelope,
+  opts: { home?: string; host: string; socketFactory?: CliContext["socketFactory"] },
+  legacyText: (id: string) => string,
+): Promise<{ id: string; recipient_live?: boolean; text: string }> {
+  const ack = await deliverEnvelopeViaMailbox({ home: opts.home, host: opts.host, socketFactory: opts.socketFactory, envelope });
+  await recordOutboxEntry(opts.home, {
+    id: ack.id,
+    to_agent_id: envelope.to_agent_id,
+    envelope_type: envelope.type,
+    ...(typeof ack.recipient_live === "boolean" ? { recipient_live: ack.recipient_live } : {})
+  });
+  if (ack.recipient_live === true) {
+    return { ...ack, text: `Sent ${envelope.type} to ${envelope.to_agent_id} — recipient's agent is connected (host id ${ack.id}).` };
+  }
+  if (ack.recipient_live === false) {
+    return { ...ack, text: `Queued ${envelope.type} to ${envelope.to_agent_id} — recipient's agent is NOT connected; it will arrive when they reconnect. Check later: edge-book outbox (host id ${ack.id}).` };
+  }
+  return { ...ack, text: legacyText(ack.id) };
+}
+
 /** Broadcast a signed post to all friends via the mailbox. Returns the number of deliveries attempted. */
 export async function broadcastPost(
   store: EdgeBookStore,
@@ -113,7 +140,8 @@ export async function broadcastPost(
   let count = 0;
   for (const f of friends) {
     const envelope = await store.signPostPublishEnvelope({ to_agent_id: f.peer_agent_id, post });
-    await deliverEnvelopeViaMailbox({ home: store.home, host, socketFactory, envelope });
+    await deliverViaMailboxRecorded(envelope, { home: store.home, host, socketFactory },
+      (id) => `Delivered post_publish (host id ${id})`);
     count++;
   }
   return count;

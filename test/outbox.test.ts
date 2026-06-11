@@ -234,3 +234,81 @@ test("lost-frame path: a silent host resolves to null after the RPC timeout", as
   const statuses = await mailboxStatus({ home: aliceHome, host: "ws://fake", socketFactory: factory, ids: ["m0"], timeoutMs: 100 });
   assert.equal(statuses, null, "timeout degrades to local-only, same as the error frame");
 });
+
+// ── spec-097 C.3: honest --deliver wording + ledger recording ────────────────
+
+test("--deliver with recipient_live=false prints Queued/NOT connected, never Delivered, and records the ledger entry", async () => {
+  const host = new FakeStatusHost("receipts");
+  const { aliceHome, bobId, factory } = await friendedPair(host);
+  const aliceStore = new EdgeBookStore({ home: aliceHome });
+  const object = await aliceStore.createObject({ title: "t", body: "b" });
+
+  const result = await handleCli(["object", "share", bobId, object.object_id, "--deliver", "--host", "ws://fake"],
+    { home: aliceHome, socketFactory: factory });
+
+  assert.match(result.text, /Queued/);
+  assert.match(result.text, /NOT connected/);
+  assert.match(result.text, /edge-book outbox/);
+  assert.doesNotMatch(result.text, /Delivered/, "the word Delivered no longer appears at enqueue time");
+
+  const entries = await readOutbox(aliceHome);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]!.id, "m0", "host-assigned id recorded");
+  assert.equal(entries[0]!.envelope_type, "object_share");
+  assert.equal(entries[0]!.to_agent_id, bobId);
+  assert.equal(entries[0]!.recipient_live, false);
+});
+
+test("--deliver with recipient_live=true prints the Sent wording", async () => {
+  const host = new FakeStatusHost("receipts");
+  const { aliceHome, bobId, factory } = await friendedPair(host);
+  host.liveRecipients.add(bobId);
+  const aliceStore = new EdgeBookStore({ home: aliceHome });
+  const object = await aliceStore.createObject({ title: "t", body: "b" });
+
+  const result = await handleCli(["object", "share", bobId, object.object_id, "--deliver", "--host", "ws://fake"],
+    { home: aliceHome, socketFactory: factory });
+
+  assert.match(result.text, /Sent/);
+  assert.match(result.text, /recipient's agent is connected/);
+  const entries = await readOutbox(aliceHome);
+  assert.equal(entries[0]!.recipient_live, true);
+});
+
+test("old-host send (no recipient_live) keeps the legacy wording and still records the entry", async () => {
+  const host = new FakeStatusHost("legacy-error");
+  const { aliceHome, bobId, factory } = await friendedPair(host);
+  const aliceStore = new EdgeBookStore({ home: aliceHome });
+  const object = await aliceStore.createObject({ title: "t", body: "b" });
+
+  const result = await handleCli(["object", "share", bobId, object.object_id, "--deliver", "--host", "ws://fake"],
+    { home: aliceHome, socketFactory: factory });
+
+  assert.match(result.text, /Shared object .* over the mailbox \(host id m0\)/, "graceful degradation: current wording unchanged");
+  const entries = await readOutbox(aliceHome);
+  assert.equal(entries.length, 1);
+  assert.ok(!("recipient_live" in entries[0]!));
+});
+
+test("friend request --deliver over the mailbox uses honest wording and records the entry", async () => {
+  const host = new FakeStatusHost("receipts");
+  const { bobHome, factory } = await friendedPair(host);
+  // A fresh pair NOT yet friended for a clean friend_request; reuse bob's card file.
+  const bobStore = new EdgeBookStore({ home: bobHome });
+  const bobCard = await bobStore.writeCard();
+  const root = await tempHome();
+  const carolHome = path.join(root, "carol");
+  const carolStore = new EdgeBookStore({ home: carolHome });
+  await carolStore.init({ handle: "carol.local", ownerLabel: "Carol" });
+  const cardPath = path.join(root, "bob-card.json");
+  await fs.writeFile(cardPath, JSON.stringify(bobCard), "utf8");
+
+  const result = await handleCli(["friend", "request", cardPath, "--deliver", "--host", "ws://fake"],
+    { home: carolHome, socketFactory: factory });
+
+  assert.match(result.text, /Queued|Sent/, "state-accurate wording on the friend path too");
+  assert.doesNotMatch(result.text, /Delivered/);
+  const entries = await readOutbox(carolHome);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]!.envelope_type, "friend_request");
+});
