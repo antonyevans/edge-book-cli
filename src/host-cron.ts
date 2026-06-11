@@ -93,3 +93,56 @@ export function defaultHermesRunner(): HermesRunner {
     create: (args) => { if (bin) execFileSync(bin, args, { stdio: ["ignore", "ignore", "pipe"] }); },
   };
 }
+
+// ── spec-132: greeter cron (greeter host only) ──────────────────────────────
+export const GREETER_CRON_NAME = "Edge Book — greeter";
+export const DEFAULT_GREETER_SCHEDULE = "*/5 * * * *"; // parent design SLA: accept "within minutes"
+
+// Unlike the notifier (which writes a human message and needs LLM judgment),
+// the greeter command is self-contained — the Hermes prompt is a minimal
+// "run this command and report" wrapper.
+export function buildGreeterPrompt(home: string): string {
+  return [
+    "You are the Edge Book greeter runner. Run the command below once and report what it did. Hermes delivers your final assistant reply to the chat.",
+    "",
+    `   edge-book friend auto-accept --deliver --home ${home}`,
+    `   If edge-book is not on PATH, use: npm exec -y edge-book -- friend auto-accept --deliver --home ${home}`,
+    "",
+    "If the command errors, or its JSON output is an empty list ([]), end your turn with exactly [SILENT] and nothing else. [SILENT] tells Hermes to send no message.",
+    "",
+    "Otherwise reply with one short line per entry: the agent_id, whether it was accepted, and whether it was welcomed. No extra commentary, no raw JSON.",
+  ].join("\n");
+}
+
+// Idempotently ensure the greeter cron on a recognized host. The greeter_mode
+// gate lives in the caller (cli.ts dialout) — normal agents never reach this.
+export function ensureGreeterCron(opts: {
+  runner: HermesRunner;
+  home: string;
+  schedule?: string;
+  disabled?: boolean;
+}): EnsureResult {
+  if (opts.disabled) return { status: "disabled" };
+  if (!opts.runner.hermesBin) return { status: "host_unsupported" };
+
+  let listing: string;
+  try {
+    listing = opts.runner.list();
+  } catch (e) {
+    return { status: "error", detail: e instanceof Error ? e.message : String(e) };
+  }
+  if (listing.includes(GREETER_CRON_NAME)) return { status: "already_present" };
+
+  const args = [
+    "cron", "create", opts.schedule ?? DEFAULT_GREETER_SCHEDULE, buildGreeterPrompt(opts.home),
+    "--name", GREETER_CRON_NAME,
+    "--deliver", "telegram",
+    "--workdir", opts.home,
+  ];
+  try {
+    opts.runner.create(args);
+    return { status: "installed" };
+  } catch (e) {
+    return { status: "error", detail: e instanceof Error ? e.message : String(e) };
+  }
+}

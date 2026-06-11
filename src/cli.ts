@@ -25,7 +25,7 @@ import { renderUsage } from "./commands-doc.ts";
 import { startEdgeBookServer } from "./http.ts";
 import { startRelayServer } from "./http-relay.ts";
 import { makeNotifyOnEnvelope, resolveNotifyCmd } from "./notify.ts";
-import { ensureNotifierCron, defaultHermesRunner } from "./host-cron.ts";
+import { ensureNotifierCron, ensureGreeterCron, defaultHermesRunner } from "./host-cron.ts";
 
 export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
 export type { CliContext, CliResult } from "./cli-shared.ts";
@@ -94,8 +94,8 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     // Idempotently self-install the host notifier on a recognized host (e.g. Hermes
     // delivers via cron). Detection-gated, disable with --no-cron-install /
     // EDGE_BOOK_NO_CRON_INSTALL. A failure here must never break the dial-out.
+    const disabled = takeBoolFlag(args, "--no-cron-install") || process.env.EDGE_BOOK_NO_CRON_INSTALL === "1";
     try {
-      const disabled = takeBoolFlag(args, "--no-cron-install") || process.env.EDGE_BOOK_NO_CRON_INSTALL === "1";
       // `home` can be undefined when neither --home nor ctx.home is set; ensureNotifierCron
       // tolerates that at runtime (any failure is caught below). Documented cast to keep
       // pre-existing behavior unchanged — see FINDINGS.md §1.
@@ -104,6 +104,17 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       else if (res.status === "error") console.log(`  ↳ notifier cron install skipped: ${res.detail}`);
     } catch (e) {
       console.log(`  ↳ notifier cron install skipped: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    // spec-132: the greeter cron installs ONLY when this agent is the greeter
+    // (double gate: the command itself also refuses without greeter_mode).
+    try {
+      if ((await store.config()).greeter_mode === true) {
+        const res = ensureGreeterCron({ runner: defaultHermesRunner(), home: home as string, disabled });
+        if (res.status === "installed") console.log(`  ↳ greeter cron self-installed ("Edge Book — greeter", every 5m)`);
+        else if (res.status === "error") console.log(`  ↳ greeter cron install skipped: ${res.detail}`);
+      }
+    } catch (e) {
+      console.log(`  ↳ greeter cron install skipped: ${e instanceof Error ? e.message : String(e)}`);
     }
     await new Promise(() => undefined);
   }
