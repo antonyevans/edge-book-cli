@@ -22,7 +22,8 @@ import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, listSessions, revokeOneSes
 import type { SessionsRevokeFrame } from "./dialout-key.ts";
 import { runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import { renderUsage } from "./commands-doc.ts";
-import { startRelayServer, startEdgeBookServer } from "./http.ts";
+import { startEdgeBookServer } from "./http.ts";
+import { startRelayServer } from "./http-relay.ts";
 import { makeNotifyOnEnvelope, resolveNotifyCmd } from "./notify.ts";
 import { ensureNotifierCron, defaultHermesRunner } from "./host-cron.ts";
 

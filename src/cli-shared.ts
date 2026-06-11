@@ -7,7 +7,7 @@ import path from "node:path";
 import { DEFAULT_DIALOUT_HOST, deliverEnvelopeViaMailbox } from "./dialout.ts";
 import type { DialoutSocket } from "./dialout.ts";
 import { EdgeBookError, EdgeBookStore } from "./edge-book.ts";
-import { postEnvelope, postRelayEnvelope } from "./http.ts";
+import { postEnvelope, postRelayEnvelope } from "./http-relay.ts";
 
 export interface CliContext {
   home?: string;

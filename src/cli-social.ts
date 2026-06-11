@@ -9,7 +9,7 @@ import type { CliContext, CliResult } from "./cli-shared.ts";
 import { deliverEnvelopeViaMailbox } from "./dialout.ts";
 import { loadCard, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import type { FriendRequestBody } from "./edge-book.ts";
-import { postRelayEnvelope, pullRelayEnvelopes } from "./http.ts";
+import { postRelayEnvelope, pullRelayEnvelopes } from "./http-relay.ts";
 import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
 import fs from "node:fs/promises";
 
