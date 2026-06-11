@@ -94,3 +94,37 @@ test("directory --relay-base overrides default", async () => {
   });
   await fs.rm(store.home, { recursive: true });
 });
+
+test("directory annotates handles with local relationship state", async () => {
+  const store = await tmpStore();
+  // Seed a contact whose alias matches a directory handle
+  const contacts = await store.contacts();
+  const peerAgentId = "did:openclaw:friend-agent";
+  contacts[peerAgentId] = {
+    peer_agent_id: peerAgentId,
+    aliases: ["alice-smith"],
+    display_name: "Alice Smith",
+    relationship_state: "friend",
+    card_url: "https://example.com/card",
+    known_endpoints: [],
+    public_keys: [],
+    capability_grants: [],
+    audit_refs: [],
+    last_card_hash: "",
+    last_card_version: 1,
+    last_card_refresh_at: "",
+    last_successful_delivery_at: "",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  // Write the contacts map directly to contacts.json so the store will read it
+  const contactsPath = path.join(store.home, "contacts.json");
+  await fs.writeFile(contactsPath, JSON.stringify(contacts), "utf8");
+
+  await withFetch(async () => ({ ok: true, json: async () => mockDir }) as unknown as Response, async () => {
+    const result = await handleDirectoryCli("directory", [], {}, undefined, store);
+    assert.ok(result, "should return a result");
+    assert.ok(result.text.includes("(friend)"), `expected '(friend)' annotation, got:\n${result.text}`);
+  });
+  await fs.rm(store.home, { recursive: true });
+});

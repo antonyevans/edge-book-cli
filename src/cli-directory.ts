@@ -32,7 +32,8 @@ export async function handleDirectoryCli(
     process.env["EDGE_BOOK_RELAY_BASE"] ??
     DEFAULT_RELAY_BASE;
   const limitStr = takeFlag(args, "--limit");
-  const limit = limitStr ? Math.min(500, Math.max(1, parseInt(limitStr, 10) || 100)) : 100;
+  const parsed = parseInt(limitStr ?? "", 10);
+  const limit = limitStr ? Math.min(500, Math.max(1, Number.isNaN(parsed) ? 100 : parsed)) : 100;
 
   const url = `${relayBase.replace(/\/$/, "")}/directory?limit=${limit}&offset=0`;
 
@@ -54,7 +55,10 @@ export async function handleDirectoryCli(
   }
 
   // Build relationship annotation index keyed by handle slug (lowercase, no @).
-  const contactMap = await store.contacts().catch(() => ({} as Record<string, AgentContactRecord>));
+  const contactMap = await store.contacts().catch((err: unknown) => {
+    process.stderr.write(`[directory] could not load contacts: ${String(err)}\n`);
+    return {} as Record<string, AgentContactRecord>;
+  });
   const relByHandle = new Map<string, string>();
   for (const c of Object.values(contactMap)) {
     const label =
