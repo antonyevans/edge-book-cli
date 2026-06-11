@@ -124,7 +124,9 @@ test("CLI can initialize and export a loadable card", async () => {
 test("doctor reports initialized store, valid card, and private identity mode", async () => {
   const root = await tempRoot();
   await handleCli(["init", "--home", root, "--handle", "doctor.openclaw.local"]);
-  const result = await handleCli(["doctor", "--home", root]);
+  // --host pins the relay reachability probe (spec-133) to a closed local port
+  // so the test never touches the network; all original assertions unchanged.
+  const result = await handleCli(["doctor", "--home", root, "--host", "ws://127.0.0.1:9/agent/ws"]);
   const report = result.json as Record<string, unknown>;
   assert.equal(report.pass, true);
   assert.equal(report.card_valid, true);

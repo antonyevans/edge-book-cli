@@ -293,8 +293,8 @@ export const COMMAND_GROUPS: CommandGroup[] = [
     title: "Diagnostics",
     rows: [
       {
-        usage: "doctor",
-        desc: "Check your store, card, and key-file permissions",
+        usage: "doctor [--json] [--host <wss-url>]",
+        desc: "Diagnostic bundle: identity, relay reachability, dial-out state, stores, event-log tail (safe to paste publicly)",
       },
     ],
   },
