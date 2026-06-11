@@ -21,7 +21,7 @@ import type { DialoutApiRequest, DialoutApiResponse, LocalApi } from "./dialout-
 import { PairCompleteWaiter } from "./dialout-pair.ts";
 import type { PairCompleteResult } from "./dialout-pair.ts";
 import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "./edge-book.ts";
-import { logEvent } from "./event-log.ts";
+import { logEvent, eventErrorCode } from "./event-log.ts";
 
 export const DEFAULT_DIALOUT_HOST = "wss://edge-book-host.fly.dev/agent/ws";
 const DEFAULT_HEARTBEAT_MS = 25_000;
@@ -285,7 +285,9 @@ export class EdgeBookDialoutClient {
         }
       }
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      // Code only — e.message can embed raw payload text (JSON.parse), which
+      // must never reach the event log (see eventErrorCode).
+      error = eventErrorCode(e);
     }
     // Flight recorder (spec-133): kind/from/dedup key + outcome — never bodies.
     await logEvent(this.store, "envelope.received", {

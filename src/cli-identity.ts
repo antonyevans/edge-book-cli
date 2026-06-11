@@ -7,7 +7,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { deliverToPeer, deliverViaMailboxRecorded, parseHost, relayBaseFromHost, requireArg, takeBoolFlag, takeFlag, takeRepeatedKV } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
-import { deliverEnvelopeViaMailbox } from "./dialout.ts";
 import { buildDoctorReport, renderDoctorText } from "./doctor.ts";
 import { EdgeBookError, EdgeBookStore, defaultProfile, slugifyHandle } from "./edge-book.ts";
 import type { FieldVisibility } from "./edge-book.ts";

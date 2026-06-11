@@ -25,6 +25,19 @@ import { EVENTS_FILE } from "./store-files.ts";
 export const MAX_EVENT_LINES = 2000;
 export const COMPACT_KEEP_LINES = 1000;
 
+// Map a caught error to a SAFE event-log code. Never use e.message here:
+// JSON.parse (Node 20+) embeds raw source text in its message, so a corrupt
+// or truncated envelope blob would leak payload fragments into the log —
+// and from there into the "safe to paste publicly" doctor bundle.
+export function eventErrorCode(e: unknown): string {
+  if (e instanceof Error) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === "string" && code.length > 0) return code; // EdgeBookError et al.
+    return e.constructor.name || "Error";
+  }
+  return "unknown_error";
+}
+
 export type EventField = string | number | boolean | undefined;
 
 export interface ProtocolEvent {

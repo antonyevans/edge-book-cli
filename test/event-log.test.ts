@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { EdgeBookStore } from "../src/edge-book.ts";
-import { COMPACT_KEEP_LINES, MAX_EVENT_LINES, lastEvent, logEvent, readEvents } from "../src/event-log.ts";
+import { COMPACT_KEEP_LINES, MAX_EVENT_LINES, eventErrorCode, lastEvent, logEvent, readEvents } from "../src/event-log.ts";
 import { EVENTS_FILE } from "../src/store-files.ts";
 
 async function tempStore(): Promise<EdgeBookStore> {
@@ -93,4 +93,22 @@ test("events.ndjson lives in the agent home alongside the other stores", async (
   await logEvent(store, "x", {});
   const stat = await fs.stat(path.join(store.home, "events.ndjson"));
   assert.ok(stat.isFile());
+});
+
+test("eventErrorCode never echoes payload text (JSON.parse leak guard)", () => {
+  const SECRET = "SECRET-PAYLOAD-MARKER-7e1a this is a private message body";
+  let code = "";
+  try {
+    JSON.parse(SECRET);
+  } catch (e) {
+    code = eventErrorCode(e);
+  }
+  // Node embeds raw source text in JSON.parse messages; the code must not.
+  assert.equal(code, "SyntaxError");
+  assert.ok(!code.includes("SECRET-PAYLOAD-MARKER"), "payload fragment leaked into event error code");
+  // EdgeBookError-style errors surface their stable code field.
+  const withCode = Object.assign(new Error("boom with " + SECRET), { code: "host_hello_failed" });
+  assert.equal(eventErrorCode(withCode), "host_hello_failed");
+  // Non-Error throwables map to a fixed token, never String(e).
+  assert.equal(eventErrorCode(SECRET), "unknown_error");
 });
