@@ -1,0 +1,12 @@
+# CODEOWNERS — edge-book-cli (ea-claude-149)
+# Solo-operator repo: agents author, the owner reviews and merges.
+# Default owner for every path:
+* @antonyevans
+
+# High-care frozen surfaces (see ARCHITECTURE.md "Frozen surfaces") — changes
+# here need cross-repo coordination, so they always route to the owner:
+/src/cli.ts @antonyevans
+/src/types.ts @antonyevans
+/src/store-files.ts @antonyevans
+/src/commands-doc.ts @antonyevans
+/docs/ @antonyevans

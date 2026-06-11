@@ -77,3 +77,9 @@ passes, the agent may merge — unless the task says otherwise.
   in a feature module, not inline in the class.
 - The test suite is the behavioral spec: never weaken an assertion to make a
   change pass.
+
+## Ownership
+
+- ARCHITECTURE.md "Module ownership" names the accountable owner per module
+  class; .github/CODEOWNERS routes review. Frozen surfaces change only via an
+  owner-approved PR — never reshaped in place (supersede, do not edit).
