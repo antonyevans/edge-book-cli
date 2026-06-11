@@ -254,8 +254,10 @@ export class EdgeBookDialoutClient {
       this.pendingMailboxSends.set(request_id, { resolve, reject, timer });
     });
     // trace_id (ea-claude-138) is an OPTIONAL observability sibling of the
-    // opaque blob: the relay logs/correlates by it without parsing the blob.
-    // The authoritative copy lives inside the signed envelope.
+    // opaque blob so the relay CAN log/correlate hops without parsing the
+    // blob (host support ships in edge-book-host#12; older hosts use a
+    // lenient field-picking parser and simply ignore it). The authoritative
+    // copy lives inside the signed envelope.
     this.send({ type: "mailbox_send", request_id, to, blob_b64, ...(trace_id ? { trace_id } : {}) });
     return ack;
   }

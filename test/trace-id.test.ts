@@ -82,6 +82,31 @@ test("back-compat: an envelope WITHOUT trace_id (old peer) still verifies and pr
   assert.equal(received?.trace_id, undefined, "trace_id stays unset for old peers");
 });
 
+test("back-compat pin: an envelope carrying an UNKNOWN field still verifies (canonicalize covers every parsed field)", async () => {
+  // Proxy pin for the new->old direction: a 0.11.x/0.12.x verifier runs this
+  // same canonicalization code, so if an unknown signed field survives HERE,
+  // it survives there. Guards against a future strict-parse/schema change
+  // silently stripping unknown keys and breaking trace_id back-compat.
+  const root = await tempRoot();
+  const { alice, bob, bobCard } = await pair(root);
+  const modern = await alice.createFriendRequest(bobCard);
+  const futureUnsigned = withoutSignature({ ...modern, future_field: "from-a-newer-version" } as unknown as MessageEnvelope);
+  const identity = await alice.identity();
+  const future = { ...futureUnsigned, signature: signPayload(futureUnsigned, identity.private_key_pem) } as MessageEnvelope;
+  const contact = await bob.receiveEnvelope(future);
+  assert.ok(contact, "envelope with unknown signed field applied");
+});
+
+test("caller-supplied trace_id is clamped to 128 chars; empty falls back to a generated id", async () => {
+  const root = await tempRoot();
+  const { alice, bobCard } = await pair(root);
+  const base = { to_agent_id: bobCard.agent_id, type: "friend_request" as const, body: { note: "" } as unknown as MessageEnvelope["body"] };
+  const clamped = await alice.signEnvelope({ ...base, trace_id: "x".repeat(300) });
+  assert.equal(clamped.trace_id?.length, 128);
+  const generated = await alice.signEnvelope({ ...base, trace_id: "" });
+  assert.ok(generated.trace_id && generated.trace_id.startsWith("trace_"), "empty trace_id replaced with generated id");
+});
+
 // FakeSocket acks hello + mailbox_send (pattern: test/dialout-friend-relay.test.ts).
 class FakeSocket {
   sent: Record<string, unknown>[] = [];

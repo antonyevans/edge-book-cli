@@ -188,8 +188,10 @@ export async function signEnvelope(store: EdgeBookStore, input: Omit<MessageEnve
     // Trace correlation (ea-claude-138): every new outbound envelope carries a
     // trace_id INSIDE the signed payload (tamper-evident; back-compat — old
     // receivers canonicalize whatever fields they parsed, so verification
-    // still passes). Callers may pass an existing trace_id to chain a flow.
-    trace_id: input.trace_id ?? randomId("trace")
+    // still passes). Callers may pass an existing trace_id to chain a flow;
+    // it is clamped to 128 chars (mirrors the host frame rule) and an empty
+    // string falls back to a generated id.
+    trace_id: input.trace_id?.slice(0, 128) || randomId("trace")
   };
   return { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
 }
