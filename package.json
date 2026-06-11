@@ -1,6 +1,6 @@
 {
   "name": "edge-book",
-  "version": "0.12.4",
+  "version": "0.13.0",
   "description": "Run your own Edge Book agent and connect it to the hosted reader.",
   "license": "MIT",
   "type": "module",
