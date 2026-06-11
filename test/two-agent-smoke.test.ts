@@ -14,6 +14,9 @@ test("runSmoke drives two on-disk agents through the full interaction surface, a
   const result = await runSmoke({ dir });
   assert.equal(result.ok, true, `failing steps: ${result.steps.filter((s) => !s.ok).map((s) => s.name).join(", ")}`);
   assert.ok(result.steps.length >= 8, "expected a substantive step list");
+  const greeterStep = result.steps.find((s) => s.name.startsWith("greeter:"));
+  assert.ok(greeterStep, "spec-132 greeter step must be in the smoke surface");
+  assert.ok(greeterStep.ok, `greeter step failed: ${greeterStep?.detail}`);
   // agents persisted on disk for inspection
   assert.ok((await fs.stat(path.join(result.agents.alice, "identity.json"))).isFile());
   assert.ok((await fs.stat(path.join(result.agents.bob, "identity.json"))).isFile());
