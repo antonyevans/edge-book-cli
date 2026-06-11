@@ -55,7 +55,7 @@ import { enforceInboundRate, issueGrant, storeGrant, sendPrivilegedMessage, rece
 import { notificationIntent, wasNotified, recordNotified } from "./store-notify.ts";
 import { IDENTITY_FILE, CONTACTS_FILE, GRANTS_FILE, CONFIG_FILE, AUDIT_FILE, INBOX_FILE, SESSIONS_FILE } from "./store-files.ts";
 import { EdgeBookError } from "./types.ts";
-import type { RelationshipState, TransportMode, EdgeBookOptions, EdgeBookConfig, LocalIdentity, FieldVisibility, SocialLink, IdentityProfile, FriendProfile, AgentCard, AgentContactRecord, RelationshipEvent, CapabilityGrant, SharedObjectAttachment, SharedObject, ObjectShareBody, ResultAttestation, StrongRef, Endorsement, Signal, EphemeralType, EphemeralPost, Answer, ReceivedPost, CapabilityAdvertisement, ObjectRevokeBody, MessageEnvelope, FriendRequestBody, NotificationIntent, ReportRecord, InviteCode, FriendResponseBody, ProfileShareBody, EdgeBookVisibility, EdgeBookPostStatus, EdgeBookPostKind, LocalUserSession, EdgeBookPost, FeedItem, ApprovalRequest, EscalationKind, EscalationStatus, Escalation, EscalationBody, EscalationResponseBody, ContactMute, PostType } from "./types.ts";
+import type { RelationshipState, TransportMode, EdgeBookOptions, EdgeBookConfig, LocalIdentity, FieldVisibility, SocialLink, IdentityProfile, FriendProfile, AgentCard, AgentContactRecord, RelationshipEvent, CapabilityGrant, SharedObjectAttachment, SharedObject, ObjectShareBody, ResultAttestation, StrongRef, Endorsement, Signal, EphemeralType, EphemeralPost, Answer, ReceivedPost, CapabilityAdvertisement, ObjectRevokeBody, MessageEnvelope, FriendRequestBody, NotificationIntent, ReportRecord, InviteCode, FriendResponseBody, ProfileShareBody, EdgeBookVisibility, EdgeBookPostStatus, EdgeBookPostKind, LocalUserSession, EdgeBookPost, FeedItem, ApprovalRequest, EscalationKind, EscalationStatus, Escalation, EscalationBody, EscalationResponseBody, ContactMute, PostType, SupportBundleRecord } from "./types.ts";
 
 export { computeLifecycle } from "./store-taxonomy.ts";
 
@@ -554,7 +554,7 @@ export class EdgeBookStore {
     return signPostPublishEnvelope(this, input);
   }
 
-  async signEnvelope(input: Omit<MessageEnvelope, "message_id" | "from_agent_id" | "created_at" | "expires_at" | "signature">): Promise<MessageEnvelope> {
+  async signEnvelope(input: Omit<MessageEnvelope, "message_id" | "from_agent_id" | "created_at" | "expires_at" | "signature"> & { expires_at?: string }): Promise<MessageEnvelope> {
     return signEnvelope(this, input);
   }
 
@@ -566,7 +566,7 @@ export class EdgeBookStore {
     return readJsonl<MessageEnvelope>(this.file(INBOX_FILE));
   }
 
-  async receiveEnvelope(envelope: MessageEnvelope): Promise<void | AgentContactRecord | MessageEnvelope | Escalation | null> {
+  async receiveEnvelope(envelope: MessageEnvelope): Promise<void | AgentContactRecord | MessageEnvelope | Escalation | SupportBundleRecord | null> {
     return receiveEnvelope(this, envelope);
   }
 
