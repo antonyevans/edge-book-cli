@@ -50,7 +50,7 @@ export function nextAction(result: ResolverResult, target: string): string {
       return first ? `candidates list   # then: friend request ${first.candidate_id}` : "candidates list";
     }
     default:
-      return "(no match — check the target)";
+      return "not found — share your invite link so they can add you: card invite  (use the deeplink_url)";
   }
 }
 
@@ -72,9 +72,13 @@ export const localContactProvider: ResolverProvider = {
   name: "local",
   priority: 100,
   async resolve(store, target) {
+    const normalized = target.trim().replace(/^@/, "").toLowerCase();
     const contacts = await store.contacts();
     const match = Object.values(contacts).find(
-      (c) => c.peer_agent_id === target || c.aliases.includes(target) || c.display_name === target
+      (c) =>
+        c.peer_agent_id === target ||
+        c.aliases.some((a) => a.toLowerCase() === normalized) ||
+        c.display_name.toLowerCase() === normalized
     );
     if (!match) return null;
     return {
@@ -197,11 +201,13 @@ export async function writeCandidate(store: EdgeBookStore, input: CandidateInput
   return candidate;
 }
 
+export const DEFAULT_RELAY_BASE = "https://edge-book-host.fly.dev";
+
 export function defaultProviders(relayBase?: string): ResolverProvider[] {
+  const base = relayBase ?? process.env["EDGE_BOOK_RELAY_BASE"] ?? DEFAULT_RELAY_BASE;
   const lookup: RegistryLookup = async (target) => {
-    if (!relayBase) return null;
     const slug = target.startsWith("registry:") ? target.slice("registry:".length) : target;
-    return `${relayBase.replace(/\/$/, "")}/handle/${encodeURIComponent(slug)}`;
+    return `${base.replace(/\/$/, "")}/handle/${encodeURIComponent(slug)}`;
   };
   return [localContactProvider, inviteProvider, cardUrlProvider, cardFileProvider, makeRegistryProvider(lookup)];
 }
@@ -263,15 +269,25 @@ export type RegistryLookup = (handle: string) => Promise<string | null>; // retu
 // Bare-handle slug shape: lowercase alphanumerics + internal hyphens, 3–30 chars.
 const HANDLE_SLUG = /^[a-z0-9](?:[a-z0-9-]{1,28}[a-z0-9])$/;
 
+// Normalise a raw target before registry routing: strip leading @, trim, lowercase.
+// The "registry:" prefix is preserved when present.
+function normalizeRegistryTarget(target: string): string {
+  if (target.startsWith("registry:")) {
+    return "registry:" + target.slice("registry:".length).trim().toLowerCase().replace(/^@/, "");
+  }
+  return target.trim().toLowerCase().replace(/^@/, "");
+}
+
 export function makeRegistryProvider(lookup: RegistryLookup): ResolverProvider {
   return {
     name: "registry",
     priority: 50,
     async resolve(_store, target) {
-      const isExplicit = target.startsWith("registry:");
-      const slug = isExplicit ? target.slice("registry:".length) : target;
-      if (!isExplicit && !HANDLE_SLUG.test(slug)) return null; // only bare slugs route here
-      const cardTarget = await lookup(target);
+      const slug = normalizeRegistryTarget(target);
+      const isExplicit = slug.startsWith("registry:");
+      const bareSlug = isExplicit ? slug.slice("registry:".length) : slug;
+      if (!isExplicit && !HANDLE_SLUG.test(bareSlug)) return null; // only bare slugs route here
+      const cardTarget = await lookup(slug);
       if (!cardTarget) return null;
       // A registry miss (404/unreachable) means "not in registry" — fall through, don't crash resolve.
       let card;

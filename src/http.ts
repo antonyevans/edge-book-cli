@@ -227,7 +227,9 @@ async function handleOwnerApi(req: http.IncomingMessage, res: http.ServerRespons
     const card = await store.buildCard();
     const identity = await store.identity();
     const invite_url = `edgebook:invite:${Buffer.from(JSON.stringify(card), "utf8").toString("base64url")}`;
-    sendJson(res, 200, { agent_id: identity.agent_id, display_name: identity.display_name, card_url: card.card_url, card, invite_url });
+    const origin = card.card_url ? new URL(card.card_url).origin : "https://edge-book-host.fly.dev";
+    const deeplink_url = `${origin}/add#i=${encodeURIComponent(invite_url)}`;
+    sendJson(res, 200, { agent_id: identity.agent_id, display_name: identity.display_name, card_url: card.card_url, card, invite_url, deeplink_url });
     return true;
   }
 

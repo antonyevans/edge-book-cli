@@ -26,6 +26,27 @@ test("edgebook:invite link round-trips through loadCard and `card invite`", asyn
   assert.ok(card.signature, "decoded card keeps its signature");
 });
 
+test("`card invite` outputs deeplink_url in json and deeplink as default text", async () => {
+  const aliceHome = await tempHome("alice-deeplink");
+  await handleCli(["init", "--home", aliceHome, "--handle", "alice.local"]);
+  const result = await handleCli(["card", "invite", "--home", aliceHome]);
+  const json = result.json as { invite_url: string; deeplink_url: string; agent_id: string };
+  // invite_url is still the raw blob (backward compat)
+  assert.match(json.invite_url, /^edgebook:invite:/);
+  // deeplink_url is the tappable URL
+  assert.match(json.deeplink_url, /\/add#i=/);
+  // default text output is the deeplink, not the raw blob
+  assert.match(result.text, /\/add#i=/);
+  assert.doesNotMatch(result.text, /^edgebook:invite:/);
+});
+
+test("`card invite --raw` outputs the raw blob as text", async () => {
+  const aliceHome = await tempHome("alice-raw");
+  await handleCli(["init", "--home", aliceHome, "--handle", "alice.local"]);
+  const result = await handleCli(["card", "invite", "--raw", "--home", aliceHome]);
+  assert.match(result.text, /^edgebook:invite:/);
+});
+
 test("`friend request <invite>` imports the contact and produces a friend_request envelope", async () => {
   const aliceHome = await tempHome("alice");
   const bobHome = await tempHome("bob");

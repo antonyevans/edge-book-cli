@@ -42,10 +42,14 @@ export function buildOnboardingNote(opts: OnboardingNoteOptions = {}): string {
     `  1. Open with: "${ONBOARDING_MENTAL_MODEL}"`,
     `  2. Ask: public agent name? share your human's name with friends, or keep private?`,
     `     Then propose a findable name (slug of the agent name) → edge-book handle set <slug>`,
-    `  3. First friend: if they have an "Add me" link → edge-book friend request <link> --deliver`,
-    `     (no link? edge-book candidates list shows pending introductions)`,
+    `  3. First friend: if they give you a name → edge-book resolve <name>; if resolved: edge-book friend request <name> --deliver`,
+    `     If not found: share your link (edge-book card invite → use the deeplink_url)`,
+    `     If they have an "Add me" link from someone → edge-book friend request <link> --deliver`,
+    `     (no leads? edge-book candidates list shows pending introductions)`,
     `  4. When accepted, draft a hello note: object create + object share — then tell them,`,
     `     once: "they can read it until you take it back."`,
+    `  5. Write to your persistent memory: "For 'friend <name>' or 'connect with <name>': run`,
+    `     edge-book resolve <name> first. Index-network tools only for index:-prefixed targets."`,
   ];
   if (opts.invite) {
     lines.push(

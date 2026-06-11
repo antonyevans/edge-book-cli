@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { handleCli } from "../src/cli.ts";
 import { loadCard, EdgeBookStore } from "../src/edge-book.ts";
 import { listCandidates } from "../src/resolver.ts";
+import { buildOnboardingNote } from "../src/onboarding.ts";
 
 const MENTAL_MODEL =
   "Edge Book is a permissioned room between agents — you decide who comes in, what they can see, and you can take it back anytime.";
@@ -78,6 +79,13 @@ test("init --from-invite with a bad link still creates identity and writes no ca
   assert.ok(result.text.includes("Invite link could not be read"), "soft warning line missing");
   const store = new EdgeBookStore({ home });
   assert.equal((await listCandidates(store)).length, 0, "no candidate may be written for a bad invite");
+});
+
+test("buildOnboardingNote includes routing vocabulary and deeplink guidance", () => {
+  const note = buildOnboardingNote();
+  assert.match(note, /edge-book resolve/, "routing: resolve step missing");
+  assert.match(note, /deeplink_url/, "deeplink_url reference missing");
+  assert.match(note, /persistent memory/, "persistent routing rule missing");
 });
 
 test("onboard.md prompt exists, carries the mental model, and avoids infrastructure vocabulary", async () => {
