@@ -296,6 +296,39 @@ export const COMMAND_GROUPS: CommandGroup[] = [
         usage: "doctor [--json] [--host <wss-url>]",
         desc: "Diagnostic bundle: identity, relay reachability, dial-out state, stores, event-log tail (safe to paste publicly)",
       },
+      {
+        usage: "doctor --send [--yes] [--note <n>] [--to <did>] [--host <wss-url>]",
+        desc: "Send the sanitized bundle to the operator support mailbox (consent prompt; prints a support reference)",
+      },
+    ],
+  },
+  {
+    title: "Support inbox (operator)",
+    rows: [
+      {
+        usage: "support inbox --on|--off",
+        desc: "Opt this agent in/out as a support mailbox (off by default; inbound bundles are rejected)",
+      },
+      {
+        usage: "support pending",
+        desc: "List received support bundles awaiting review",
+      },
+      {
+        usage: "support read <bundle-id>",
+        desc: "Show a bundle's report and mark it read",
+      },
+      {
+        usage: "support dismiss <bundle-id>",
+        desc: "Dismiss a bundle without reading it",
+      },
+      {
+        usage: "support list",
+        desc: "List all support bundles including read/dismissed",
+      },
+      {
+        usage: "support receive <envelope-json-path>",
+        desc: "Apply an inbound support_bundle envelope from a file",
+      },
     ],
   },
   {

@@ -8,6 +8,7 @@ import path from "node:path";
 import { deliverToPeer, deliverViaMailboxRecorded, parseHost, relayBaseFromHost, requireArg, takeBoolFlag, takeFlag, takeRepeatedKV } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
 import { buildDoctorReport, renderDoctorText } from "./doctor.ts";
+import { runDoctorSend } from "./doctor-send.ts";
 import { EdgeBookError, EdgeBookStore, defaultProfile, slugifyHandle } from "./edge-book.ts";
 import type { FieldVisibility } from "./edge-book.ts";
 import { buildOnboardingNote, recordInviteCandidate, seedGreeterCandidate } from "./onboarding.ts";
@@ -216,7 +217,18 @@ export async function handleIdentityCli(command: string, args: string[], ctx: Cl
     // Full diagnostic bundle (spec-133): human text by default, --json for the
     // machine shape. Safe to paste publicly — see src/doctor.ts header.
     const asJson = takeBoolFlag(args, "--json");
+    const send = takeBoolFlag(args, "--send");
     const host = parseHost(args, ctx);
+    if (send) {
+      // spec-134: consented delivery to the operator support mailbox.
+      return runDoctorSend(store, home, {
+        host,
+        yes: takeBoolFlag(args, "--yes"),
+        to: takeFlag(args, "--to"),
+        note: takeFlag(args, "--note"),
+        socketFactory: ctx.socketFactory,
+      });
+    }
     const report = await buildDoctorReport(store, { host });
     return { text: asJson ? JSON.stringify(report, null, 2) : renderDoctorText(report), json: report };
   }

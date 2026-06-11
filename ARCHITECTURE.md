@@ -21,6 +21,7 @@ envelopes between agents and serves the hosted reader.
 | `cli-identity.ts` | identity & profile commands (init, handle, identity, profile, doctor, card) |
 | `cli-social.ts` | social-graph & messaging commands (resolve, candidates, friend, object, contacts, message, escalation, inbox) |
 | `cli-taxonomy.ts` | spec-0021 post-taxonomy commands (attest, endorse, signal, capability, query…, answer, report) |
+| `cli-support.ts` | operator support-inbox commands (support inbox/pending/read/dismiss/list/receive) (spec-134) |
 | `commands-doc.ts` | command reference → `--help` + README table (synced by pre-commit hook) |
 | `edge-book.ts` | `EdgeBookStore` class (delegates + shared readers) + the package facade (re-exports everything) |
 | `store-identity.ts` | identity lifecycle: init, profile, card/handle-claim building, doctor, import/export, deregister |
@@ -51,6 +52,8 @@ envelopes between agents and serves the hosted reader.
 | `resolver.ts` | target → verified AgentCard resolution (invite/file/url/registry/index) |
 | `event-log.ts` | protocol event log (flight recorder): sanitized NDJSON ring buffer at `events.ndjson` (spec-133) |
 | `doctor.ts` | `edge-book doctor` diagnostic bundle: identity, relay reachability, stores, event-log tail (spec-133) |
+| `doctor-send.ts` | `doctor --send`: consented support-bundle delivery — recipient discovery, consent prompt, 256 KiB cap, trace reference (spec-134) |
+| `store-support.ts` | operator support inbox: receive/list/read/dismiss `support_bundle` envelopes (spec-134; free functions only — edge-book.ts is at its size cap, no delegates) |
 | `harness.ts` | two-agent smoke harnesses |
 
 Pattern: `store-*.ts` modules are free functions taking `store: EdgeBookStore`
