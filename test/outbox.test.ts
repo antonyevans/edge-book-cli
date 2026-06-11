@@ -59,3 +59,178 @@ test("formatAge renders seconds, minutes, hours, days", () => {
   assert.equal(formatAge(3 * 3_600_000), "3h");
   assert.equal(formatAge(2 * 86_400_000), "2d");
 });
+
+// ── spec-097 fakes: FakeMailboxHost/FakeSocket (mvp-mailbox.test.ts pattern)
+// extended with recipient_live on send acks and the mailbox_status RPC pair.
+// Modes: "receipts" (new host), "legacy-error" (old host — echoes the wire-
+// protocol unknown-type error frame, the REAL deployed behavior: edge-book-host
+// channels.ts always echoed ref), "legacy-silent" (lost frame — forces the
+// client timeout path).
+import { deliverEnvelopeViaMailbox, mailboxStatus } from "../src/dialout.ts";
+import { EdgeBookStore } from "../src/edge-book.ts";
+import { handleCli } from "../src/cli.ts";
+
+type FakeHostMode = "receipts" | "legacy-error" | "legacy-silent";
+
+class FakeStatusHost {
+  channels = new Map<string, FakeSocket>(); // by channel_id AND agent_did
+  queue: Array<{ id: string; to: string; from: string; blob_b64: string; ts: number }> = [];
+  statuses = new Map<string, { state: string; queued_ms?: number; recipient_live?: boolean }>();
+  liveRecipients = new Set<string>();
+  statusRequests = 0;
+  private seq = 0;
+
+  mode: FakeHostMode;
+
+  constructor(mode: FakeHostMode = "receipts") { this.mode = mode; }
+
+  attach(socket: FakeSocket, channelId: string, agentDid: string): void {
+    this.channels.set(channelId, socket);
+    if (agentDid) this.channels.set(agentDid, socket);
+    socket.host = this;
+    this.deliver(channelId);
+    if (agentDid) this.deliver(agentDid);
+  }
+
+  onSend(from: string, frame: { request_id: string; to: string; blob_b64: string }): void {
+    const id = `m${this.seq++}`;
+    this.queue.push({ id, to: frame.to, from, blob_b64: frame.blob_b64, ts: Date.now() });
+    const ok: Record<string, unknown> = { type: "mailbox_send_ok", request_id: frame.request_id, id };
+    if (this.mode === "receipts") {
+      ok.recipient_live = this.liveRecipients.has(frame.to) || this.channels.has(frame.to);
+    }
+    this.channels.get(from)?.receive(ok);
+    this.deliver(frame.to);
+  }
+
+  onStatus(from: string, frame: { request_id: string; ids: string[] }): void {
+    this.statusRequests++;
+    const socket = this.channels.get(from);
+    if (!socket) return;
+    if (this.mode === "legacy-silent") return;
+    if (this.mode === "legacy-error") {
+      // What a pre-receipts edge-book-host actually sends for an unknown type.
+      socket.receive({ type: "error", error: "unknown_message_type", ref: "mailbox_status" });
+      return;
+    }
+    const statuses = frame.ids.map((id) => ({ id, ...(this.statuses.get(id) ?? { state: "unknown" }) }));
+    socket.receive({ type: "mailbox_status_ok", request_id: frame.request_id, statuses });
+  }
+
+  onAck(id: string): void {
+    this.queue = this.queue.filter((m) => m.id !== id);
+  }
+
+  private deliver(to: string): void {
+    const socket = this.channels.get(to);
+    if (!socket) return;
+    for (const m of this.queue.filter((q) => q.to === to)) {
+      socket.receive({ type: "mailbox_deliver", id: m.id, from: m.from, blob_b64: m.blob_b64, ts: m.ts });
+    }
+  }
+}
+
+class FakeSocket {
+  host?: FakeStatusHost;
+  fromDid = "";
+  channelId = "";
+  listeners: Record<string, Array<(e?: unknown) => void>> = {};
+  readyState = 1;
+
+  send(data: string): void {
+    const frame = JSON.parse(data);
+    if (frame.type === "hello") {
+      this.fromDid = frame.agent_did || "";
+      this.channelId = `chan-${this.fromDid}`;
+      queueMicrotask(() => {
+        this.receive({ type: "hello_ok", channel_id: this.channelId, server_time: new Date().toISOString() });
+        this.host?.attach(this, this.channelId, this.fromDid);
+      });
+    }
+    if (frame.type === "mailbox_send") this.host?.onSend(this.channelId, frame);
+    if (frame.type === "mailbox_status") this.host?.onStatus(this.channelId, frame);
+    if (frame.type === "mailbox_ack") this.host?.onAck(frame.id);
+  }
+  close(): void { this.emit("close"); }
+  addEventListener(event: string, handler: (e?: unknown) => void): void { (this.listeners[event] ||= []).push(handler); }
+  emit(event: string, value?: unknown): void { for (const h of this.listeners[event] || []) h(value); }
+  receive(value: unknown): void { this.emit("message", { data: JSON.stringify(value) }); }
+}
+
+function factoryFor(host: FakeStatusHost): (url: string) => FakeSocket {
+  return (_url: string) => { const s = new FakeSocket(); s.host = host; queueMicrotask(() => s.emit("open")); return s; };
+}
+
+// Two friended agent homes wired to one fake host (mvp-mailbox.test.ts setup).
+async function friendedPair(host: FakeStatusHost): Promise<{ root: string; aliceHome: string; bobHome: string; bobId: string; factory: (url: string) => FakeSocket }> {
+  const root = await tempHome();
+  const aliceHome = path.join(root, "alice");
+  const bobHome = path.join(root, "bob");
+  const aliceStore = new EdgeBookStore({ home: aliceHome });
+  const bobStore = new EdgeBookStore({ home: bobHome });
+  await aliceStore.init({ handle: "alice.local", ownerLabel: "Alice" });
+  await bobStore.init({ handle: "bob.local", ownerLabel: "Bob" });
+  const aliceCard = await aliceStore.writeCard();
+  const bobCard = await bobStore.writeCard();
+  await bobStore.receiveFriendRequest(await aliceStore.createFriendRequest(bobCard));
+  await aliceStore.applyFriendResponse(await bobStore.acceptFriend(aliceCard.agent_id));
+  const bobId = (await bobStore.identity()).agent_id;
+  return { root, aliceHome, bobHome, bobId, factory: factoryFor(host) };
+}
+
+// ── spec-097 C.2: dialout client ─────────────────────────────────────────────
+
+test("send ack surfaces recipient_live through deliverEnvelopeViaMailbox (false / true / absent)", async () => {
+  const host = new FakeStatusHost("receipts");
+  const { aliceHome, bobId, factory } = await friendedPair(host);
+  const aliceStore = new EdgeBookStore({ home: aliceHome });
+  const object = await aliceStore.createObject({ title: "t", body: "b" });
+
+  // Recipient not connected and not in liveRecipients → false.
+  const env1 = await aliceStore.shareObjectEnvelope(bobId, object.object_id);
+  const ack1 = await deliverEnvelopeViaMailbox({ home: aliceHome, host: "ws://fake", socketFactory: factory, envelope: env1 });
+  assert.equal(ack1.recipient_live, false);
+
+  // Host says the recipient is live → true.
+  host.liveRecipients.add(bobId);
+  const env2 = await aliceStore.shareObjectEnvelope(bobId, object.object_id);
+  const ack2 = await deliverEnvelopeViaMailbox({ home: aliceHome, host: "ws://fake", socketFactory: factory, envelope: env2 });
+  assert.equal(ack2.recipient_live, true);
+
+  // Old host omits the field → absent on the resolved ack.
+  const legacyHost = new FakeStatusHost("legacy-error");
+  const env3 = await aliceStore.shareObjectEnvelope(bobId, object.object_id);
+  const ack3 = await deliverEnvelopeViaMailbox({ home: aliceHome, host: "ws://fake", socketFactory: factoryFor(legacyHost), envelope: env3 });
+  assert.ok(ack3.id);
+  assert.ok(!("recipient_live" in ack3), "old host: recipient_live absent, not false");
+});
+
+test("mailboxStatusAndWait resolves statuses from mailbox_status_ok", async () => {
+  const host = new FakeStatusHost("receipts");
+  const { aliceHome, factory } = await friendedPair(host);
+  host.statuses.set("m0", { state: "queued", queued_ms: 1234, recipient_live: false });
+  host.statuses.set("m1", { state: "acked" });
+  const statuses = await mailboxStatus({ home: aliceHome, host: "ws://fake", socketFactory: factory, ids: ["m0", "m1", "m2"] });
+  assert.ok(statuses, "receipts host answers");
+  assert.deepEqual(statuses![0], { id: "m0", state: "queued", queued_ms: 1234, recipient_live: false });
+  assert.deepEqual(statuses![1], { id: "m1", state: "acked" });
+  assert.deepEqual(statuses![2], { id: "m2", state: "unknown" });
+});
+
+test("old-host error frame (ref=mailbox_status) resolves the pending RPC to null FAST — no timeout wait", async () => {
+  const host = new FakeStatusHost("legacy-error");
+  const { aliceHome, factory } = await friendedPair(host);
+  const started = Date.now();
+  // Default timeout is 5s; the error-frame fast path must beat it by a mile.
+  const statuses = await mailboxStatus({ home: aliceHome, host: "ws://fake", socketFactory: factory, ids: ["m0"] });
+  assert.equal(statuses, null, "degrades to local-only");
+  assert.ok(Date.now() - started < 2000, `resolved in ${Date.now() - started}ms — error frame fast path, not the 5s timeout`);
+  assert.equal(host.statusRequests, 1, "exactly one mailbox_status was attempted");
+});
+
+test("lost-frame path: a silent host resolves to null after the RPC timeout", async () => {
+  const host = new FakeStatusHost("legacy-silent");
+  const { aliceHome, factory } = await friendedPair(host);
+  const statuses = await mailboxStatus({ home: aliceHome, host: "ws://fake", socketFactory: factory, ids: ["m0"], timeoutMs: 100 });
+  assert.equal(statuses, null, "timeout degrades to local-only, same as the error frame");
+});
