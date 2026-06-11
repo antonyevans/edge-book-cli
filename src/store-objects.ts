@@ -105,6 +105,7 @@ export async function canReadObject(store: EdgeBookStore, objectId: string, subj
   for (const grant of candidates) {
     if (await store.verifyGrantSignature(grant)) return true;
   }
+  await store.audit("object.read.denied", subjectAgentId, { object_id: objectId, scope: "object.read" });
   return false;
 }
 
@@ -148,6 +149,7 @@ export async function shareObjectEnvelope(store: EdgeBookStore, peerAgentId: str
   if (object.attachment) {
     attachment_b64 = (await fs.readFile(store.file(object.attachment.ref))).toString("base64");
   }
+  await store.audit("object.share", peerAgentId, { object_id: objectId, grant_id: grant.grant_id, scope: "object.read" });
   return store.signEnvelope({
     type: "object_share",
     to_agent_id: peerAgentId,
@@ -195,7 +197,7 @@ export async function revokeObjectGrant(store: EdgeBookStore, objectId: string, 
   }
   if (revoked.length) {
     await store.saveGrants(grants);
-    await store.audit("grant.revoke", subjectAgentId, { object_id: objectId, grant_ids: revoked });
+    await store.audit("grant.revoke", subjectAgentId, { object_id: objectId, grant_ids: revoked, scope: "object.read" });
   }
   return revoked;
 }

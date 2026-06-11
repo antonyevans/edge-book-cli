@@ -296,12 +296,35 @@ export async function receiveEnvelope(store: EdgeBookStore, envelope: MessageEnv
 // Append-only audit trail (audit.jsonl in the agent home).
 export async function audit(store: EdgeBookStore, action: string, peerAgentId: string, details: Record<string, unknown>): Promise<string> {
   const audit_id = randomId("audit");
-  await appendJsonl(store.file(AUDIT_FILE), {
-    audit_id,
-    created_at: now(),
-    action,
-    peer_agent_id: peerAgentId,
-    details
-  });
+  try {
+    const identity = await store.identity();
+    await appendJsonl(store.file(AUDIT_FILE), {
+      audit_id,
+      created_at: now(),
+      kind: action,
+      action,
+      actor_agent_id: identity.agent_id,
+      peer_agent_id: peerAgentId,
+      ...auditIndexFields(details),
+      details
+    });
+  } catch {
+    // Audit logging is append-only best effort; it must never break the path it observes.
+  }
   return audit_id;
+}
+
+function auditIndexFields(details: Record<string, unknown>): Record<string, string> {
+  const fields: Record<string, string> = {};
+  const objectId = details.object_id;
+  const grantId = details.grant_id;
+  const grantIds = details.grant_ids;
+  const scope = details.scope;
+  const scopes = details.scopes;
+  if (typeof objectId === "string") fields.object_id = objectId;
+  if (typeof grantId === "string") fields.grant_id = grantId;
+  if (Array.isArray(grantIds) && grantIds.every((id) => typeof id === "string")) fields.grant_ids = grantIds.join(",");
+  if (typeof scope === "string") fields.grant_scope = scope;
+  if (Array.isArray(scopes) && scopes.every((s) => typeof s === "string")) fields.grant_scope = scopes.join(",");
+  return fields;
 }

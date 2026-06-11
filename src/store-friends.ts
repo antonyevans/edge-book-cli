@@ -304,13 +304,18 @@ export async function broadcastProfileEnvelopes(store: EdgeBookStore): Promise<M
 export async function revoke(store: EdgeBookStore, peerAgentId: string): Promise<void> {
   await store.setRelationship(peerAgentId, "revoked", "Revoke", "revoked");
   const grants = await store.grants();
+  const revoked: string[] = [];
+  const scopes = new Set<string>();
   for (const grant of Object.values(grants)) {
     if (grant.subject_agent_id === peerAgentId || grant.issuer_agent_id === peerAgentId) {
       grant.status = "revoked";
       grant.revoked_at = now();
+      revoked.push(grant.grant_id);
+      for (const scope of grant.scopes) scopes.add(scope);
     }
   }
   await store.saveGrants(grants);
+  if (revoked.length) await store.audit("grant.revoke", peerAgentId, { grant_ids: revoked, scopes: [...scopes].sort() });
 }
 
 export async function block(store: EdgeBookStore, peerAgentId: string): Promise<void> {

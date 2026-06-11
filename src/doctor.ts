@@ -21,6 +21,7 @@ import type { HermesRunner } from "./host-cron.ts";
 
 export const DOCTOR_EVENT_TAIL = 50;
 export const DOCTOR_TRACE_TAIL = 10;
+export const DOCTOR_AUDIT_TAIL = 20;
 const DEFAULT_RELAY_TIMEOUT_MS = 3_000;
 
 export interface DoctorRelayCheck {
@@ -68,10 +69,22 @@ export interface DoctorReport {
     pending_approvals: number;
   };
   events: ProtocolEvent[]; // newest-last tail (DOCTOR_EVENT_TAIL)
+  audit: DoctorAuditEvent[]; // sanitized newest-last tail (DOCTOR_AUDIT_TAIL)
   // Recent envelope traces (ea-claude-138): the newest DOCTOR_TRACE_TAIL
   // DISTINCT trace_ids seen in the event log, newest-last, each with the kind
   // + direction + timestamp of its most recent event. Public ids only.
   traces: DoctorTrace[];
+}
+
+export interface DoctorAuditEvent {
+  ts: string;
+  kind: string;
+  actor_agent_id?: string;
+  peer_agent_id?: string;
+  object_id?: string;
+  grant_id?: string;
+  grant_ids?: string;
+  grant_scope?: string;
 }
 
 export interface DoctorTrace {
@@ -130,6 +143,48 @@ function notifierCronState(runner: HermesRunner): DoctorReport["notify"]["notifi
   } catch {
     return "error";
   }
+}
+
+function stringField(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function detailString(details: unknown, key: string): string | undefined {
+  if (!details || typeof details !== "object") return undefined;
+  const value = (details as Record<string, unknown>)[key];
+  if (typeof value === "string" && value.length > 0) return value;
+  if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) return value.join(",");
+  return undefined;
+}
+
+function firstString(...values: Array<unknown>): string | undefined {
+  for (const value of values) {
+    const found = stringField(value);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function addAuditField(event: DoctorAuditEvent, key: keyof DoctorAuditEvent, value: string | undefined): void {
+  if (value) event[key] = value;
+}
+
+function auditEvent(event: Record<string, unknown>): DoctorAuditEvent {
+  const out: DoctorAuditEvent = {
+    ts: firstString(event.created_at, event.ts) ?? "",
+    kind: firstString(event.kind, event.action) ?? "unknown",
+  };
+  addAuditField(out, "actor_agent_id", stringField(event.actor_agent_id));
+  addAuditField(out, "peer_agent_id", stringField(event.peer_agent_id));
+  addAuditField(out, "object_id", firstString(event.object_id, detailString(event.details, "object_id")));
+  addAuditField(out, "grant_id", firstString(event.grant_id, detailString(event.details, "grant_id")));
+  addAuditField(out, "grant_ids", firstString(event.grant_ids, detailString(event.details, "grant_ids")));
+  addAuditField(out, "grant_scope", firstString(event.grant_scope, detailString(event.details, "scope"), detailString(event.details, "scopes")));
+  return out;
+}
+
+function auditTail(events: Array<Record<string, unknown>>, limit = DOCTOR_AUDIT_TAIL): DoctorAuditEvent[] {
+  return events.slice(-limit).map(auditEvent);
 }
 
 export async function buildDoctorReport(store: EdgeBookStore, opts: DoctorOptions): Promise<DoctorReport> {
@@ -201,6 +256,7 @@ export async function buildDoctorReport(store: EdgeBookStore, opts: DoctorOption
     },
     stores,
     events: await readEvents(store, DOCTOR_EVENT_TAIL),
+    audit: auditTail(await store.auditEvents()),
     // Traces are derived from the FULL event log (not just the tail) so a
     // busy log does not hide an older still-relevant trace.
     traces: recentTraces(await readEvents(store)),
@@ -213,6 +269,32 @@ function renderEventLine(e: ProtocolEvent): string {
     .map(([k, v]) => `${k}=${String(v)}`)
     .join(" ");
   return `  ${e.ts}  ${e.kind}${extras ? `  ${extras}` : ""}`;
+}
+
+function renderAuditLine(e: DoctorAuditEvent): string {
+  const extras = Object.entries(e)
+    .filter(([k]) => k !== "ts" && k !== "kind")
+    .map(([k, v]) => `${k}=${v}`)
+    .join(" ");
+  return `  ${e.ts}  ${e.kind}${extras ? `  ${extras}` : ""}`;
+}
+
+function appendTraceSection(lines: string[], traces: DoctorTrace[]): void {
+  lines.push(`Recent traces (distinct trace_ids, newest last, up to ${DOCTOR_TRACE_TAIL})`);
+  if (traces.length === 0) lines.push("  (no traced envelopes yet)");
+  for (const t of traces) lines.push(`  ${t.ts}  ${t.direction === "out" ? "→" : "←"} ${t.kind}  ${t.trace_id}`);
+}
+
+function appendEventSection(lines: string[], events: ProtocolEvent[]): void {
+  lines.push(`Event log (newest last, up to ${DOCTOR_EVENT_TAIL})`);
+  if (events.length === 0) lines.push("  (no events recorded yet)");
+  for (const e of events) lines.push(renderEventLine(e));
+}
+
+function appendAuditSection(lines: string[], audit: DoctorAuditEvent[]): void {
+  lines.push(`Audit log (newest last, up to ${DOCTOR_AUDIT_TAIL})`);
+  if (audit.length === 0) lines.push("  (no audit records yet)");
+  for (const e of audit) lines.push(renderAuditLine(e));
 }
 
 export function renderDoctorText(report: DoctorReport): string {
@@ -254,12 +336,10 @@ export function renderDoctorText(report: DoctorReport): string {
   lines.push(`  contacts: ${report.stores.contacts} (friends: ${report.stores.friends})`);
   lines.push(`  posts: ${report.stores.posts}  objects: ${report.stores.objects}  escalations: ${report.stores.escalations}  pending approvals: ${report.stores.pending_approvals}`);
   lines.push("");
-  lines.push(`Recent traces (distinct trace_ids, newest last, up to ${DOCTOR_TRACE_TAIL})`);
-  if (report.traces.length === 0) lines.push("  (no traced envelopes yet)");
-  for (const t of report.traces) lines.push(`  ${t.ts}  ${t.direction === "out" ? "→" : "←"} ${t.kind}  ${t.trace_id}`);
+  appendTraceSection(lines, report.traces);
   lines.push("");
-  lines.push(`Event log (newest last, up to ${DOCTOR_EVENT_TAIL})`);
-  if (report.events.length === 0) lines.push("  (no events recorded yet)");
-  for (const e of report.events) lines.push(renderEventLine(e));
+  appendEventSection(lines, report.events);
+  lines.push("");
+  appendAuditSection(lines, report.audit);
   return lines.join("\n");
 }

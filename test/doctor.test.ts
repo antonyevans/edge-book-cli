@@ -78,6 +78,7 @@ test("doctor report covers version, identity, relay, friends, stores, and events
   assert.ok(kinds.includes("friend.request_received"), `events missing friend.request_received: ${kinds.join(",")}`);
   assert.ok(kinds.includes("friend.accepted"), `events missing friend.accepted: ${kinds.join(",")}`);
   assert.ok(kinds.includes("friend.state_changed"));
+  assert.ok(report.audit.some((e) => e.kind === "message.receive"), "audit tail includes sanitized audit records");
 });
 
 test("doctor bundle is safe to paste publicly: no private keys, no message/post bodies", async () => {
@@ -124,6 +125,7 @@ test("CLI doctor: human text by default, full JSON with --json", async () => {
   assert.ok(text.text.startsWith("Edge Book doctor — v"), "default output is human-readable");
   assert.ok(text.text.includes("Friend requests"));
   assert.ok(text.text.includes("Event log"));
+  assert.ok(text.text.includes("Audit log"));
   assert.ok(!text.text.includes(SECRET_BODY));
 
   const asJson = await handleCli(["doctor", "--home", bob.home, "--host", DEAD_HOST, "--json"]);
@@ -132,4 +134,6 @@ test("CLI doctor: human text by default, full JSON with --json", async () => {
   assert.equal(parsed.friends.pending_requests, 1);
   assert.ok(Array.isArray(parsed.events));
   assert.ok(parsed.events.length <= 50);
+  assert.ok(Array.isArray(parsed.audit));
+  assert.ok(parsed.audit.length <= 20);
 });
