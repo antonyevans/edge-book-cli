@@ -112,16 +112,21 @@ export async function setProfile(store: EdgeBookStore, input: {
 }
 
 // Set a user-chosen unique handle. Re-signs the card; does NOT rotate keys.
-export async function setHandle(store: EdgeBookStore, handle: string): Promise<LocalIdentity> {
+export async function setHandle(store: EdgeBookStore, handle: string, opts: { discoverable?: boolean } = {}): Promise<LocalIdentity> {
   if (!isValidHandle(handle)) {
     throw new EdgeBookError("invalid_handle", `invalid_handle: must be 3-30 chars [a-z0-9-], not reserved: ${handle}`);
   }
   const identity = await store.identity();
   identity.handle = handle;
+  if (opts.discoverable === false) {
+    identity.handle_discoverable = false;
+  } else {
+    delete identity.handle_discoverable;  // reset to default (true)
+  }
   identity.updated_at = now();
   await writeJson(store.file(IDENTITY_FILE), identity, 0o600);
   await store.writeCard();
-  await store.audit("identity.set_handle", identity.agent_id, { handle });
+  await store.audit("identity.set_handle", identity.agent_id, { handle, discoverable: opts.discoverable !== false });
   return identity;
 }
 
@@ -208,7 +213,7 @@ export async function writeCard(store: EdgeBookStore, cardUrl?: string): Promise
 
 // Build a signed handle claim for the relay registry (spec-096). The relay
 // verifies claim_sig + the card against the identity key before binding.
-export async function buildHandleClaim(store: EdgeBookStore): Promise<{ handle: string; agent_did: string; card: AgentCard; claimed_at: number; claim_sig: string }> {
+export async function buildHandleClaim(store: EdgeBookStore): Promise<{ handle: string; agent_did: string; card: AgentCard; claimed_at: number; claim_sig: string; discoverable: boolean }> {
   const identity = await store.identity();
   if (!isValidHandle(identity.handle)) {
     throw new EdgeBookError("invalid_handle", `invalid_handle: set a handle first (current: ${identity.handle})`);
@@ -216,7 +221,7 @@ export async function buildHandleClaim(store: EdgeBookStore): Promise<{ handle: 
   const card = await loadCard(store.file(CARD_FILE)); // current signed card
   const claimed_at = Date.now();
   const claim_sig = signPayload({ handle: identity.handle, agent_did: identity.agent_id, claimed_at }, identity.private_key_pem);
-  return { handle: identity.handle, agent_did: identity.agent_id, card, claimed_at, claim_sig };
+  return { handle: identity.handle, agent_did: identity.agent_id, card, claimed_at, claim_sig, discoverable: identity.handle_discoverable !== false };
 }
 
 // The friend-only profile: every field whose visibility resolves to "friends"

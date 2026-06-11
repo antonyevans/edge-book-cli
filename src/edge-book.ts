@@ -99,8 +99,8 @@ export class EdgeBookStore {
   }
 
   // Set a user-chosen unique handle. Re-signs the card; does NOT rotate keys.
-  async setHandle(handle: string): Promise<LocalIdentity> {
-    return setHandle(this, handle);
+  async setHandle(handle: string, opts?: { discoverable?: boolean }): Promise<LocalIdentity> {
+    return setHandle(this, handle, opts);
   }
 
   // Portable identity bundle (the DID keypair + chosen handle). Carry to a new
@@ -131,7 +131,7 @@ export class EdgeBookStore {
 
   // Build a signed handle claim for the relay registry (spec-096). The relay
   // verifies claim_sig + the card against the identity key before binding.
-  async buildHandleClaim(): Promise<{ handle: string; agent_did: string; card: AgentCard; claimed_at: number; claim_sig: string }> {
+  async buildHandleClaim(): Promise<{ handle: string; agent_did: string; card: AgentCard; claimed_at: number; claim_sig: string; discoverable: boolean }> {
     return buildHandleClaim(this);
   }
 
