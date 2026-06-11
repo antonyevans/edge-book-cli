@@ -20,6 +20,7 @@ import type { AgentContactRecord, CapabilityGrant, Escalation, FriendRequestBody
 import { relationshipId, signPayload, verifyPayload, withoutSignature } from "./crypto.ts";
 import { now, randomId, readJson, writeJson, appendJsonl } from "./fs-json.ts";
 import { AUDIT_FILE, INBOUND_RATE_FILE, INBOX_FILE, MESSAGES_FILE, SEEN_MESSAGES_FILE } from "./store-files.ts";
+import { logEvent } from "./event-log.ts";
 
 // NOTE — concurrency + sybil-defense assumptions (v1):
 // The GLOBAL cap (inbound_max_global) is the real sybil defense: it limits total
@@ -193,7 +194,11 @@ export async function verifyEnvelope(store: EdgeBookStore, envelope: MessageEnve
   if (envelope.to_agent_id !== identity.agent_id) throw new EdgeBookError("wrong_recipient", "Envelope recipient does not match local identity");
   if (Date.parse(envelope.expires_at) <= Date.now()) throw new EdgeBookError("expired_message", "Message is expired");
   const seen = await readJson<string[]>(store.file(SEEN_MESSAGES_FILE), []);
-  if (seen.includes(envelope.message_id)) throw new EdgeBookError("replay", `Replay detected for ${envelope.message_id}`);
+  if (seen.includes(envelope.message_id)) {
+    // Flight recorder (spec-133): dedup hit — kind/from/dedup key only.
+    await logEvent(store, "envelope.dedup_hit", { envelope_kind: envelope.type, from: envelope.from_agent_id, dedup_key: envelope.message_id });
+    throw new EdgeBookError("replay", `Replay detected for ${envelope.message_id}`);
+  }
   const contacts = await store.contacts();
   let publicKey = contacts[envelope.from_agent_id]?.public_keys?.[0]?.public_key_pem;
   if (!publicKey && envelope.type === "friend_request") {
@@ -206,6 +211,8 @@ export async function verifyEnvelope(store: EdgeBookStore, envelope: MessageEnve
   }
   if (!publicKey) throw new EdgeBookError("unknown_key", `Unknown sender key for ${envelope.from_agent_id}`);
   if (!verifyPayload(withoutSignature(envelope), envelope.signature, publicKey)) {
+    // Flight recorder (spec-133): signature verification failure.
+    await logEvent(store, "envelope.signature_failed", { envelope_kind: envelope.type, from: envelope.from_agent_id, dedup_key: envelope.message_id });
     throw new EdgeBookError("invalid_signature", "Message signature is invalid");
   }
   seen.push(envelope.message_id);

@@ -31,6 +31,7 @@ import { deliverNotification, makeNotifyOnEnvelope, resolveNotifyCmd } from "./n
 import { ensureNotifierCron, ensureGreeterCron, defaultHermesRunner } from "./host-cron.ts";
 import { buildPairCompleteNotifyIntent } from "./store-notify.ts";
 import { buildOnboardingNote } from "./onboarding.ts";
+import { logEvent } from "./event-log.ts";
 
 export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
 export type { CliContext, CliResult } from "./cli-shared.ts";
@@ -105,6 +106,9 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       // tolerates that at runtime (any failure is caught below). Documented cast to keep
       // pre-existing behavior unchanged — see FINDINGS.md §1.
       const res = ensureNotifierCron({ runner: defaultHermesRunner(), home: home as string, disabled });
+      // Flight recorder (spec-133): cron provisioning outcome.
+      if (res.status === "installed") await logEvent(store, "cron.notifier_installed", {});
+      else if (res.status === "already_present") await logEvent(store, "cron.notifier_already_present", {});
       if (res.status === "installed") console.log(`  ↳ notifier cron self-installed ("Edge Book — friend requests", every 20m → telegram)`);
       else if (res.status === "error") console.log(`  ↳ notifier cron install skipped: ${res.detail}`);
     } catch (e) {
@@ -130,6 +134,9 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     // Same documented cast as the dialout branch: `home` may be undefined and
     // ensureNotifierCron reports (not throws) failures. See FINDINGS.md §1.
     const res = ensureNotifierCron({ runner: defaultHermesRunner(), home: home as string, disabled });
+    // Flight recorder (spec-133): cron provisioning outcome.
+    if (res.status === "installed") await logEvent(store, "cron.notifier_installed", {});
+    else if (res.status === "already_present") await logEvent(store, "cron.notifier_already_present", {});
     const msg: Record<string, string> = {
       installed: 'Installed notifier cron "Edge Book — friend requests" (every 20m → telegram).',
       already_present: "Notifier cron already present — nothing to do.",

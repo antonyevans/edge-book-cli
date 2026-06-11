@@ -9,7 +9,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { EdgeBookStore } from "./edge-book.ts";
 
-const KEY_FILE = "host-dialout-key.json";
+export const DIALOUT_KEY_FILE = "host-dialout-key.json"; // persisted name — doctor checks its presence
+const KEY_FILE = DIALOUT_KEY_FILE;
 export const DEFAULT_PAIR_TTL_MS = 5 * 60 * 1000;
 const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 

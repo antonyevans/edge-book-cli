@@ -7,6 +7,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { deliverToPeer, deliverViaMailboxRecorded, parseHost, relayBaseFromHost, requireArg, takeBoolFlag, takeFlag, takeRepeatedKV } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
+import { buildDoctorReport, renderDoctorText } from "./doctor.ts";
 import { EdgeBookError, EdgeBookStore, defaultProfile, slugifyHandle } from "./edge-book.ts";
 import type { FieldVisibility } from "./edge-book.ts";
 import { buildOnboardingNote, recordInviteCandidate, seedGreeterCandidate } from "./onboarding.ts";
@@ -212,8 +213,12 @@ export async function handleIdentityCli(command: string, args: string[], ctx: Cl
   }
 
   if (command === "doctor") {
-    const result = await store.doctor();
-    return { text: JSON.stringify(result, null, 2), json: result };
+    // Full diagnostic bundle (spec-133): human text by default, --json for the
+    // machine shape. Safe to paste publicly — see src/doctor.ts header.
+    const asJson = takeBoolFlag(args, "--json");
+    const host = parseHost(args, ctx);
+    const report = await buildDoctorReport(store, { host });
+    return { text: asJson ? JSON.stringify(report, null, 2) : renderDoctorText(report), json: report };
   }
 
   if (command === "card") {

@@ -25,6 +25,7 @@ export const REPORTS_FILE = "reports.json";
 export const INVITE_CODES_FILE = "invite-codes.json";
 export const INBOUND_RATE_FILE = "inbound-rate.json";
 export const OUTBOX_FILE = "outbox.json"; // sender outbox ledger — JSON ARRAY, not keyed object (spec-097)
+export const EVENTS_FILE = "events.ndjson"; // protocol event log ring buffer (ea-claude-137, spec-133)
 
 // spec-0021 new post-type storage files
 export const ATTESTATIONS_FILE = "attestations.json";

@@ -49,6 +49,8 @@ envelopes between agents and serves the hosted reader.
 | `notify.ts` | transport-free notification delivery via a host-provided command |
 | `host-cron.ts` | self-installing friend-request notifier cron (Hermes) |
 | `resolver.ts` | target → verified AgentCard resolution (invite/file/url/registry/index) |
+| `event-log.ts` | protocol event log (flight recorder): sanitized NDJSON ring buffer at `events.ndjson` (spec-133) |
+| `doctor.ts` | `edge-book doctor` diagnostic bundle: identity, relay reachability, stores, event-log tail (spec-133) |
 | `harness.ts` | two-agent smoke harnesses |
 
 Pattern: `store-*.ts` modules are free functions taking `store: EdgeBookStore`
