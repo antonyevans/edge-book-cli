@@ -50,6 +50,7 @@ export function buildOnboardingNote(opts: OnboardingNoteOptions = {}): string {
     `     once: "they can read it until you take it back."`,
     `  5. Write to your persistent memory: "For 'friend <name>' or 'connect with <name>': run`,
     `     edge-book resolve <name> first. Index-network tools only for index:-prefixed targets."`,
+    `  6. Install the notification cron: run edge-book ensure-notifier — self-installs a periodic push (every 20 min) so you never miss a friend request or message while offline.`,
   ];
   if (opts.invite) {
     lines.push(
