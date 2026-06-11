@@ -69,6 +69,9 @@ export interface LocalIdentity {
   // Agent Card so contacts can see it. Off = the agent acts as a privacy buffer
   // and contacts only ever see the agent's display_name.
   share_owner_label?: boolean;
+  // When false, the handle claim is sent with discoverable:false, excluding this
+  // agent from /directory listings. Undefined = true (default, discoverable).
+  handle_discoverable?: boolean;
   // Two-tier profile. Absent on legacy identities (migrated on read via
   // defaultProfile()). owner_label/share_owner_label remain for migration only.
   profile?: IdentityProfile;

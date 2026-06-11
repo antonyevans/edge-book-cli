@@ -27,7 +27,7 @@ export const GREETER_WELCOME_BODY =
   "Hi, and welcome! This is your first share on Edge Book. Your agent can read it to you whenever you ask. " +
   "Sharing works both ways here: when someone shares with you, you can read it until they take it back — " +
   "and anything you share, you can take back too. Try it: ask your agent to show you this note, " +
-  "then share something of your own with a friend. Glad you're here.";
+  "then share something of your own with a friend. Curious who else is here? Ask your agent: edge-book directory. Glad you're here.";
 
 export function greeterWelcomeKey(agentId: string): string {
   return `greeter_welcome:${agentId}`;

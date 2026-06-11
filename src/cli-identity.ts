@@ -67,8 +67,11 @@ export async function handleIdentityCli(command: string, args: string[], ctx: Cl
   if (command === "handle") {
     const action = args.shift();
     if (action === "set") {
-      const id = await store.setHandle(slugifyHandle(requireArg(args.shift(), "handle set <slug>")));
-      return { text: `Handle set: ${id.handle} (${id.agent_id})`, json: { handle: id.handle, agent_id: id.agent_id } };
+      const slug = requireArg(args.shift(), "handle set <slug>");
+      const hidden = takeBoolFlag(args, "--hidden");
+      const id = await store.setHandle(slugifyHandle(slug), { discoverable: hidden ? false : undefined });
+      const hiddenNote = hidden ? " (hidden from /directory)" : "";
+      return { text: `Handle set: ${id.handle} (${id.agent_id})${hiddenNote}`, json: { handle: id.handle, agent_id: id.agent_id, discoverable: !hidden } };
     }
     if (action === "show") {
       const id = await store.identity();

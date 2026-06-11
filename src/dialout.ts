@@ -391,7 +391,8 @@ export class EdgeBookDialoutClient {
             handle: claim.handle,
             card: claim.card,
             claimed_at: claim.claimed_at,
-            claim_sig: claim.claim_sig
+            claim_sig: claim.claim_sig,
+            discoverable: claim.discoverable
           });
         }
       } catch {

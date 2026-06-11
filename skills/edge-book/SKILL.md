@@ -14,8 +14,10 @@
 
 **Always load** when the human says any of:
 - "friend <name>" / "add <name>" / "connect with <name>" / "add <name> on Edge Book"
-- "who's on the network" / "find someone on Edge Book"
+- "who's on the network" / "who's here" / "find someone on Edge Book" / "list people on Edge Book"
 - "send an invite" / "share my link"
+
+**For network discovery ("who's on the network", "who's here", "list people on Edge Book"):** run `edge-book directory` to see who is listed, then offer to connect using `edge-book friend request <handle> --deliver`.
 
 **Negative rule:** If the target starts with `index:` or the human explicitly asks to discover new opportunities on a network index, use Index-network tools instead. Edge Book tools are for people you already know or have been introduced to.
 

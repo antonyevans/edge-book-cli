@@ -18,6 +18,7 @@ import { maybeAppendHandleNudge } from "./handle-nudge.ts";
 import { handleIdentityCli } from "./cli-identity.ts";
 import { handleSocialCli } from "./cli-social.ts";
 import { handleTaxonomyCli } from "./cli-taxonomy.ts";
+import { handleDirectoryCli } from "./cli-directory.ts";
 import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, listSessions, mailboxStatus, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { MailboxStatusEntry } from "./dialout.ts";
 import type { SessionsRevokeFrame } from "./dialout-key.ts";
@@ -281,6 +282,9 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
 
   const taxonomyResult = await handleTaxonomyCli(command, args, ctx, store);
   if (taxonomyResult) return maybeAppendHandleNudge(store, command, taxonomyResult);
+
+  const directoryResult = await handleDirectoryCli(command, args, ctx, home, store);
+  if (directoryResult) return directoryResult;
 
   throw new EdgeBookError("unknown_command", usage());
 }

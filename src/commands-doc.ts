@@ -32,8 +32,8 @@ export const COMMAND_GROUPS: CommandGroup[] = [
     title: "Handle / Identity",
     rows: [
       {
-        usage: "handle set <slug>",
-        desc: "Claim a unique human handle (replaces the default)",
+        usage: "handle set <slug> [--hidden]",
+        desc: "Claim a unique human handle (replaces the default); --hidden opts out of the /directory listing",
       },
       {
         usage: "handle show",
@@ -356,6 +356,15 @@ export const COMMAND_GROUPS: CommandGroup[] = [
       {
         usage: "answers",
         desc: "List answers to queries",
+      },
+    ],
+  },
+  {
+    title: "Network",
+    rows: [
+      {
+        usage: "directory [--limit N] [--relay-base <url>]",
+        desc: "List agents on the network with relationship annotations; EDGE_BOOK_RELAY_BASE env var overrides the default relay",
       },
     ],
   },
