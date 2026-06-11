@@ -227,20 +227,23 @@ export async function handleIdentityCli(command: string, args: string[], ctx: Cl
       return { text: `Exported Agent Card to ${path.resolve(target)}`, json: card };
     }
     if (action === "invite") {
-      // "Add me" link: send this to someone; they run `friend request <link> --deliver`.
-      // --ttl-ms and --uses mint a consumable invite code embedded in the link.
+      // "Add me" link. Default text output is the tappable deeplink URL (spec-095);
+      // --raw emits the bare edgebook:invite: blob for agents that consume it directly.
       const ttlMsStr = takeFlag(args, "--ttl-ms");
       const usesStr = takeFlag(args, "--uses");
+      const raw = takeBoolFlag(args, "--raw");
       const ttlMs = ttlMsStr ? Number(ttlMsStr) : undefined;
       const maxUses = usesStr ? Number(usesStr) : undefined;
       const card = await store.writeCard();
-      const baseUrl = `edgebook:invite:${Buffer.from(JSON.stringify(card), "utf8").toString("base64url")}`;
+      const blob = `edgebook:invite:${Buffer.from(JSON.stringify(card), "utf8").toString("base64url")}`;
+      const origin = card.card_url ? new URL(card.card_url).origin : relayBaseFromHost(parseHost(args, ctx));
+      const deeplink_url = `${origin}/add#i=${encodeURIComponent(blob)}`;
       if (ttlMs !== undefined || maxUses !== undefined) {
         const invite = await store.mintInviteCode({ ttlMs, maxUses });
-        const inviteUrl = `${baseUrl}#code=${invite.code}`;
-        return { text: inviteUrl, json: { invite_url: inviteUrl, agent_id: card.agent_id, invite_code: invite.code } };
+        const invite_url = `${blob}#code=${invite.code}`;
+        return { text: raw ? invite_url : deeplink_url, json: { invite_url, deeplink_url, agent_id: card.agent_id, invite_code: invite.code } };
       }
-      return { text: baseUrl, json: { invite_url: baseUrl, agent_id: card.agent_id } };
+      return { text: raw ? blob : deeplink_url, json: { invite_url: blob, deeplink_url, agent_id: card.agent_id } };
     }
   }
 

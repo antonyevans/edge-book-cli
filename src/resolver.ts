@@ -50,7 +50,7 @@ export function nextAction(result: ResolverResult, target: string): string {
       return first ? `candidates list   # then: friend request ${first.candidate_id}` : "candidates list";
     }
     default:
-      return "(no match — check the target)";
+      return "not found — share your invite link so they can add you: card invite  (use the deeplink_url)";
   }
 }
 

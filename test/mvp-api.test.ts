@@ -67,7 +67,7 @@ test("GET /api/shared-objects returns grant-gated objects; /attachment serves th
   }
 });
 
-test("GET /api/invite returns the owner's signed card + an importable invite link", async () => {
+test("GET /api/invite returns the owner's signed card + an importable invite link + deeplink", async () => {
   const root = await tempRoot();
   const { bob } = await setup(root);
   const server = await startEdgeBookServer({ home: bob.home, host: "127.0.0.1", port: 0 });
@@ -78,6 +78,8 @@ test("GET /api/invite returns the owner's signed card + an importable invite lin
     assert.match(invite.invite_url, /^edgebook:invite:/);
     assert.ok(invite.agent_id.startsWith("did:openclaw:"));
     assert.ok(invite.card, "card present");
+    // deeplink_url is the tappable /add URL (spec-095)
+    assert.match(invite.deeplink_url, /\/add#i=/);
     // No PRIVATE key material leaks (the card legitimately carries the public key).
     assert.doesNotMatch(JSON.stringify(invite), /private_key|PRIVATE KEY/);
   } finally {
