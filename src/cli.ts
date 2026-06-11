@@ -201,17 +201,25 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     // Newest 50: the wire bound on mailbox_status ids.
     const recent = entries.slice(-50);
     let statuses: MailboxStatusEntry[] | null = null;
+    let unreachable = false; // connection failure ≠ old host — different "unknown" wording
     try {
       statuses = await mailboxStatus({ home, host: hostUrl, socketFactory: ctx.socketFactory, ids: recent.map((e) => e.id) });
-    } catch {
-      statuses = null; // connection failure degrades like an old host: local-only
+    } catch (error) {
+      // mailboxStatus already maps the old-host paths (host_unsupported_rpc
+      // error frame, host_rpc_timeout) to a null RETURN. Anything that THROWS
+      // here is a failure to reach the host at all — degrade to local-only
+      // the same way, but say so honestly. Exit 0 either way.
+      statuses = null;
+      unreachable = !(error instanceof EdgeBookError && (error.code === "host_unsupported_rpc" || error.code === "host_rpc_timeout"));
     }
     const byId = new Map((statuses ?? []).map((s) => [s.id, s]));
     const contacts = await store.contacts();
     const staleMs = staleQueueMs();
     const report = recent.map((entry) => {
       const status = byId.get(entry.id);
-      const state = statuses === null ? "unknown (host does not support receipts)" : (status?.state ?? "unknown");
+      const state = statuses === null
+        ? (unreachable ? "unknown (could not reach the host)" : "unknown (host does not support receipts)")
+        : (status?.state ?? "unknown");
       const age = formatAge(Date.now() - Date.parse(entry.sent_at));
       const stale = status?.state === "queued" && ((status.queued_ms ?? 0) > staleMs || status.recipient_live === false);
       return {

@@ -313,6 +313,21 @@ test("friend request --deliver over the mailbox uses honest wording and records 
   assert.equal(entries[0]!.envelope_type, "friend_request");
 });
 
+test("profile broadcast --deliver records one outbox entry per friend (mailbox fallback appends, spec-097 §C.1)", async () => {
+  const host = new FakeStatusHost("receipts");
+  const { aliceHome, bobId, factory } = await friendedPair(host);
+
+  const result = await handleCli(["profile", "broadcast", "--deliver", "--host", "ws://fake"],
+    { home: aliceHome, socketFactory: factory });
+
+  assert.equal(result.text, "Broadcast profile to 1 friend(s)", "aggregate output line unchanged");
+  const entries = await readOutbox(aliceHome);
+  assert.equal(entries.length, 1, "one ledger entry per friend delivered over the mailbox");
+  assert.equal(entries[0]!.envelope_type, "profile_share");
+  assert.equal(entries[0]!.to_agent_id, bobId);
+  assert.equal(entries[0]!.recipient_live, false, "recipient_live captured per send");
+});
+
 // ── spec-097 C.3: the `edge-book outbox` command ─────────────────────────────
 
 test("outbox prints per-entry state and a LOUD warning for stale-queued mail; --json round-trips", async () => {
@@ -410,4 +425,23 @@ test("outbox --json against an old host marks every entry unknown-unsupported", 
   assert.equal(parsed.entries.length, 1);
   assert.equal(parsed.entries[0]!.state, "unknown (host does not support receipts)");
   assert.equal(parsed.entries[0]!.stale, false);
+});
+
+test("outbox against an unreachable host says 'could not reach the host', not 'does not support receipts', exit 0", async () => {
+  const host = new FakeStatusHost("receipts");
+  const { aliceHome, bobId, factory } = await friendedPair(host);
+  const aliceStore = new EdgeBookStore({ home: aliceHome });
+  const object = await aliceStore.createObject({ title: "t", body: "b" });
+  // Record an entry while the host is up...
+  await handleCli(["object", "share", bobId, object.object_id, "--deliver", "--host", "ws://fake"],
+    { home: aliceHome, socketFactory: factory });
+
+  // ...then the host becomes unreachable: the socket factory itself fails.
+  const failingFactory = (_url: string): FakeSocket => { throw new Error("connect ECONNREFUSED 127.0.0.1:443"); };
+  // handleCli resolving (not throwing) IS exit 0 — runCli only sets exitCode on throw.
+  const result = await handleCli(["outbox", "--host", "ws://fake"], { home: aliceHome, socketFactory: failingFactory });
+  assert.match(result.text, /unknown \(could not reach the host\)/);
+  assert.doesNotMatch(result.text, /does not support receipts/, "unreachable ≠ old host");
+  assert.match(result.text, /object_share/, "local ledger entries still listed");
+  assert.doesNotMatch(result.text, /⚠/, "no stale warning without host truth");
 });
