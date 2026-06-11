@@ -167,6 +167,7 @@ edge-book report <peer-agent-id> --block         # report and block in one step
 | `pair [--host <wss-url>] [--ttl-ms <ms>]` | Mint a pairing code for the hosted browser reader |
 | `sessions list [--host <wss-url>]` | List remembered reader sessions |
 | `sessions revoke [--device <id>] [--host <wss-url>]` | Revoke one device session (or all if no --device) |
+| `outbox [--json] [--host <wss-url>]` | Delivery state of recently sent envelopes (queued / delivered / acked) with stale-queue warnings |
 | **Discovery** | |
 | `resolve <target>` | Resolve a handle, invite link, card URL, or file to a verified Agent Card |
 | `candidates list` | List pending first-contact candidates with provenance |

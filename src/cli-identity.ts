@@ -5,9 +5,8 @@
 // in dispatch order. Returns null when the command is not one of its own.
 import fs from "node:fs/promises";
 import path from "node:path";
-import { deliverToPeer, parseHost, relayBaseFromHost, requireArg, takeBoolFlag, takeFlag, takeRepeatedKV } from "./cli-shared.ts";
+import { deliverToPeer, deliverViaMailboxRecorded, parseHost, relayBaseFromHost, requireArg, takeBoolFlag, takeFlag, takeRepeatedKV } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
-import { deliverEnvelopeViaMailbox } from "./dialout.ts";
 import { EdgeBookError, EdgeBookStore, defaultProfile, slugifyHandle } from "./edge-book.ts";
 import type { FieldVisibility } from "./edge-book.ts";
 import { buildOnboardingNote, recordInviteCandidate, seedGreeterCandidate } from "./onboarding.ts";
@@ -194,7 +193,12 @@ export async function handleIdentityCli(command: string, args: string[], ctx: Cl
             await deliverToPeer(store, envelope, envelope.to_agent_id);
           } catch (error) {
             if (!(error instanceof EdgeBookError) || error.code !== "no_route") throw error;
-            await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+            // spec-097 §C.1: every successful --deliver appends to the outbox
+            // ledger. The broadcast prints an aggregate count, so the per-send
+            // wording is discarded — recording (incl. recipient_live) is what
+            // matters here.
+            await deliverViaMailboxRecorded(envelope, { home, host: hostUrl, socketFactory: ctx.socketFactory },
+              (id) => `Delivered profile_share (host id ${id})`);
           }
         }
         return { text: `Broadcast profile to ${envelopes.length} friend(s)`, json: { count: envelopes.length } };

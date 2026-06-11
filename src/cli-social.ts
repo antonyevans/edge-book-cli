@@ -4,9 +4,8 @@
 // (npm surface); handleCli in cli.ts stays the only dispatch entry and calls
 // this handler in dispatch order. Returns null when the command is not its own.
 import path from "node:path";
-import { deliverToEndpoint, deliverToPeer, parseHost, readEnvelope, relayBaseFromHost, requireArg, takeBoolFlag, takeFlag, takeRepeated } from "./cli-shared.ts";
+import { deliverToEndpoint, deliverToPeer, deliverViaMailboxRecorded, parseHost, readEnvelope, relayBaseFromHost, requireArg, takeBoolFlag, takeFlag, takeRepeated } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
-import { deliverEnvelopeViaMailbox } from "./dialout.ts";
 import { loadCard, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import type { FriendRequestBody } from "./edge-book.ts";
 import { postRelayEnvelope, pullRelayEnvelopes } from "./http-relay.ts";
@@ -65,8 +64,9 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
         }
         // Dial-out agent (no inbound endpoint): deliver over the host mailbox.
         const hostUrl = parseHost(args, ctx);
-        const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
-        return { text: `Delivered friend_request to ${card.agent_id} over the mailbox (host id ${ack.id})`, json: envelope };
+        const outcome = await deliverViaMailboxRecorded(envelope, { home, host: hostUrl, socketFactory: ctx.socketFactory },
+          (id) => `Delivered friend_request to ${card.agent_id} over the mailbox (host id ${id})`);
+        return { text: outcome.text, json: envelope };
       }
       return { text: JSON.stringify(envelope, null, 2), json: envelope };
     }
@@ -86,8 +86,9 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
           if (!(error instanceof EdgeBookError) || error.code !== "no_route") throw error;
           // Dial-out peer (no inbound endpoint): deliver over the host mailbox.
           const hostUrl = parseHost(args, ctx);
-          const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
-          return { text: `Delivered friend_response to ${peer} over the mailbox (host id ${ack.id})`, json: envelope };
+          const outcome = await deliverViaMailboxRecorded(envelope, { home, host: hostUrl, socketFactory: ctx.socketFactory },
+            (id) => `Delivered friend_response to ${peer} over the mailbox (host id ${id})`);
+          return { text: outcome.text, json: envelope };
         }
       }
       return { text: JSON.stringify(envelope, null, 2), json: envelope };
@@ -103,8 +104,9 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
         } catch (error) {
           if (!(error instanceof EdgeBookError) || error.code !== "no_route") throw error;
           const hostUrl = parseHost(args, ctx);
-          const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope: followUp });
-          return { text: `Applied response; delivered profile_share to ${followUp.to_agent_id} over the mailbox (host id ${ack.id})`, json: followUp };
+          const outcome = await deliverViaMailboxRecorded(followUp, { home, host: hostUrl, socketFactory: ctx.socketFactory },
+            (id) => `delivered profile_share to ${followUp.to_agent_id} over the mailbox (host id ${id})`);
+          return { text: `Applied response; ${outcome.text}`, json: followUp };
         }
       }
       return { text: `Applied friend response; deliver this profile_share to ${followUp.to_agent_id}`, json: followUp };
@@ -166,7 +168,8 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
             } catch (error) {
               if (!(error instanceof EdgeBookError) || error.code !== "no_route") throw error;
               // Dial-out peer (no inbound endpoint): deliver over the host mailbox.
-              await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
+              await deliverViaMailboxRecorded(envelope, { home, host: hostUrl, socketFactory: ctx.socketFactory },
+                (id) => `Delivered ${envelope.type} (host id ${id})`);
             }
           }
         }
@@ -214,8 +217,9 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
       const objectId = requireArg(args.shift(), "object-id");
       const envelope = await store.shareObjectEnvelope(peer, objectId);
       if (deliver) {
-        const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
-        return { text: `Shared object ${objectId} to ${peer} over the mailbox (host id ${ack.id})`, json: envelope };
+        const outcome = await deliverViaMailboxRecorded(envelope, { home, host: hostUrl, socketFactory: ctx.socketFactory },
+          (id) => `Shared object ${objectId} to ${peer} over the mailbox (host id ${id})`);
+        return { text: outcome.text, json: envelope };
       }
       return { text: JSON.stringify(envelope, null, 2), json: envelope };
     }
@@ -226,8 +230,9 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
       const objectId = requireArg(args.shift(), "object-id");
       const envelope = await store.revokeObjectEnvelope(peer, objectId);
       if (deliver) {
-        const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
-        return { text: `Revoked object ${objectId} for ${peer}; forwarded over the mailbox (host id ${ack.id})`, json: envelope };
+        const outcome = await deliverViaMailboxRecorded(envelope, { home, host: hostUrl, socketFactory: ctx.socketFactory },
+          (id) => `Revoked object ${objectId} for ${peer}; forwarded over the mailbox (host id ${id})`);
+        return { text: outcome.text, json: envelope };
       }
       return { text: JSON.stringify(envelope, null, 2), json: envelope };
     }
@@ -295,8 +300,9 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
       const { escalation, envelope } = await store.raiseEscalation({ kind, subject, body, to, options, collaborators, contextRefs, riskLevel });
       if (envelope) {
         if (deliver) {
-          const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
-          return { text: `Raised escalation ${escalation.escalation_id}; delivered to ${to} over the mailbox (host id ${ack.id})`, json: envelope };
+          const outcome = await deliverViaMailboxRecorded(envelope, { home, host: hostUrl, socketFactory: ctx.socketFactory },
+            (id) => `delivered to ${to} over the mailbox (host id ${id})`);
+          return { text: `Raised escalation ${escalation.escalation_id}; ${outcome.text}`, json: envelope };
         }
         return { text: `Raised escalation ${escalation.escalation_id} for ${to}; deliver this envelope (or pass --deliver)`, json: envelope };
       }
@@ -319,8 +325,9 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
       const choice = takeFlag(args, "--choice");
       const { envelope, ...escalation } = await store.answerEscalation(escalationId, { text, choice });
       if (envelope && deliver) {
-        const ack = await deliverEnvelopeViaMailbox({ home, host: hostUrl, socketFactory: ctx.socketFactory, envelope });
-        return { text: `Answered ${escalationId}; routed response to ${envelope.to_agent_id} over the mailbox (host id ${ack.id})`, json: { ...escalation, response_envelope: envelope } };
+        const outcome = await deliverViaMailboxRecorded(envelope, { home, host: hostUrl, socketFactory: ctx.socketFactory },
+          (id) => `routed response to ${envelope.to_agent_id} over the mailbox (host id ${id})`);
+        return { text: `Answered ${escalationId}; ${outcome.text}`, json: { ...escalation, response_envelope: envelope } };
       }
       const tail = envelope ? `; deliver the response envelope to ${envelope.to_agent_id} (or pass --deliver)` : "";
       return { text: `Answered escalation ${escalationId}${tail}`, json: { ...escalation, response_envelope: envelope } };

@@ -38,17 +38,8 @@ export interface DeviceInfo {
   created_at: number;
   last_seen_at: number;
 }
-export interface SessionsListAck {
-  type: "sessions_list_ok";
-  request_id?: string;
-  devices?: DeviceInfo[];
-}
-export interface SessionRevokeOneAck {
-  type: "session_revoke_one_ok";
-  request_id?: string;
-  device_id?: string;
-  revoked?: boolean;
-}
+export interface SessionsListAck { type: "sessions_list_ok"; request_id?: string; devices?: DeviceInfo[] }
+export interface SessionRevokeOneAck { type: "session_revoke_one_ok"; request_id?: string; device_id?: string; revoked?: boolean }
 
 export interface DialoutSocket {
   readyState?: number;
@@ -78,13 +69,16 @@ export interface DialoutClientOptions {
 }
 
 // A delivered mailbox message (Contract 1, mirrors edge-book-host).
-export interface MailboxDeliverFrame {
-  type: "mailbox_deliver";
-  id: string;
-  from: string;
-  blob_b64: string;
-  ts: number;
-}
+export interface MailboxDeliverFrame { type: "mailbox_deliver"; id: string; from: string; blob_b64: string; ts: number }
+
+// Resolved mailbox_send acknowledgement (spec-097). recipient_live reports
+// whether any live channel claimed the recipient at enqueue time; absent when
+// the host predates receipts.
+export interface MailboxSendAck { id: string; recipient_live?: boolean }
+
+// One entry from mailbox_status_ok (spec-097). queued_ms/recipient_live are
+// present only for queued/delivered (key omitted otherwise).
+export interface MailboxStatusEntry { id: string; state: "queued" | "delivered" | "acked" | "unknown"; queued_ms?: number; recipient_live?: boolean }
 
 // Decide whether the agent should claim a handle with the relay on connect.
 // Skip the default placeholder and any handle that isn't a valid slug — the
@@ -122,14 +116,17 @@ export class EdgeBookDialoutClient {
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }>();
-  // Generic request_id-keyed RPC waiters for sessions_list / session_revoke_one.
+  // Generic request_id-keyed RPC waiters (sessions_list / session_revoke_one /
+  // mailbox_status). rpcType lets an old host's {type:"error", ref:"<type>"}
+  // frame — which carries NO request_id — reject pending requests of that type.
   private pendingRpc = new Map<string, {
     resolve: (frame: Record<string, unknown>) => void;
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
+    rpcType: string;
   }>();
   private pendingMailboxSends = new Map<string, {
-    resolve: (ack: { id: string }) => void;
+    resolve: (ack: MailboxSendAck) => void;
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }>();
@@ -189,6 +186,20 @@ export class EdgeBookDialoutClient {
     return Boolean((frame as unknown as SessionRevokeOneAck).revoked);
   }
 
+  // Ask the host for per-message delivery state (spec-097). Returns null when
+  // the host predates receipts — detected by the unknown-type error frame
+  // (fast path) or the RPC timeout (lost-frame path); both degrade the same.
+  async mailboxStatusAndWait(ids: string[], timeoutMs = 5_000): Promise<MailboxStatusEntry[] | null> {
+    try {
+      const frame = await this.rpc("mailbox_status", { ids }, "mailbox_status_ok", timeoutMs) as { type?: string; error?: string; statuses?: MailboxStatusEntry[] };
+      if (frame.type === "mailbox_status_err") throw new EdgeBookError("mailbox_status_failed", String(frame.error || "mailbox_status rejected"));
+      return frame.statuses ?? [];
+    } catch (error) {
+      if (error instanceof EdgeBookError && (error.code === "host_rpc_timeout" || error.code === "host_unsupported_rpc")) return null;
+      throw error;
+    }
+  }
+
   // Small request/response helper over the dial-out socket, correlated by
   // request_id. `expect` documents the ack type; resolution is by request_id.
   private async rpc(type: string, extra: Record<string, unknown>, expect: string, timeoutMs: number): Promise<Record<string, unknown>> {
@@ -198,7 +209,7 @@ export class EdgeBookDialoutClient {
         this.pendingRpc.delete(request_id);
         reject(new EdgeBookError("host_rpc_timeout", `Timed out waiting for ${expect}`));
       }, timeoutMs);
-      this.pendingRpc.set(request_id, { resolve, reject, timer });
+      this.pendingRpc.set(request_id, { resolve, reject, timer, rpcType: type });
     });
     this.send({ type, request_id, ...extra });
     return promise;
@@ -220,11 +231,12 @@ export class EdgeBookDialoutClient {
   // ── Mailbox transport (Contract 1 / ea-claude-065) ─────────────────────────
 
   // Low-level: hand an opaque blob to the host for delivery to `to` (a peer DID
-  // or channel_id). Resolves with the host-assigned message id once enqueued.
-  async sendMailbox(to: string, blob: Buffer | Uint8Array, timeoutMs = 5_000): Promise<{ id: string }> {
+  // or channel_id). Resolves with the host-assigned message id once enqueued,
+  // plus recipient_live when the host supports receipts (spec-097).
+  async sendMailbox(to: string, blob: Buffer | Uint8Array, timeoutMs = 5_000): Promise<MailboxSendAck> {
     const request_id = crypto.randomUUID();
     const blob_b64 = Buffer.from(blob).toString("base64");
-    const ack = new Promise<{ id: string }>((resolve, reject) => {
+    const ack = new Promise<MailboxSendAck>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingMailboxSends.delete(request_id);
         reject(new EdgeBookError("mailbox_send_timeout", "Timed out waiting for mailbox_send_ok"));
@@ -238,7 +250,7 @@ export class EdgeBookDialoutClient {
   // High-level: deliver a signed envelope to its recipient (envelope.to_agent_id;
   // the host resolves the DID to a channel). Used to route friend requests,
   // object shares, and revokes through the mailbox instead of a manual file hop.
-  async sendEnvelope(envelope: MessageEnvelope): Promise<{ id: string }> {
+  async sendEnvelope(envelope: MessageEnvelope): Promise<MailboxSendAck> {
     return this.sendMailbox(envelope.to_agent_id, Buffer.from(JSON.stringify(envelope), "utf8"));
   }
 
@@ -388,7 +400,7 @@ export class EdgeBookDialoutClient {
       this.send({ type: "pong" });
       return;
     }
-    if ((frame as { type?: string }).type === "sessions_list_ok" || (frame as { type?: string }).type === "session_revoke_one_ok") {
+    if ((frame as { type?: string }).type === "sessions_list_ok" || (frame as { type?: string }).type === "session_revoke_one_ok" || (frame as { type?: string }).type === "mailbox_status_ok" || (frame as { type?: string }).type === "mailbox_status_err") {
       const ack = frame as unknown as { request_id?: string };
       const pending = this.pendingRpc.get(ack.request_id || "");
       if (pending) {
@@ -415,12 +427,12 @@ export class EdgeBookDialoutClient {
     }
     const frameType = (frame as { type?: string }).type;
     if (frameType === "mailbox_send_ok") {
-      const ack = frame as unknown as { request_id?: string; id?: string };
+      const ack = frame as unknown as { request_id?: string; id?: string; recipient_live?: boolean };
       const pending = this.pendingMailboxSends.get(ack.request_id || "");
       if (pending) {
         clearTimeout(pending.timer);
         this.pendingMailboxSends.delete(ack.request_id || "");
-        pending.resolve({ id: ack.id || "" });
+        pending.resolve({ id: ack.id || "", ...(typeof ack.recipient_live === "boolean" ? { recipient_live: ack.recipient_live } : {}) });
       }
       return;
     }
@@ -439,7 +451,21 @@ export class EdgeBookDialoutClient {
       return;
     }
     if (frameType === "handle_claim_ok" || frameType === "handle_claim_err") return;
-    if (frameType === "error") return;
+    if (frameType === "error") {
+      // An old host answers an unknown frame type with {type:"error", error:
+      // "unknown_message_type", ref:"<type>"} and NO request_id. Fail every
+      // pending RPC of that type so callers degrade immediately instead of
+      // waiting out the timeout (spec-097 §C.3 fast path).
+      const ref = (frame as unknown as { ref?: string | null }).ref;
+      if (typeof ref !== "string") return;
+      for (const [request_id, pending] of [...this.pendingRpc]) {
+        if (pending.rpcType !== ref) continue;
+        clearTimeout(pending.timer);
+        this.pendingRpc.delete(request_id);
+        pending.reject(new EdgeBookError("host_unsupported_rpc", `Host does not support ${ref}`));
+      }
+      return;
+    }
     if (frame.type !== "host.api.request" && frame.type !== "api_request") return;
     const response = await this.handleApiRequest(frame);
     this.send(response);
@@ -542,7 +568,7 @@ export async function sendPairRegistration(options: DialoutClientOptions & { ttl
 // Deliver a single signed envelope over the host mailbox using a transient
 // dial-out connection (connect → mailbox_send → wait ack → disconnect). Used by
 // the CLI `object share/revoke --deliver` and `friend ... --deliver` flows.
-export async function deliverEnvelopeViaMailbox(options: DialoutClientOptions & { envelope: MessageEnvelope }): Promise<{ id: string }> {
+export async function deliverEnvelopeViaMailbox(options: DialoutClientOptions & { envelope: MessageEnvelope }): Promise<MailboxSendAck> {
   const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
   await client.start();
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -576,4 +602,13 @@ export async function revokeOneSession(options: DialoutClientOptions & { deviceI
   await client.start();
   await new Promise((resolve) => setTimeout(resolve, 0));
   try { return await client.revokeOneSessionAndWait(options.deviceId); } finally { await client.stop(); }
+}
+
+// Query per-message delivery state via a transient dial-out connection
+// (spec-097). Returns null when the host does not support receipts.
+export async function mailboxStatus(options: DialoutClientOptions & { ids: string[]; timeoutMs?: number }): Promise<MailboxStatusEntry[] | null> {
+  const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
+  await client.start();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  try { return await client.mailboxStatusAndWait(options.ids, options.timeoutMs ?? 5_000); } finally { await client.stop(); }
 }

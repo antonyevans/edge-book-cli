@@ -18,8 +18,10 @@ import { maybeAppendHandleNudge } from "./handle-nudge.ts";
 import { handleIdentityCli } from "./cli-identity.ts";
 import { handleSocialCli } from "./cli-social.ts";
 import { handleTaxonomyCli } from "./cli-taxonomy.ts";
-import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, listSessions, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
+import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, listSessions, mailboxStatus, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
+import type { MailboxStatusEntry } from "./dialout.ts";
 import type { SessionsRevokeFrame } from "./dialout-key.ts";
+import { formatAge, readOutbox, staleQueueMs } from "./store-outbox.ts";
 import { runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import { renderUsage } from "./commands-doc.ts";
 import { startEdgeBookServer } from "./http.ts";
@@ -183,6 +185,60 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       const channel = (frame as SessionsRevokeFrame & { channel_id?: string }).channel_id || "unknown-channel";
       return { text: `Received sessions_revoke_ok for request ${frame.request_id} on ${channel}`, json: frame };
     }
+  }
+
+  if (command === "outbox") {
+    // Delivery receipts (spec-097): one transient connection, a single
+    // mailbox_status for the recorded ids, honest per-entry state. Against a
+    // pre-receipts host (error frame or timeout) it degrades to the local
+    // ledger with unknown states — exit 0 either way.
+    const asJson = takeBoolFlag(args, "--json");
+    const hostUrl = parseHost(args, ctx);
+    const entries = await readOutbox(home);
+    if (entries.length === 0) {
+      return { text: "Outbox is empty — nothing has been sent with --deliver yet.", json: { entries: [] } };
+    }
+    // Newest 50: the wire bound on mailbox_status ids.
+    const recent = entries.slice(-50);
+    let statuses: MailboxStatusEntry[] | null = null;
+    let unreachable = false; // connection failure ≠ old host — different "unknown" wording
+    try {
+      statuses = await mailboxStatus({ home, host: hostUrl, socketFactory: ctx.socketFactory, ids: recent.map((e) => e.id) });
+    } catch (error) {
+      // mailboxStatus already maps the old-host paths (host_unsupported_rpc
+      // error frame, host_rpc_timeout) to a null RETURN. Anything that THROWS
+      // here is a failure to reach the host at all — degrade to local-only
+      // the same way, but say so honestly. Exit 0 either way.
+      statuses = null;
+      unreachable = !(error instanceof EdgeBookError && (error.code === "host_unsupported_rpc" || error.code === "host_rpc_timeout"));
+    }
+    const byId = new Map((statuses ?? []).map((s) => [s.id, s]));
+    const contacts = await store.contacts();
+    const staleMs = staleQueueMs();
+    const report = recent.map((entry) => {
+      const status = byId.get(entry.id);
+      const state = statuses === null
+        ? (unreachable ? "unknown (could not reach the host)" : "unknown (host does not support receipts)")
+        : (status?.state ?? "unknown");
+      const age = formatAge(Date.now() - Date.parse(entry.sent_at));
+      const stale = status?.state === "queued" && ((status.queued_ms ?? 0) > staleMs || status.recipient_live === false);
+      return {
+        ...entry,
+        to_display_name: contacts[entry.to_agent_id]?.display_name || entry.to_agent_id,
+        age,
+        state,
+        ...(status?.queued_ms !== undefined ? { queued_ms: status.queued_ms } : {}),
+        ...(status?.recipient_live !== undefined ? { recipient_live: status.recipient_live } : {}),
+        stale: Boolean(stale)
+      };
+    });
+    const lines = report.map((r) => {
+      const base = `${r.id}  ${r.envelope_type}  → ${r.to_display_name}  (${r.age} ago)  ${r.state}`;
+      return r.stale
+        ? `${base}\n  ⚠ undelivered for ${r.age} — the recipient's agent may be running under a different identity; ask them for a fresh invite.`
+        : base;
+    });
+    return { text: asJson ? JSON.stringify({ entries: report }, null, 2) : lines.join("\n"), json: { entries: report } };
   }
 
   if (command === "relay") {
