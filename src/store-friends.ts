@@ -140,7 +140,7 @@ export async function receiveFriendRequest(store: EdgeBookStore, envelope: Messa
   const contact = await store.upsertContactFromCard(body.card, "request_received");
   await store.setRelationship(envelope.from_agent_id, "request_received", "FriendRequest", body.note);
   // Flight recorder (spec-133): inbound friend request — sender id + dedup key only.
-  await logEvent(store, "friend.request_received", { from: envelope.from_agent_id, dedup_key: envelope.message_id });
+  await logEvent(store, "friend.request_received", { from: envelope.from_agent_id, dedup_key: envelope.message_id, trace_id: envelope.trace_id });
   await appendJsonl(store.file(INBOX_FILE), envelope);
   // Dedup: if a pending friend_accept already exists for this peer (e.g. from a
   // prior request that was revoked and re-sent with a fresh message_id), reuse it

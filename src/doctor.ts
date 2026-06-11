@@ -20,6 +20,7 @@ import { FRIEND_REQUESTS_CRON_NAME, defaultHermesRunner } from "./host-cron.ts";
 import type { HermesRunner } from "./host-cron.ts";
 
 export const DOCTOR_EVENT_TAIL = 50;
+export const DOCTOR_TRACE_TAIL = 10;
 const DEFAULT_RELAY_TIMEOUT_MS = 3_000;
 
 export interface DoctorRelayCheck {
@@ -67,6 +68,32 @@ export interface DoctorReport {
     pending_approvals: number;
   };
   events: ProtocolEvent[]; // newest-last tail (DOCTOR_EVENT_TAIL)
+  // Recent envelope traces (ea-claude-138): the newest DOCTOR_TRACE_TAIL
+  // DISTINCT trace_ids seen in the event log, newest-last, each with the kind
+  // + direction + timestamp of its most recent event. Public ids only.
+  traces: DoctorTrace[];
+}
+
+export interface DoctorTrace {
+  trace_id: string;
+  kind: string;       // event kind of the newest event carrying this trace
+  direction: "out" | "in";
+  ts: string;
+}
+
+// Compact "recent traces" view: walk newest→oldest, keep the first (newest)
+// event per distinct trace_id, cap at DOCTOR_TRACE_TAIL, return newest-last.
+export function recentTraces(events: ProtocolEvent[], limit = DOCTOR_TRACE_TAIL): DoctorTrace[] {
+  const out: DoctorTrace[] = [];
+  const seen = new Set<string>();
+  for (let i = events.length - 1; i >= 0 && out.length < limit; i--) {
+    const e = events[i]!;
+    const trace_id = typeof e.trace_id === "string" ? e.trace_id : undefined;
+    if (!trace_id || seen.has(trace_id)) continue;
+    seen.add(trace_id);
+    out.push({ trace_id, kind: e.kind, direction: e.kind === "envelope.sent" ? "out" : "in", ts: e.ts });
+  }
+  return out.reverse();
 }
 
 export interface DoctorOptions {
@@ -174,6 +201,9 @@ export async function buildDoctorReport(store: EdgeBookStore, opts: DoctorOption
     },
     stores,
     events: await readEvents(store, DOCTOR_EVENT_TAIL),
+    // Traces are derived from the FULL event log (not just the tail) so a
+    // busy log does not hide an older still-relevant trace.
+    traces: recentTraces(await readEvents(store)),
   };
 }
 
@@ -223,6 +253,10 @@ export function renderDoctorText(report: DoctorReport): string {
   lines.push("Stores");
   lines.push(`  contacts: ${report.stores.contacts} (friends: ${report.stores.friends})`);
   lines.push(`  posts: ${report.stores.posts}  objects: ${report.stores.objects}  escalations: ${report.stores.escalations}  pending approvals: ${report.stores.pending_approvals}`);
+  lines.push("");
+  lines.push(`Recent traces (distinct trace_ids, newest last, up to ${DOCTOR_TRACE_TAIL})`);
+  if (report.traces.length === 0) lines.push("  (no traced envelopes yet)");
+  for (const t of report.traces) lines.push(`  ${t.ts}  ${t.direction === "out" ? "→" : "←"} ${t.kind}  ${t.trace_id}`);
   lines.push("");
   lines.push(`Event log (newest last, up to ${DOCTOR_EVENT_TAIL})`);
   if (report.events.length === 0) lines.push("  (no events recorded yet)");

@@ -338,6 +338,14 @@ export interface MessageEnvelope {
   created_at: string;
   expires_at: string;
   body: Record<string, unknown>;
+  // Cross-agent trace correlation id (ea-claude-138). ADDITIVE + optional:
+  // stamped by signEnvelope on every new outbound envelope, absent on
+  // envelopes from older peers (0.11.x/0.12.x) — receivers tolerate both.
+  // Lives INSIDE the signed payload (the ed25519 signature covers the whole
+  // key-sorted object minus `signature`), so it is tamper-evident and old
+  // receivers still verify: they canonicalize every field they parsed,
+  // known or not.
+  trace_id?: string;
   signature: string;
 }
 
