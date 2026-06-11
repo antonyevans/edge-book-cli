@@ -27,6 +27,30 @@ import { now, readJson, writeJson } from "./fs-json.ts";
 import { SUPPORT_BUNDLES_FILE } from "./store-files.ts";
 import { logEvent } from "./event-log.ts";
 
+// Receiver-owned invariants. The size cap is enforced HERE (not only by the
+// sender and the host frame guard): --to <did> lets a sender reach any
+// opted-in agent through any relay, so the inbox protects itself.
+export const SUPPORT_BUNDLE_MAX_BYTES = 256 * 1024;
+// Bounded retention: the whole file is read/rewritten per operation, and
+// dismiss never deletes — so cap stored records. Dismissed go first
+// (oldest-first), then oldest others; the newest arrival always survives.
+export const SUPPORT_BUNDLE_KEEP = 200;
+
+function pruneSupportBundles(all: Record<string, SupportBundleRecord>, keepId: string): Record<string, SupportBundleRecord> {
+  const records = Object.values(all);
+  if (records.length <= SUPPORT_BUNDLE_KEEP) return all;
+  const byAge = (a: SupportBundleRecord, b: SupportBundleRecord) => a.received_at.localeCompare(b.received_at);
+  const evictable = [
+    ...records.filter((r) => r.status === "dismissed" && r.bundle_id !== keepId).sort(byAge),
+    ...records.filter((r) => r.status !== "dismissed" && r.bundle_id !== keepId).sort(byAge),
+  ];
+  for (const r of evictable) {
+    if (Object.keys(all).length <= SUPPORT_BUNDLE_KEEP) break;
+    delete all[r.bundle_id];
+  }
+  return all;
+}
+
 export async function supportBundles(store: EdgeBookStore): Promise<Record<string, SupportBundleRecord>> {
   return readJson<Record<string, SupportBundleRecord>>(store.file(SUPPORT_BUNDLES_FILE), {});
 }
@@ -42,6 +66,11 @@ export async function receiveSupportBundle(store: EdgeBookStore, envelope: Messa
     throw new EdgeBookError("support_inbox_disabled", "This agent does not accept support bundles (operator opt-in: edge-book support inbox --on)");
   }
   if (envelope.type !== "support_bundle") throw new EdgeBookError("wrong_message_type", "Expected support_bundle envelope");
+  // Size cap BEFORE rate/crypto work: oversize must not burn budget or keys.
+  const size = Buffer.byteLength(JSON.stringify(envelope), "utf8");
+  if (size > SUPPORT_BUNDLE_MAX_BYTES) {
+    throw new EdgeBookError("support_bundle_too_large", `Support bundle is ${size} bytes; the receiver cap is ${SUPPORT_BUNDLE_MAX_BYTES} (256 KiB)`);
+  }
   await store.enforceInboundRate(envelope.from_agent_id);
   await store.verifyEnvelope(envelope); // key bootstraps from the embedded card (store-trust)
   const body = envelope.body as unknown as SupportBundleBody;
@@ -64,7 +93,7 @@ export async function receiveSupportBundle(store: EdgeBookStore, envelope: Messa
   };
   const all = await supportBundles(store);
   all[record.bundle_id] = record;
-  await saveSupportBundles(store, all);
+  await saveSupportBundles(store, pruneSupportBundles(all, record.bundle_id));
   await store.audit("support.receive", envelope.from_agent_id, { bundle_id: record.bundle_id, trace_id: envelope.trace_id ?? "" });
   // Flight recorder (spec-133 discipline): ids/refs only — never the report.
   await logEvent(store, "support.received", { from: envelope.from_agent_id, dedup_key: envelope.message_id, trace_id: envelope.trace_id });

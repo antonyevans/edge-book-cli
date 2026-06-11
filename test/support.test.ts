@@ -12,9 +12,10 @@ import { buildDoctorReport } from "../src/doctor.ts";
 import { buildSupportBundleEnvelope, renderConsentPrompt, runDoctorSend, SUPPORT_BUNDLE_MAX_BYTES } from "../src/doctor-send.ts";
 import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "../src/edge-book.ts";
 import { readEvents } from "../src/event-log.ts";
-import { receiveSupportBundle } from "../src/store-support.ts";
+import { receiveSupportBundle, saveSupportBundles, supportBundles, SUPPORT_BUNDLE_KEEP } from "../src/store-support.ts";
 
 const SECRET_BODY = "SECRET-BODY-MARKER-must-never-leak-9f2c";
+const NOTIFY_TOKEN = "NOTIFY-TOKEN-MARKER-must-never-leak-41ab";
 
 // FakeSocket acks hello + mailbox_send so deliverEnvelopeViaMailbox resolves
 // (pattern: test/dialout-friend-relay.test.ts).
@@ -79,6 +80,9 @@ async function seededUser(): Promise<EdgeBookStore> {
   const message = await alice.sendPrivilegedMessage(userId.agent_id, { text: SECRET_BODY });
   await user.receivePrivilegedMessage(message);
   await user.createPost({ title: "draft", body: SECRET_BODY });
+  // notify_cmd can embed a channel token — doctor must only ever echo a
+  // boolean for it. The marker pins the sent-bytes assertion below.
+  await user.updateConfig({ notify_cmd: `notify.sh --token ${NOTIFY_TOKEN}` });
   return user;
 }
 
@@ -177,6 +181,7 @@ test("doctor --send --yes delivers the sanitized bundle, prints the support refe
     // doctor paste-safety test, applied to the bytes that actually left.
     const blob = Buffer.from(frame!.blob_b64, "base64").toString("utf8");
     assert.ok(!blob.includes(SECRET_BODY), "message/post body leaked into the sent bundle");
+    assert.ok(!blob.includes(NOTIFY_TOKEN), "notify_cmd token leaked into the sent bundle");
     assert.ok(!blob.includes("PRIVATE KEY"), "PEM private key header leaked into the sent bundle");
     for (const line of identity.private_key_pem.split("\n")) {
       const trimmed = line.trim();
@@ -204,6 +209,41 @@ test("oversize bundles are rejected client-side with a graceful error", async ()
     buildSupportBundleEnvelope(user, "did:openclaw:op", report, hugeNote),
     (error: unknown) => error instanceof EdgeBookError && error.code === "support_bundle_too_large" && /256 KiB/.test(error.message),
   );
+});
+
+test("receiver rejects oversize bundles independently of the sender cap (--to bypass)", async () => {
+  const user = await seededUser();
+  const op = await operatorStore("sizeop", true);
+  const opDid = (await op.identity()).agent_id;
+  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined } });
+  // Build a small valid envelope, then inflate the signed body out-of-band the
+  // way a hostile sender (not using our client) could: sign over a huge note.
+  const envelope = await user.signEnvelope({ to_agent_id: opDid, type: "support_bundle", body: { card: await user.writeCard(), report, note: "y".repeat(SUPPORT_BUNDLE_MAX_BYTES + 1) } as unknown as MessageEnvelope["body"] });
+  await assert.rejects(
+    receiveSupportBundle(op, envelope),
+    (error: unknown) => error instanceof EdgeBookError && error.code === "support_bundle_too_large",
+  );
+});
+
+test("retention: the inbox holds at most SUPPORT_BUNDLE_KEEP records, evicting dismissed-then-oldest", async () => {
+  const user = await seededUser();
+  const op = await operatorStore("keepop", true);
+  const opDid = (await op.identity()).agent_id;
+  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined } });
+  // Seed KEEP records directly (cheap), mark the very first dismissed, then
+  // receive one more real envelope — the dismissed one must be evicted.
+  const seeded: Record<string, import("../src/types.ts").SupportBundleRecord> = {};
+  for (let i = 0; i < SUPPORT_BUNDLE_KEEP; i++) {
+    const id = `msg_seed_${String(i).padStart(4, "0")}`;
+    seeded[id] = { bundle_id: id, from_agent_id: "did:openclaw:seeder", received_at: `2026-01-01T00:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}.000Z`, status: i === 0 ? "dismissed" : "pending", report } as import("../src/types.ts").SupportBundleRecord;
+  }
+  await saveSupportBundles(op, seeded);
+  const envelope = await buildSupportBundleEnvelope(user, opDid, report);
+  await receiveSupportBundle(op, envelope);
+  const all = await supportBundles(op);
+  assert.equal(Object.keys(all).length, SUPPORT_BUNDLE_KEEP, "inbox stays at the cap");
+  assert.ok(!all["msg_seed_0000"], "dismissed record evicted first");
+  assert.ok(all[envelope.message_id], "newest arrival survives");
 });
 
 test("operator roundtrip: receive → pending → read → dismiss; inbox is fail-closed by default", async () => {

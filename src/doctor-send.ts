@@ -28,7 +28,8 @@ import { relationshipId } from "./crypto.ts";
 import { logEvent } from "./event-log.ts";
 
 // Mirrors the host's SUPPORT_MAX_BLOB_BYTES (edge-book-host src/support.ts).
-export const SUPPORT_BUNDLE_MAX_BYTES = 256 * 1024;
+import { SUPPORT_BUNDLE_MAX_BYTES } from "./store-support.ts";
+export { SUPPORT_BUNDLE_MAX_BYTES };
 // Matches the host mailbox TTL (7 days) so a bundle queued for an offline
 // operator still verifies whenever it is delivered.
 const SUPPORT_ENVELOPE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
