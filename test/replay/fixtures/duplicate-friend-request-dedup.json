@@ -1,0 +1,51 @@
+{
+  "schema": "edge-book-replay-fixture/0.1",
+  "title": "failure case: duplicate friend_request hits the dedup ledger",
+  "description": "The same signed envelope (same message_id) is delivered twice — at-least-once mailbox semantics. The first apply succeeds; the redelivery must be rejected by the seen-message ledger and record envelope.dedup_hit with the original trace_id.",
+  "source": { "note": "synthetic reconstruction of the June 9 friending incident shape (redelivered request)" },
+  "identities": {
+    "mallory": {
+      "seed": "2222222222222222222222222222222222222222222222222222222222222222",
+      "handle": "mallory.replay.local",
+      "display_name": "Mallory (synthetic)"
+    }
+  },
+  "steps": [
+    {
+      "deliver": {
+        "from": "mallory",
+        "type": "friend_request",
+        "message_id": "msg-replay-dup-001",
+        "trace_id": "trace-replay-dup-001",
+        "created_at": "2026-06-01T00:00:00.000Z",
+        "expires_at": "2099-01-01T00:00:00.000Z",
+        "body": { "note": "synthetic reproduction: first delivery" }
+      },
+      "expect": {
+        "outcome": "accepted",
+        "events": [{ "kind": "friend.request_received" }],
+        "relationship_state": "request_received"
+      }
+    },
+    {
+      "deliver": {
+        "from": "mallory",
+        "type": "friend_request",
+        "message_id": "msg-replay-dup-001",
+        "trace_id": "trace-replay-dup-001",
+        "created_at": "2026-06-01T00:05:00.000Z",
+        "expires_at": "2099-01-01T00:00:00.000Z",
+        "body": { "note": "synthetic reproduction: redelivery of the same message_id" }
+      },
+      "expect": {
+        "outcome": "dedup_hit",
+        "error": "replay",
+        "events": [
+          { "kind": "envelope.dedup_hit", "fields": { "envelope_kind": "friend_request", "dedup_key": "msg-replay-dup-001" } },
+          { "kind": "envelope.received", "fields": { "applied": false } }
+        ],
+        "relationship_state": "request_received"
+      }
+    }
+  ]
+}
