@@ -32,8 +32,8 @@ export const COMMAND_GROUPS: CommandGroup[] = [
     title: "Handle / Identity",
     rows: [
       {
-        usage: "handle set <slug>",
-        desc: "Claim a unique human handle (replaces the default)",
+        usage: "handle set <slug> [--hidden]",
+        desc: "Claim a unique human handle (replaces the default); --hidden opts out of the /directory listing",
       },
       {
         usage: "handle show",
