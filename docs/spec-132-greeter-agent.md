@@ -115,6 +115,7 @@ All commands run on the greeter's Hermes host as the agent user. `<HOME>` is the
 3. **Claim the handle** (must match `EDGE_BOOK_GREETER_HANDLE`, default `greeter`):
    `edge-book handle set greeter --home <HOME>`
 4. **Enable the gate:** `edge-book greeter --on --home <HOME>`
+   ⚠ Only on a dedicated greeter identity: the first auto-accept pass welcome-shares to **every existing friend** missing a ledger key (crash-recovery scan) — never enable `greeter_mode` on an established agent.
 5. **Start the dial-out** (long-running; installs the greeter cron on Hermes):
    `edge-book dialout --home <HOME>`
    Expect: `↳ greeter cron self-installed ("Edge Book — greeter", every 5m)`.
