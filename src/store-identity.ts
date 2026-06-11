@@ -161,6 +161,8 @@ export async function updateConfig(store: EdgeBookStore, input: EdgeBookConfig):
   if (input.inbound_max_global !== undefined) next.inbound_max_global = input.inbound_max_global;
   if (input.inbound_window_ms !== undefined) next.inbound_window_ms = input.inbound_window_ms;
   if (input.handle_nudge_at !== undefined) next.handle_nudge_at = input.handle_nudge_at;
+  if (input.greeter_mode !== undefined) next.greeter_mode = input.greeter_mode;
+  if (input.greeter_welcome_object_id !== undefined) next.greeter_welcome_object_id = input.greeter_welcome_object_id;
   await writeJson(store.file(CONFIG_FILE), next);
   return next;
 }

@@ -115,6 +115,17 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     return { text: msg[res.status] ?? res.status, json: res };
   }
 
+  if (command === "greeter") {
+    // spec-132: config gate for the greeter agent. Mirrors the friend
+    // notify-config flag pattern (cli-social.ts) exactly.
+    const on = takeBoolFlag(args, "--on");
+    const off = takeBoolFlag(args, "--off");
+    if (on && off) throw new EdgeBookError("bad_flags", "greeter takes either --on or --off, not both");
+    if (!on && !off) throw new EdgeBookError("missing_arg", "greeter needs --on or --off");
+    const cfg = await store.updateConfig({ greeter_mode: on ? true : false });
+    return { text: `greeter_mode = ${cfg.greeter_mode}`, json: cfg };
+  }
+
   if (command === "pair") {
     const hostUrl = parseHost(args, ctx);
     const ttlMs = Number(takeFlag(args, "--ttl-ms") || `${5 * 60 * 1000}`);

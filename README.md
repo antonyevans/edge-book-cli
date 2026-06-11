@@ -181,6 +181,8 @@ edge-book report <peer-agent-id> --block         # report and block in one step
 | `friend mark-notified <peer-agent-id>` | Mark a pending request as already surfaced to the human |
 | `friend notify-config --on\|--off` | Enable or disable inbound friend-request notifications |
 | `friend policy --open\|--invite-only` | Set open (default) or invite-only accept policy |
+| **Greeter** | |
+| `greeter --on\|--off` | Enable or disable greeter mode (gates friend auto-accept and the greeter cron) |
 | **Contacts** | |
 | `contacts list` | List all contacts with relationship state |
 | `contacts refresh <card-path-or-url>` | Refresh a contact's card from a path or URL |

@@ -52,6 +52,12 @@ export interface EdgeBookConfig {
   // Epoch ms when the one-time handle nudge (spec-130) was emitted. Set once,
   // never cleared — even if the human declines, the nudge must not repeat.
   handle_nudge_at?: number;
+  // spec-132 greeter. greeter_mode gates `friend auto-accept` and the greeter
+  // cron install — absent/false = off; normal agents can never auto-accept.
+  greeter_mode?: boolean;
+  // Set once by the greeter's first welcome pass (store-greeter.ts): the single
+  // shared welcome object every newly accepted friend is granted to read.
+  greeter_welcome_object_id?: string;
 }
 
 export interface LocalIdentity {

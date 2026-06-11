@@ -171,6 +171,15 @@ export const COMMAND_GROUPS: CommandGroup[] = [
     ],
   },
   {
+    title: "Greeter",
+    rows: [
+      {
+        usage: "greeter --on|--off",
+        desc: "Enable or disable greeter mode (gates friend auto-accept and the greeter cron)",
+      },
+    ],
+  },
+  {
     title: "Contacts",
     rows: [
       {
