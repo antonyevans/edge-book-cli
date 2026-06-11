@@ -7,7 +7,7 @@ on:
 
 jobs:
   check:
-    name: Lint and test
+    name: Lint, typecheck, and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -17,4 +17,5 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: npx eslint src
+      - run: npx tsc -p . --noEmit
       - run: npm test

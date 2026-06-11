@@ -12,9 +12,14 @@ plan-031) are normative for behavior.
 - Never add `eslint-disable max-lines` without a justification comment and a
   follow-up extraction task.
 
-## Commands
+## Verification commands (spec-0042 — run before claiming done)
+
+All non-interactive with meaningful exit codes. A completion claim names the
+command(s) run and their observed output — "done" without evidence is not done.
 
 ```bash
+npm run lint           # eslint src — size/style gates, must be clean
+npm run typecheck      # tsc -p . --noEmit (strict) — must be clean
 npm test               # node --test test/*.test.ts — full suite, must stay green
 npm run build          # tsup → dist/edge-book.js
 npm run smoke          # 2-agent end-to-end against a local in-process host
@@ -23,13 +28,34 @@ npm run harness:e2e    # convergence e2e (pair→share→revoke→audit)
 npm run sync-readme:check  # README command table gate (runs on prepublish)
 ```
 
+CI (`ci.yml`) runs lint → typecheck → tests on every push and PR; merging on
+red is prohibited.
+
+## Workflow (spec-0041 / spec-0042)
+
+This repo is **plain** (merging does not deploy). After a fresh-context review
+passes, the agent may merge — unless the task says otherwise.
+
+- Worktree + branch per task (`feat|fix|refactor|chore/<slug>`); never work on
+  `main`. Hard ceiling: 4 parallel agent sessions per repo (default 2–3).
+- Target PR size ≤ ~400 changed lines of authored code; bigger work splits
+  into independently reviewable stacked PRs.
+- Production-bound work gets a **fresh-context review**: a separate session
+  with no memory of writing the code reads the full diff before the PR is
+  ready. Self-review by the writing session does not count.
+- **Frozen tests:** during refactors, assertions/fixtures/inputs are frozen —
+  a failing test means the step changed behavior; revert the step, never edit
+  the test. A test believed wrong goes to FINDINGS.md untouched.
+- New behavior ships with tests in the same PR, colocated per repo pattern.
+- **Reversions:** agent code substantially rewritten or reverted within 30
+  days of merge gets one line (date, PR, cause) in FINDINGS.md `## Reversions`.
+
 ## Gotchas
 
-- **No tsconfig.json.** `tsc` is not part of the gate; node runs the TS sources
-  via type-stripping and tsup bundles without typechecking. A missed type-only
-  import will NOT fail tests — typecheck manually with
-  `npx tsc --noEmit --allowImportingTsExtensions --module nodenext --moduleResolution nodenext --target es2022 --skipLibCheck src/*.ts`
-  (3 known pre-existing errors; see FINDINGS.md).
+- `npm run typecheck` is a real gate (strict + `noUncheckedIndexedAccess`,
+  scoped to `src/`) but node runs the TS sources via type-stripping and tsup
+  bundles without typechecking — a type error will NOT fail `npm test`, so
+  always run typecheck separately. History in FINDINGS.md.
 - Internal imports use explicit `.ts` extensions (`./edge-book.ts`).
 - A pre-commit hook regenerates the README command table from
   `src/commands-doc.ts` — never edit the table by hand.
