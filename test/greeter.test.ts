@@ -1,11 +1,13 @@
 // spec-132: greeter agent — toggle, auto-accept pass, welcome share, candidate seeding.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { handleCli } from "../src/cli.ts";
 import { EdgeBookStore, EdgeBookError } from "../src/edge-book.ts";
+import { listCandidates } from "../src/resolver.ts";
 
 async function tempRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "edge-book-greeter-test-"));
@@ -192,4 +194,95 @@ test("CLI: friend auto-accept with nothing pending returns an empty list", async
   const result = await handleCli(["friend", "auto-accept", "--home", home]);
   assert.deepEqual(result.json, []);
   assert.equal(result.text.trim(), "[]");
+});
+
+test("init (no flags) seeds exactly one greeter candidate", async () => {
+  const home = await tempRoot();
+  const result = await handleCli(["init", "--home", home, "--name", "Newbie"]);
+  const json = result.json as { agent_id?: string; onboarding?: { greeter_candidate_id?: string } };
+  assert.ok(json.agent_id);
+  assert.ok(json.onboarding?.greeter_candidate_id, "onboarding.greeter_candidate_id missing");
+  const candidates = await listCandidates(new EdgeBookStore({ home }));
+  assert.equal(candidates.length, 1);
+  const c = candidates[0];
+  assert.equal(c.source, "registry");
+  assert.equal(c.confidence, "high");
+  assert.equal(c.display_name, "Edge Book Greeter");
+  assert.equal(c.reason, "Says hi to every new agent — friend it to see how sharing works.");
+  assert.ok(c.card_url?.startsWith("http"), `card_url must be an http(s) URL, got ${c.card_url}`);
+  assert.ok(c.card_url?.endsWith("/handle/greeter"), `card_url must end /handle/greeter, got ${c.card_url}`);
+  assert.equal(c.candidate_id, json.onboarding!.greeter_candidate_id);
+});
+
+test("init --no-greeter and EDGE_BOOK_NO_GREETER=1 skip seeding", async (t) => {
+  const a = await tempRoot();
+  const ra = await handleCli(["init", "--home", a, "--no-greeter"]);
+  assert.ok(!("onboarding" in (ra.json as Record<string, unknown>)), "no onboarding JSON when nothing seeded");
+  assert.equal((await listCandidates(new EdgeBookStore({ home: a }))).length, 0);
+
+  process.env.EDGE_BOOK_NO_GREETER = "1";
+  t.after(() => { delete process.env.EDGE_BOOK_NO_GREETER; });
+  const b = await tempRoot();
+  await handleCli(["init", "--home", b]);
+  assert.equal((await listCandidates(new EdgeBookStore({ home: b }))).length, 0);
+});
+
+test("running init twice does not duplicate the greeter candidate (writeCandidate dedup)", async () => {
+  const home = await tempRoot();
+  await handleCli(["init", "--home", home]);
+  await handleCli(["init", "--home", home]);
+  assert.equal((await listCandidates(new EdgeBookStore({ home }))).length, 1);
+});
+
+test("EDGE_BOOK_GREETER_HANDLE overrides the greeter slug", async (t) => {
+  process.env.EDGE_BOOK_GREETER_HANDLE = "head-greeter";
+  t.after(() => { delete process.env.EDGE_BOOK_GREETER_HANDLE; });
+  const home = await tempRoot();
+  await handleCli(["init", "--home", home]);
+  const [c] = await listCandidates(new EdgeBookStore({ home }));
+  assert.ok(c.card_url?.endsWith("/handle/head-greeter"), `got ${c.card_url}`);
+});
+
+test("--from-invite and the greeter candidate coexist (two candidates)", async () => {
+  const root = await tempRoot();
+  const inviterHome = path.join(root, "inviter");
+  await handleCli(["init", "--home", inviterHome, "--name", "Inviter", "--no-greeter"]);
+  const invite = (await handleCli(["card", "invite", "--home", inviterHome])).json as { invite_url: string };
+  const home = path.join(root, "newbie");
+  const result = await handleCli(["init", "--home", home, "--name", "Newbie", "--from-invite", invite.invite_url]);
+  const json = result.json as { onboarding?: { invite_candidate_id?: string; greeter_candidate_id?: string } };
+  assert.ok(json.onboarding?.invite_candidate_id, "invite candidate id missing");
+  assert.ok(json.onboarding?.greeter_candidate_id, "greeter candidate id missing");
+  const candidates = await listCandidates(new EdgeBookStore({ home }));
+  assert.equal(candidates.length, 2);
+  assert.deepEqual(candidates.map((c) => c.source).sort(), ["invite", "registry"]);
+});
+
+test("greeter candidate promotes through a stubbed registry server to a valid friend_request", async (t) => {
+  // Stub registry pattern from test/handle-resolve.test.ts: a live signed card
+  // served at /handle/greeter, with EDGE_BOOK_RELAY_BASE pointing at the stub.
+  const root = await tempRoot();
+  const greeterHome = path.join(root, "greeter");
+  await handleCli(["init", "--home", greeterHome, "--name", "Edge Book Greeter", "--no-greeter"]);
+  const greeterCard = await new EdgeBookStore({ home: greeterHome }).writeCard();
+  const srv = http.createServer((req, res) => {
+    if (req.url === "/handle/greeter") { res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(greeterCard)); }
+    else { res.writeHead(404); res.end("{}"); }
+  });
+  await new Promise<void>((r) => srv.listen(0, r));
+  t.after(() => new Promise<void>((r) => srv.close(() => r())));
+  const base = `http://127.0.0.1:${(srv.address() as { port: number }).port}`;
+  process.env.EDGE_BOOK_RELAY_BASE = base;
+  t.after(() => { delete process.env.EDGE_BOOK_RELAY_BASE; });
+
+  const home = path.join(root, "newbie");
+  const init = await handleCli(["init", "--home", home, "--name", "Newbie"]);
+  const candidateId = (init.json as { onboarding: { greeter_candidate_id: string } }).onboarding.greeter_candidate_id;
+  const [candidate] = await listCandidates(new EdgeBookStore({ home }));
+  assert.equal(candidate.card_url, `${base}/handle/greeter`, "zero network at init — URL recorded as-is");
+
+  const result = await handleCli(["friend", "request", candidateId, "--home", home]);
+  const envelope = result.json as { type: string; to_agent_id: string };
+  assert.equal(envelope.type, "friend_request");
+  assert.equal(envelope.to_agent_id, greeterCard.agent_id);
 });

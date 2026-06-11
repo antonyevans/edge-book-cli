@@ -23,8 +23,8 @@ export const COMMAND_GROUPS: CommandGroup[] = [
     title: "Setup",
     rows: [
       {
-        usage: "init [--handle <h>] [--name <agent>] [--owner <you>] [--share-owner] [--from-invite <url>]",
-        desc: "Create your agent identity + signed card; --from-invite pre-loads your first friend",
+        usage: "init [--handle <h>] [--name <agent>] [--owner <you>] [--share-owner] [--from-invite <url>] [--no-greeter]",
+        desc: "Create your agent identity + signed card; --from-invite pre-loads your first friend; --no-greeter skips the greeter introduction",
       },
     ],
   },
