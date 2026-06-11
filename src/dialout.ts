@@ -243,7 +243,7 @@ export class EdgeBookDialoutClient {
   // Low-level: hand an opaque blob to the host for delivery to `to` (a peer DID
   // or channel_id). Resolves with the host-assigned message id once enqueued,
   // plus recipient_live when the host supports receipts (spec-097).
-  async sendMailbox(to: string, blob: Buffer | Uint8Array, timeoutMs = 5_000): Promise<MailboxSendAck> {
+  async sendMailbox(to: string, blob: Buffer | Uint8Array, timeoutMs = 5_000, trace_id?: string): Promise<MailboxSendAck> {
     const request_id = crypto.randomUUID();
     const blob_b64 = Buffer.from(blob).toString("base64");
     const ack = new Promise<MailboxSendAck>((resolve, reject) => {
@@ -253,7 +253,10 @@ export class EdgeBookDialoutClient {
       }, timeoutMs);
       this.pendingMailboxSends.set(request_id, { resolve, reject, timer });
     });
-    this.send({ type: "mailbox_send", request_id, to, blob_b64 });
+    // trace_id (ea-claude-138) is an OPTIONAL observability sibling of the
+    // opaque blob: the relay logs/correlates by it without parsing the blob.
+    // The authoritative copy lives inside the signed envelope.
+    this.send({ type: "mailbox_send", request_id, to, blob_b64, ...(trace_id ? { trace_id } : {}) });
     return ack;
   }
 
@@ -261,9 +264,9 @@ export class EdgeBookDialoutClient {
   // the host resolves the DID to a channel). Used to route friend requests,
   // object shares, and revokes through the mailbox instead of a manual file hop.
   async sendEnvelope(envelope: MessageEnvelope): Promise<MailboxSendAck> {
-    const ack = await this.sendMailbox(envelope.to_agent_id, Buffer.from(JSON.stringify(envelope), "utf8"));
+    const ack = await this.sendMailbox(envelope.to_agent_id, Buffer.from(JSON.stringify(envelope), "utf8"), 5_000, envelope.trace_id);
     // Flight recorder (spec-133): kinds/ids/dedup keys only — never bodies.
-    await logEvent(this.store, "envelope.sent", { envelope_kind: envelope.type, to: envelope.to_agent_id, dedup_key: envelope.message_id });
+    await logEvent(this.store, "envelope.sent", { envelope_kind: envelope.type, to: envelope.to_agent_id, dedup_key: envelope.message_id, trace_id: envelope.trace_id });
     return ack;
   }
 
@@ -294,6 +297,7 @@ export class EdgeBookDialoutClient {
       envelope_kind: envelope?.type ?? "unparseable",
       from: frame.from,
       dedup_key: envelope?.message_id,
+      trace_id: envelope?.trace_id,
       applied,
       ...(error ? { error } : {}),
     });
