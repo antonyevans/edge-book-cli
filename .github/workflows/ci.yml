@@ -17,5 +17,5 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: npx eslint src
-      - run: npx tsc -p . --noEmit
+      - run: npm run typecheck
       - run: npm test
