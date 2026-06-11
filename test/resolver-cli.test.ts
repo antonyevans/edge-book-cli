@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { EdgeBookStore } from "../src/edge-book.ts";
-import { handleCli } from "../src/cli.ts";
+import { handleCli, runCli } from "../src/cli.ts";
 import { writeCandidate } from "../src/resolver.ts";
 
 test("CLI resolve verifies an invite and reports resolved", async () => {
@@ -27,6 +27,20 @@ test("CLI candidates list is empty on a fresh store", async () => {
   await handleCli(["init", "--home", root, "--handle", "a.openclaw.local", "--no-greeter"]);
   const result = await handleCli(["candidates", "list", "--home", root]);
   assert.deepEqual((result.json as { candidates: unknown[] }).candidates, []);
+});
+
+test("CLI candidates list --json prints the candidates as JSON, not the table", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "edge-book-cli-cand-json-"));
+  await handleCli(["init", "--home", root, "--handle", "a.openclaw.local", "--no-greeter"]);
+  const store = new EdgeBookStore({ home: root });
+  const cand = await writeCandidate(store, { source: "index", confidence: "low", display_name: "Bob", reason: "op1" });
+
+  const log = t.mock.method(console, "log", () => undefined);
+  await runCli(["candidates", "list", "--home", root, "--json"]);
+  const out = log.mock.calls.map((c) => c.arguments.join(" ")).join("\n");
+  const parsed = JSON.parse(out) as { candidates: Array<{ candidate_id: string }> };
+  assert.equal(parsed.candidates.length, 1);
+  assert.equal(parsed.candidates[0].candidate_id, cand.candidate_id);
 });
 
 test("CLI friend request on a candidate id promotes it to a verified contact", async () => {

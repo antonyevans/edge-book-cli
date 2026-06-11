@@ -212,8 +212,16 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
 }
 
 export async function runCli(args: string[]): Promise<void> {
-  const result = await handleCli(args);
-  console.log(result.text);
+  // --json is a terminal-output flag, peeled here so handlers never see it;
+  // handleCli's {text, json} return contract is unchanged.
+  const argv = [...args];
+  const asJson = takeBoolFlag(argv, "--json");
+  const result = await handleCli(argv);
+  if (asJson && result.json !== undefined) {
+    console.log(JSON.stringify(result.json, null, 2));
+  } else {
+    console.log(result.text);
+  }
 }
 
 function isCliEntrypoint(): boolean {
