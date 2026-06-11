@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { EdgeBookStore, MessageEnvelope, NotificationIntent } from "./edge-book.ts";
+import { logEvent } from "./event-log.ts";
 
 // Delivery of a NotificationIntent via a HOST-PROVIDED command (ea-claude-125).
 // Edge Book stays transport-free: it never knows the channel. The operator
@@ -90,11 +91,20 @@ export async function notifyInbound(
 
   const intent = await store.notificationIntent(envelope);
   if (!intent) return { notified: false, reason: "silent" };
-  if (await store.wasNotified(intent.dedup_key)) return { notified: false, reason: "already_notified" };
+  if (await store.wasNotified(intent.dedup_key)) {
+    // Flight recorder (spec-133): dedup suppression — kinds/keys only.
+    await logEvent(store, "notify.suppressed", { kind: intent.kind, from: intent.from_id, dedup_key: intent.dedup_key, reason: "already_notified" });
+    return { notified: false, reason: "already_notified" };
+  }
 
+  // Flight recorder (spec-133): delivery attempt. The error string from a failed
+  // delivery is NOT logged here (the notify command's stderr could echo the
+  // message body) — the audit trail keeps it.
+  await logEvent(store, "notify.attempted", { kind: intent.kind, from: intent.from_id, dedup_key: intent.dedup_key });
   const res = await deliverNotification(intent, opts);
   if (!res.delivered) {
     await store.audit("notify.failed", intent.from_id, { kind: intent.kind, dedup_key: intent.dedup_key, error: res.error ?? "" });
+    await logEvent(store, "notify.failed", { kind: intent.kind, from: intent.from_id, dedup_key: intent.dedup_key });
     return { notified: false, reason: res.error };
   }
 
@@ -105,6 +115,7 @@ export async function notifyInbound(
     try { await store.markFriendRequestNotified(intent.from_id); } catch { /* contact may have changed */ }
   }
   await store.audit("notify.delivered", intent.from_id, { kind: intent.kind, dedup_key: intent.dedup_key, channel: "hook" });
+  await logEvent(store, "notify.delivered", { kind: intent.kind, from: intent.from_id, dedup_key: intent.dedup_key });
   return { notified: true };
 }
 

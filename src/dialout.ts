@@ -21,6 +21,7 @@ import type { DialoutApiRequest, DialoutApiResponse, LocalApi } from "./dialout-
 import { PairCompleteWaiter } from "./dialout-pair.ts";
 import type { PairCompleteResult } from "./dialout-pair.ts";
 import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "./edge-book.ts";
+import { logEvent } from "./event-log.ts";
 
 export const DEFAULT_DIALOUT_HOST = "wss://edge-book-host.fly.dev/agent/ws";
 const DEFAULT_HEARTBEAT_MS = 25_000;
@@ -260,7 +261,10 @@ export class EdgeBookDialoutClient {
   // the host resolves the DID to a channel). Used to route friend requests,
   // object shares, and revokes through the mailbox instead of a manual file hop.
   async sendEnvelope(envelope: MessageEnvelope): Promise<MailboxSendAck> {
-    return this.sendMailbox(envelope.to_agent_id, Buffer.from(JSON.stringify(envelope), "utf8"));
+    const ack = await this.sendMailbox(envelope.to_agent_id, Buffer.from(JSON.stringify(envelope), "utf8"));
+    // Flight recorder (spec-133): kinds/ids/dedup keys only — never bodies.
+    await logEvent(this.store, "envelope.sent", { envelope_kind: envelope.type, to: envelope.to_agent_id, dedup_key: envelope.message_id });
+    return ack;
   }
 
   private async handleMailboxDeliver(frame: MailboxDeliverFrame): Promise<void> {
@@ -283,6 +287,14 @@ export class EdgeBookDialoutClient {
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     }
+    // Flight recorder (spec-133): kind/from/dedup key + outcome — never bodies.
+    await logEvent(this.store, "envelope.received", {
+      envelope_kind: envelope?.type ?? "unparseable",
+      from: frame.from,
+      dedup_key: envelope?.message_id,
+      applied,
+      ...(error ? { error } : {}),
+    });
     // Ack so the host deletes it. At-least-once delivery + dedupe-by-message_id
     // (verifyEnvelope rejects replays) makes acking-always safe and avoids a
     // poison message redelivering forever. Manual consumers ack via the queue.
@@ -353,6 +365,7 @@ export class EdgeBookDialoutClient {
 
     addSocketListener(socket, "close", () => {
       if (this.heartbeat) clearInterval(this.heartbeat);
+      void logEvent(this.store, "dialout.disconnected", { host: this.options.host, stopped: this.stopped });
       if (!this.stopped && this.options.reconnect) this.scheduleReconnect();
     });
 
@@ -363,6 +376,7 @@ export class EdgeBookDialoutClient {
     if (this.stopped) return;
     const delay = this.currentBackoff;
     this.currentBackoff = Math.min(MAX_BACKOFF_MS, Math.round(this.currentBackoff * 1.7));
+    void logEvent(this.store, "dialout.reconnect_scheduled", { host: this.options.host, delay_ms: delay });
     this.reconnectTimer = setTimeout(() => {
       void this.connect();
     }, delay);
@@ -378,6 +392,7 @@ export class EdgeBookDialoutClient {
     if ((frame as { type?: string }).type === "hello_ok") {
       this.opened?.resolve();
       this.opened = undefined;
+      void logEvent(this.store, "dialout.connected", { host: this.options.host });
       // Best-effort: auto-claim a real handle so peers can find this agent.
       // A claim failure (or default/invalid handle) never breaks the connection
       // or mail delivery — mail still routes by DID regardless.
@@ -487,6 +502,7 @@ export class EdgeBookDialoutClient {
 
   private async standDown(frame: { type?: string; reason?: string; idle_ms?: number }): Promise<void> {
     this.stopped = true;
+    await logEvent(this.store, "dialout.stand_down", { host: this.options.host, reason: frame.reason, idle_ms: frame.idle_ms });
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.socket?.close();

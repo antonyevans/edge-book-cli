@@ -19,6 +19,7 @@ import { relationshipId, signPayload } from "./crypto.ts";
 import { now, randomId, readJson, writeJson, appendJsonl, readJsonl } from "./fs-json.ts";
 import { validateCard, validateFriendProfile } from "./cards.ts";
 import { INBOX_FILE, INVITE_CODES_FILE, RELATIONSHIP_EVENTS_FILE, REPORTS_FILE } from "./store-files.ts";
+import { logEvent } from "./event-log.ts";
 
 export async function upsertContactFromCard(store: EdgeBookStore, card: AgentCard, state?: RelationshipState): Promise<AgentContactRecord> {
   validateCard(card);
@@ -87,6 +88,8 @@ export async function setRelationship(store: EdgeBookStore, peerAgentId: string,
   const event = { ...unsigned, signature: signPayload(unsigned, identity.private_key_pem) };
   await appendJsonl(store.file(RELATIONSHIP_EVENTS_FILE), event);
   await store.audit(`relationship.${type}`, peerAgentId, { previous, next: nextState, reason });
+  // Flight recorder (spec-133): friend-graph state transition — ids/states only.
+  await logEvent(store, "friend.state_changed", { peer: peerAgentId, previous, next: nextState, event_type: type });
   return event;
 }
 
@@ -136,6 +139,8 @@ export async function receiveFriendRequest(store: EdgeBookStore, envelope: Messa
   }
   const contact = await store.upsertContactFromCard(body.card, "request_received");
   await store.setRelationship(envelope.from_agent_id, "request_received", "FriendRequest", body.note);
+  // Flight recorder (spec-133): inbound friend request — sender id + dedup key only.
+  await logEvent(store, "friend.request_received", { from: envelope.from_agent_id, dedup_key: envelope.message_id });
   await appendJsonl(store.file(INBOX_FILE), envelope);
   // Dedup: if a pending friend_accept already exists for this peer (e.g. from a
   // prior request that was revoked and re-sent with a fresh message_id), reuse it
@@ -185,6 +190,8 @@ export async function acceptFriend(store: EdgeBookStore, peerAgentId: string, re
   if (!contact) throw new EdgeBookError("unknown_contact", `Unknown contact: ${peerAgentId}`);
   if (contact.relationship_state === "blocked") throw new EdgeBookError("blocked_peer", "Cannot accept a blocked peer");
   await store.setRelationship(peerAgentId, "friend", "Accept", reason);
+  // Flight recorder (spec-133): friend accepted — peer id only.
+  await logEvent(store, "friend.accepted", { peer: peerAgentId });
   // `profile.read.friend` is minted now but intentionally NOT enforced in this
   // phase: the push exchange (profile_share) gates on relationship_state ===
   // "friend", not on the grant. The scope is reserved so a future pull-based
