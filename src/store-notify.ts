@@ -113,3 +113,16 @@ export async function recordNotified(store: EdgeBookStore, dedupKey: string): Pr
   ledger.push(dedupKey);
   await writeJson(store.file(NOTIFIED_FILE), ledger);
 }
+
+// Build a NotificationIntent for a pair_complete system event. Not backed by a
+// MessageEnvelope — constructed directly and fed to the standard dedup + deliver
+// pipeline. dedup_key = device_id so one notification fires per device regardless
+// of redelivery. (spec-135)
+export function buildPairCompleteNotifyIntent(deviceId: string, label: string): NotificationIntent {
+  return {
+    kind: "pair_complete",
+    message: `Pairing complete — your reader is connected (device: ${label}).`,
+    from_id: deviceId,
+    dedup_key: deviceId,
+  };
+}
