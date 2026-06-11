@@ -18,6 +18,8 @@ import { DEFAULT_PAIR_TTL_MS, createPairRegistration, createSessionsRevokeFrame,
 import type { PairRegistration, SessionsRevokeFrame } from "./dialout-key.ts";
 import { apiUrl, closeServer, openLocalApi, requestBody } from "./dialout-local-api.ts";
 import type { DialoutApiRequest, DialoutApiResponse, LocalApi } from "./dialout-local-api.ts";
+import { PairCompleteWaiter } from "./dialout-pair.ts";
+import type { PairCompleteResult } from "./dialout-pair.ts";
 import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "./edge-book.ts";
 
 export const DEFAULT_DIALOUT_HOST = "wss://edge-book-host.fly.dev/agent/ws";
@@ -130,6 +132,7 @@ export class EdgeBookDialoutClient {
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
   }>();
+  private readonly pairCompleteWaiter = new PairCompleteWaiter();
 
   constructor(options: DialoutClientOptions) {
     this.options = {
@@ -166,6 +169,12 @@ export class EdgeBookDialoutClient {
     const registration = await createPairRegistration(this.store, ttlMs);
     this.send(registration.frame);
     return registration;
+  }
+
+  // Wait up to ttlMs for a pair_complete frame from the host.
+  // Returns null on timeout — old-host degradation (spec-135).
+  waitForPairComplete(ttlMs: number): Promise<PairCompleteResult | null> {
+    return this.pairCompleteWaiter.wait(ttlMs);
   }
 
   async revokeSessions(): Promise<SessionsRevokeFrame> {
@@ -415,6 +424,10 @@ export class EdgeBookDialoutClient {
       return;
     }
     if ((frame as { type?: string }).type === "pair_register_ok" || (frame as { type?: string }).type === "pair_register_err") return;
+    if ((frame as { type?: string }).type === "pair_complete") {
+      this.pairCompleteWaiter.onFrame(frame as unknown as { device_id?: string; label?: string });
+      return;
+    }
     if ((frame as { type?: string }).type === "sessions_revoke_ok") {
       const ack = frame as unknown as SessionsRevokeAck;
       const pending = this.pendingSessionRevokes.get(ack.request_id || "");
@@ -556,59 +569,6 @@ export class EdgeBookDialoutClient {
   }
 }
 
-export async function sendPairRegistration(options: DialoutClientOptions & { ttlMs?: number }): Promise<PairRegistration> {
-  const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
-  await client.start();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const registration = await client.pair(options.ttlMs ?? DEFAULT_PAIR_TTL_MS);
-  await client.stop();
-  return registration;
-}
-
-// Deliver a single signed envelope over the host mailbox using a transient
-// dial-out connection (connect → mailbox_send → wait ack → disconnect). Used by
-// the CLI `object share/revoke --deliver` and `friend ... --deliver` flows.
-export async function deliverEnvelopeViaMailbox(options: DialoutClientOptions & { envelope: MessageEnvelope }): Promise<MailboxSendAck> {
-  const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
-  await client.start();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  try {
-    return await client.sendEnvelope(options.envelope);
-  } finally {
-    await client.stop();
-  }
-}
-
-export async function sendSessionsRevoke(options: DialoutClientOptions): Promise<SessionsRevokeFrame> {
-  const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
-  await client.start();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const { frame, ack } = await client.revokeSessionsAndWait();
-  await client.stop();
-  return { ...frame, channel_id: ack.channel_id } as SessionsRevokeFrame & { channel_id?: string };
-}
-
-// List remembered devices via a transient dial-out connection (ea-claude-057).
-export async function listSessions(options: DialoutClientOptions): Promise<DeviceInfo[]> {
-  const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
-  await client.start();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  try { return await client.listSessionsAndWait(); } finally { await client.stop(); }
-}
-
-// Revoke ONE device by id via a transient dial-out connection (ea-claude-057).
-export async function revokeOneSession(options: DialoutClientOptions & { deviceId: string }): Promise<boolean> {
-  const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
-  await client.start();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  try { return await client.revokeOneSessionAndWait(options.deviceId); } finally { await client.stop(); }
-}
-
-// Query per-message delivery state via a transient dial-out connection
-// (spec-097). Returns null when the host does not support receipts.
-export async function mailboxStatus(options: DialoutClientOptions & { ids: string[]; timeoutMs?: number }): Promise<MailboxStatusEntry[] | null> {
-  const client = new EdgeBookDialoutClient({ ...options, reconnect: false, openLocalApi: false });
-  await client.start();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  try { return await client.mailboxStatusAndWait(options.ids, options.timeoutMs ?? 5_000); } finally { await client.stop(); }
-}
+// One-shot transient-connection helpers live in dialout-oneshot.ts to keep
+// this file within the 500-line limit. Re-exported here for back-compat.
+export { deliverEnvelopeViaMailbox, listSessions, mailboxStatus, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout-oneshot.ts";

@@ -26,8 +26,10 @@ import { runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts
 import { renderUsage } from "./commands-doc.ts";
 import { startEdgeBookServer } from "./http.ts";
 import { startRelayServer } from "./http-relay.ts";
-import { makeNotifyOnEnvelope, resolveNotifyCmd } from "./notify.ts";
+import { deliverNotification, makeNotifyOnEnvelope, resolveNotifyCmd } from "./notify.ts";
 import { ensureNotifierCron, ensureGreeterCron, defaultHermesRunner } from "./host-cron.ts";
+import { buildPairCompleteNotifyIntent } from "./store-notify.ts";
+import { buildOnboardingNote } from "./onboarding.ts";
 
 export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
 export type { CliContext, CliResult } from "./cli-shared.ts";
@@ -157,8 +159,24 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       const registration = await client.pair(ttlMs);
       console.log(`Pairing code: ${registration.code}`);
       console.log(`Expires in: ${ttlMs}ms`);
-      console.log("Edge Book dial-out remains connected; leave this process running during the hosted reader session.");
-      await new Promise(() => undefined);
+      console.log("Waiting for your browser reader to connect...");
+      const pairResult = await client.waitForPairComplete(ttlMs);
+      await client.stop();
+      if (!pairResult) {
+        // Old-host degradation or TTL expiry: the pair_complete frame never arrived.
+        // New hosts always send it; old hosts never do — in both cases the code is
+        // now expired. (spec-135 old-host degradation §C.2)
+        throw new EdgeBookError("pair_timeout", "Pairing code expired unredeemed — run edge-book pair again for a fresh code.");
+      }
+      console.log(`\nPairing complete — your reader is connected (device: ${pairResult.label}).`);
+      const notifyCmd = resolveNotifyCmd({ env: process.env.EDGE_BOOK_NOTIFY_CMD, config: (await store.config()).notify_cmd });
+      const intent = buildPairCompleteNotifyIntent(pairResult.device_id, pairResult.label);
+      if (notifyCmd && !(await store.wasNotified(intent.dedup_key))) {
+        const nr = await deliverNotification(intent, { cmd: notifyCmd });
+        if (nr.delivered) await store.recordNotified(intent.dedup_key);
+      }
+      console.log("\n" + buildOnboardingNote());
+      return { text: `Pairing complete — your reader is connected (device: ${pairResult.label}).`, json: { device_id: pairResult.device_id, label: pairResult.label } };
     }
     const registration = await sendPairRegistration({ home, host: hostUrl, ttlMs, socketFactory: ctx.socketFactory });
     return { text: `Pairing code: ${registration.code}\nExpires in: ${registration.frame.ttl_ms}ms`, json: registration };
