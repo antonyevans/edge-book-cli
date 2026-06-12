@@ -17,6 +17,8 @@
     "prepublishOnly": "npm run sync-readme:check && npm run build",
     "sync-readme": "tsx scripts/sync-readme.ts",
     "sync-readme:check": "tsx scripts/sync-readme.ts --check",
+    "schemas": "tsx scripts/sync-wire-schema.ts",
+    "schemas:check": "tsx scripts/sync-wire-schema.ts --check",
     "smoke": "node scripts/smoke-2agent.ts",
     "smoke:host": "node scripts/smoke-2agent.ts --host",
     "lint": "eslint src"

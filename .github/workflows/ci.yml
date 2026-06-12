@@ -18,4 +18,5 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npx eslint src
       - run: npm run typecheck
+      - run: npm run schemas:check
       - run: npm test
