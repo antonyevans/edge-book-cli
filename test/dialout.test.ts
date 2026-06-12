@@ -31,6 +31,7 @@ class FakeSocket {
     this.sent.push(frame);
     if (frame.type === "hello") queueMicrotask(() => this.receive({ type: "hello_ok", channel_id: "test-channel", server_time: new Date().toISOString() }));
     if (frame.type === "sessions_revoke") queueMicrotask(() => this.receive({ type: "sessions_revoke_ok", request_id: frame.request_id, channel_id: "test-channel" }));
+    if (frame.type === "pair_register") queueMicrotask(() => this.receive({ type: "pair_register_ok", request_id: frame.request_id, ttl_ms: frame.ttl_ms, expires_at: Date.now() + (frame.ttl_ms as number) }));
   }
 
   close(): void {

@@ -169,7 +169,17 @@ export class EdgeBookDialoutClient {
 
   async pair(ttlMs = DEFAULT_PAIR_TTL_MS): Promise<PairRegistration> {
     const registration = await createPairRegistration(this.store, ttlMs);
+    const ackPromise = this.awaitAck(registration.frame.request_id, "pair_register", "pair_register_ok", 5_000);
     this.send(registration.frame);
+    try {
+      const ack = await ackPromise as { type?: string; error?: string; expires_at?: number };
+      if (ack.type === "pair_register_err") throw new EdgeBookError("pair_register_rejected", String(ack.error || "Host rejected the pairing registration"));
+      // Host-clock deadline — authoritative over any client-side TTL estimate
+      // (ea-claude-112). Old hosts omit it; the caller falls back to ttl_ms.
+      if (typeof ack.expires_at === "number") registration.expires_at = ack.expires_at;
+    } catch (error) {
+      if (!(error instanceof EdgeBookError && error.code === "host_rpc_timeout")) throw error;
+    }
     return registration;
   }
 
@@ -215,15 +225,21 @@ export class EdgeBookDialoutClient {
   // request_id. `expect` documents the ack type; resolution is by request_id.
   private async rpc(type: string, extra: Record<string, unknown>, expect: string, timeoutMs: number): Promise<Record<string, unknown>> {
     const request_id = crypto.randomUUID();
-    const promise = new Promise<Record<string, unknown>>((resolve, reject) => {
+    const promise = this.awaitAck(request_id, type, expect, timeoutMs);
+    this.send({ type, request_id, ...extra });
+    return promise;
+  }
+
+  // Register a pending ack for an already-built frame's request_id (used by
+  // pair(), whose frame is minted in dialout-key.ts rather than by rpc()).
+  private awaitAck(request_id: string, rpcType: string, expect: string, timeoutMs: number): Promise<Record<string, unknown>> {
+    return new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRpc.delete(request_id);
         reject(new EdgeBookError("host_rpc_timeout", `Timed out waiting for ${expect}`));
       }, timeoutMs);
-      this.pendingRpc.set(request_id, { resolve, reject, timer, rpcType: type });
+      this.pendingRpc.set(request_id, { resolve, reject, timer, rpcType });
     });
-    this.send({ type, request_id, ...extra });
-    return promise;
   }
 
   async revokeSessionsAndWait(timeoutMs = 5_000): Promise<{ frame: SessionsRevokeFrame; ack: SessionsRevokeAck }> {
@@ -445,7 +461,7 @@ export class EdgeBookDialoutClient {
       this.send({ type: "pong" });
       return;
     }
-    if ((frame as { type?: string }).type === "sessions_list_ok" || (frame as { type?: string }).type === "session_revoke_one_ok" || (frame as { type?: string }).type === "mailbox_status_ok" || (frame as { type?: string }).type === "mailbox_status_err") {
+    if ((frame as { type?: string }).type === "sessions_list_ok" || (frame as { type?: string }).type === "session_revoke_one_ok" || (frame as { type?: string }).type === "mailbox_status_ok" || (frame as { type?: string }).type === "mailbox_status_err" || (frame as { type?: string }).type === "pair_register_ok" || (frame as { type?: string }).type === "pair_register_err") {
       const ack = frame as unknown as { request_id?: string };
       const pending = this.pendingRpc.get(ack.request_id || "");
       if (pending) {
@@ -459,7 +475,6 @@ export class EdgeBookDialoutClient {
       await this.standDown(frame as { type?: string; reason?: string; idle_ms?: number });
       return;
     }
-    if ((frame as { type?: string }).type === "pair_register_ok" || (frame as { type?: string }).type === "pair_register_err") return;
     if ((frame as { type?: string }).type === "pair_complete") {
       this.pairCompleteWaiter.onFrame(frame as unknown as { device_id?: string; label?: string });
       return;

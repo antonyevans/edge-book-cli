@@ -11,7 +11,9 @@ import { EdgeBookStore } from "./edge-book.ts";
 
 export const DIALOUT_KEY_FILE = "host-dialout-key.json"; // persisted name — doctor checks its presence
 const KEY_FILE = DIALOUT_KEY_FILE;
-export const DEFAULT_PAIR_TTL_MS = 5 * 60 * 1000;
+// 10 minutes — the host clamp's maximum. The window must absorb the relay
+// latency between code mint and the human actually reading it (ea-claude-112).
+export const DEFAULT_PAIR_TTL_MS = 10 * 60 * 1000;
 const PAIRING_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 export interface DialoutKey {
@@ -25,6 +27,9 @@ export interface DialoutKey {
 
 export interface PairRegistration {
   code: string;
+  // Host-clock deadline from pair_register_ok (ea-claude-112). Absent when
+  // the host predates the field (old-host degradation — estimate from ttl_ms).
+  expires_at?: number;
   frame: {
     type: "pair_register";
     code: string;
