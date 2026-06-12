@@ -35,7 +35,8 @@ test("notifyInbound delivers a friend_request, stamps notified_at, audits delive
   const r = await notifyInbound(bob, env, { cmd });
 
   assert.equal(r.notified, true);
-  assert.equal((await bob.pendingFriendRequests()).length, 0, "notified_at stamped → cron skips it");
+  assert.equal((await bob.unnotifiedFriendRequests()).length, 0, "notified_at stamped → cron skips it");
+  assert.equal((await bob.pendingFriendRequests()).length, 1, "spec-139: still pending until the human acts");
   assert.match(await fs.readFile(out, "utf8"), /wants to connect/);
   assert.ok((await bob.auditEvents()).some((e) => e.action === "notify.delivered"));
 });
@@ -65,7 +66,7 @@ test("failed delivery leaves the request pending and audits failure", async () =
   const r = await notifyInbound(bob, env, { cmd: "exit 1" });
 
   assert.equal(r.notified, false);
-  assert.equal((await bob.pendingFriendRequests()).length, 1, "still pending after a failed notify");
+  assert.equal((await bob.unnotifiedFriendRequests()).length, 1, "still un-notified after a failed notify");
   assert.ok((await bob.auditEvents()).some((e) => e.action === "notify.failed"));
 });
 

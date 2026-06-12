@@ -203,7 +203,7 @@ test("doctor --send --yes delivers the sanitized bundle, prints the support refe
 
 test("oversize bundles are rejected client-side with a graceful error", async () => {
   const user = await seededUser();
-  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined } });
+  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined, getPrompt: () => null, remove: () => undefined } });
   const hugeNote = "x".repeat(SUPPORT_BUNDLE_MAX_BYTES + 1);
   await assert.rejects(
     buildSupportBundleEnvelope(user, "did:openclaw:op", report, hugeNote),
@@ -215,7 +215,7 @@ test("receiver rejects oversize bundles independently of the sender cap (--to by
   const user = await seededUser();
   const op = await operatorStore("sizeop", true);
   const opDid = (await op.identity()).agent_id;
-  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined } });
+  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined, getPrompt: () => null, remove: () => undefined } });
   // Build a small valid envelope, then inflate the signed body out-of-band the
   // way a hostile sender (not using our client) could: sign over a huge note.
   const envelope = await user.signEnvelope({ to_agent_id: opDid, type: "support_bundle", body: { card: await user.writeCard(), report, note: "y".repeat(SUPPORT_BUNDLE_MAX_BYTES + 1) } as unknown as MessageEnvelope["body"] });
@@ -229,7 +229,7 @@ test("retention: the inbox holds at most SUPPORT_BUNDLE_KEEP records, evicting d
   const user = await seededUser();
   const op = await operatorStore("keepop", true);
   const opDid = (await op.identity()).agent_id;
-  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined } });
+  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined, getPrompt: () => null, remove: () => undefined } });
   // Seed KEEP records directly (cheap), mark the very first dismissed, then
   // receive one more real envelope — the dismissed one must be evicted.
   const seeded: Record<string, import("../src/types.ts").SupportBundleRecord> = {};
@@ -250,7 +250,7 @@ test("operator roundtrip: receive → pending → read → dismiss; inbox is fai
   const user = await seededUser();
   const op = await operatorStore("ops", true);
   const opDid = (await op.identity()).agent_id;
-  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined } });
+  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined, getPrompt: () => null, remove: () => undefined } });
 
   // Fail closed: an agent that never opted in rejects the bundle outright.
   const bystander = await operatorStore("bystander", false);
@@ -303,7 +303,7 @@ test("operator roundtrip: receive → pending → read → dismiss; inbox is fai
 
 test("consent prompt renderer is exact about recipient and note", async () => {
   const user = await seededUser();
-  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined } });
+  const report = await buildDoctorReport(user, { host: "ws://127.0.0.1:9/agent/ws", fetchImpl: (async () => ({ status: 200 })) as unknown as typeof fetch, hermesRunner: { hermesBin: null, list: () => "", create: () => undefined, getPrompt: () => null, remove: () => undefined } });
   const prompt = renderConsentPrompt(report, "did:openclaw:op", 12_345, "my note");
   assert.ok(prompt.includes("recipient: did:openclaw:op"));
   assert.ok(prompt.includes('your note: "my note"'));

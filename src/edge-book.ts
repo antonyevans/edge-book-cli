@@ -49,7 +49,7 @@ import { attestations, saveAttestations, saveEndorsements, saveSignals, saveCapa
 import { objects, saveObjects, getObject, createObject, issueObjectGrant, canReadObject, readObject, readAttachmentBytes, sharedObjectsFor, shareObjectEnvelope, receiveObjectShare, revokeObjectGrant, revokeObjectEnvelope, receiveObjectRevoke } from "./store-objects.ts";
 import { posts, savePosts, feedItems, saveFeedItems, approvals, saveApprovals, contactMutes, saveContactMutes, createApproval, resolveApproval, createPost, approvePost, editPost, removePost, expirePost, ensureLocalFeedItem, visiblePostsForPeer, importFeedPosts, markFeedItemRead, hideFeedItem, muteContact, unmuteContact } from "./store-posts.ts";
 import { escalations, saveEscalations, raiseEscalation, receiveEscalation, answerEscalation, applyEscalationResponse, expireEscalations } from "./store-escalations.ts";
-import { upsertContactFromCard, setRelationship, createFriendRequest, receiveFriendRequest, pendingFriendRequests, markFriendRequestNotified, acceptFriend, rejectFriend, applyFriendResponse, buildProfileShareEnvelope, receiveProfileShare, broadcastProfileEnvelopes, revoke, block, reports, inviteCodes, mintInviteCode, reportPeer } from "./store-friends.ts";
+import { upsertContactFromCard, setRelationship, createFriendRequest, receiveFriendRequest, pendingFriendRequests, unnotifiedFriendRequests, markFriendRequestNotified, acceptFriend, rejectFriend, applyFriendResponse, buildProfileShareEnvelope, receiveProfileShare, broadcastProfileEnvelopes, revoke, block, reports, inviteCodes, mintInviteCode, reportPeer } from "./store-friends.ts";
 import { init, setProfile, setHandle, exportIdentity, importIdentity, updateConfig, buildCard, writeCard, buildHandleClaim, buildFriendProfile, doctor, deregister, reviewLocalDataImport, exportLocalData } from "./store-identity.ts";
 import { enforceInboundRate, issueGrant, storeGrant, sendPrivilegedMessage, receivePrivilegedMessage, findUsableGrant, verifyGrantSignature, assertGrantSignature, signEnvelope, verifyEnvelope, receiveEnvelope, audit, createSession, requireSession, revokeSession } from "./store-trust.ts";
 import { notificationIntent, wasNotified, recordNotified } from "./store-notify.ts";
@@ -185,10 +185,15 @@ export class EdgeBookStore {
     return receiveFriendRequest(this, envelope);
   }
 
-  // Inbound friend requests the human hasn't been told about yet. Empty when the
-  // agent has notifications disabled. Read-only — the notifier cron consumes this.
+  // All inbound friend requests awaiting accept/decline (spec-139). Read-only.
   async pendingFriendRequests(): Promise<AgentContactRecord[]> {
     return pendingFriendRequests(this);
+  }
+
+  // Inbound friend requests the human hasn't been told about yet. Empty when the
+  // agent has notifications disabled. Read-only — the notifier cron consumes this.
+  async unnotifiedFriendRequests(): Promise<AgentContactRecord[]> {
+    return unnotifiedFriendRequests(this);
   }
 
   // Stamp a request as notified so it won't surface again (idempotent sweep,

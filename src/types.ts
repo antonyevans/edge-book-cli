@@ -29,8 +29,9 @@ export interface EdgeBookOptions {
 export interface EdgeBookConfig {
   direct_url?: string;
   relay_url?: string;
-  // Default ON (treat undefined as true). When false, pendingFriendRequests()
-  // returns [] so the notifier cron stays silent.
+  // Default ON (treat undefined as true). When false, unnotifiedFriendRequests()
+  // (`friend pending --new`) returns [] so the notifier cron stays silent;
+  // plain `friend pending` still lists the requests (spec-139).
   notify_on_friend_request?: boolean;
   // Host-provided notify command (ea-claude-125). When set, the dial-out runs it
   // on each notifiable inbound envelope, delivering the message via stdin/env.
