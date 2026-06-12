@@ -45,8 +45,21 @@ export async function resolveFriendRequestCard(store: EdgeBookStore, target: str
   if (result.status === "resolved") {
     if (result.card) return result.card;
     // Local-contact resolution carries no card — re-verify via the stored card_url.
+    // Stored card_urls can be unusable on THIS machine (0.15.x cards advertise
+    // their own home as file:///…/openclaw-agent.json): on any load failure,
+    // fall back to non-local resolution (registry) instead of surfacing an
+    // fs error — found live when pack re-join hit a replica contact.
     const cardUrl = result.agent_id ? (await store.contacts())[result.agent_id]?.card_url : undefined;
-    if (cardUrl) return loadCard(cardUrl);
+    if (cardUrl) {
+      try {
+        return await loadCard(cardUrl);
+      } catch {
+        const nonLocal = providers.filter((p) => p.name !== "local");
+        const retry = await resolveTarget(store, target, { providers: nonLocal });
+        if (retry.status === "resolved" && retry.card) return retry.card;
+        throw notResolvable(target);
+      }
+    }
     throw notResolvable(target);
   }
   if (result.status === "approval_required" || result.status === "candidates") {
