@@ -198,6 +198,14 @@ async function joinMember(
 ): Promise<MemberOutcome> {
   const identity = await store.identity();
   if (handle === identity.handle) return { handle, outcome: "skipped", reason: "self" };
+  // Pre-resolution skip by alias: idempotent re-join must not depend on the
+  // member being re-resolvable (stored 0.15.x cards carry foreign file://
+  // card_urls — found live on the rig). A contact whose aliases include the
+  // handle and whose state is a skip state needs no card at all.
+  const normalized = handle.trim().replace(/^@/, "").toLowerCase();
+  const known = Object.values(await store.contacts()).find((c) => (c.aliases ?? []).some((a) => a.toLowerCase() === normalized));
+  const knownSkip = known?.relationship_state ? SKIP_REASONS[known.relationship_state] : undefined;
+  if (knownSkip) return { handle, outcome: "skipped", reason: knownSkip };
   const card = await resolveFriendRequestCard(store, handle, providers);
   if (card.agent_id === identity.agent_id) return { handle, outcome: "skipped", reason: "self" };
   const state = (await store.contacts())[card.agent_id]?.relationship_state;

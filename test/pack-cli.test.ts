@@ -235,3 +235,43 @@ test("pack show then join inside the host rate window: join falls back to the ca
     assert.equal(packFetches, 2, "host saw exactly one real fetch plus one 429");
   } finally { globalThis.fetch = original; }
 });
+
+test("re-join skips a known member even when its stored card_url is a foreign file:// path (0.15.x cards)", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-pack-foreign-"));
+  const bob = await makeMember(root, "foreign-bob");
+  const { home, store: joiner } = await joinerWith(root);
+  // Simulate the live-fleet shape: contact exists in request_sent with a
+  // card_url pointing at the PEER's own filesystem (unreadable here).
+  await joiner.upsertContactFromCard(bob.card, "request_sent");
+  const contacts = await joiner.contacts();
+  contacts[bob.card.agent_id].card_url = "file:///opt/data/home/.openclaw/edge-book/openclaw-agent.json";
+  contacts[bob.card.agent_id].aliases = ["foreign-bob"];
+  await joiner.saveContacts(contacts);
+  const { posted, restore } = mockHost({ fp: { title: "FP", member_handles: ["foreign-bob"] } }, [bob]);
+  try {
+    const result = await handleCli(["pack", "join", "--home", home, "fp", "--deliver", "--relay-base", RELAY]);
+    const json = result.json as { requested: number; skipped: number; failed: number };
+    assert.equal(json.failed, 0, "foreign card_url must not fail the member");
+    assert.equal(json.skipped, 1, "skipped via pre-resolution alias check");
+    assert.equal(result.exitCode ?? 0, 0);
+    assert.equal(posted.length, 0);
+  } finally { restore(); }
+});
+
+test("friend request on a contact with an unusable stored card_url falls back to registry resolution", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-freq-foreign-"));
+  const bob = await makeMember(root, "fr-bob");
+  const { home, store: joiner } = await joinerWith(root);
+  // Contact exists in a NON-skip state (rejected/none analogue: use a bare
+  // contact with no relationship gate) whose card_url is foreign.
+  await joiner.upsertContactFromCard(bob.card, "none");
+  const contacts = await joiner.contacts();
+  contacts[bob.card.agent_id].card_url = "file:///nonexistent/openclaw-agent.json";
+  contacts[bob.card.agent_id].aliases = ["fr-bob"];
+  await joiner.saveContacts(contacts);
+  const { posted, restore } = mockHost({}, [bob]);
+  try {
+    const result = await handleCli(["friend", "request", "--home", home, "fr-bob", "--deliver", "--relay-base", RELAY]);
+    assert.ok(result.text.includes("Sent") || posted.length === 1, "request sent via registry fallback, no ENOENT");
+  } finally { restore(); }
+});
