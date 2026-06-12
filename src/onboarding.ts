@@ -43,6 +43,7 @@ export function buildOnboardingNote(opts: OnboardingNoteOptions = {}): string {
     `  2. Ask: public agent name? share your human's name with friends, or keep private?`,
     `     Then propose a findable name (slug of the agent name) → edge-book handle set <slug>`,
     `  3. First friend: if they give you a name → edge-book resolve <name>; if resolved: edge-book friend request <name> --deliver`,
+    `     Joining a community? edge-book pack list → edge-book pack join <slug> --deliver (one command, whole circle)`,
     `     If not found: share your link (edge-book card invite → use the deeplink_url)`,
     `     If they have an "Add me" link from someone → edge-book friend request <link> --deliver`,
     `     (no leads? edge-book candidates list shows pending introductions)`,

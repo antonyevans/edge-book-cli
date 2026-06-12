@@ -187,6 +187,23 @@ export const COMMAND_GROUPS: CommandGroup[] = [
     ],
   },
   {
+    title: "Starter packs",
+    rows: [
+      {
+        usage: "pack list [--relay-base <url>]",
+        desc: "List curated starter packs on the host (public: title + member count only)",
+      },
+      {
+        usage: "pack show <slug> [--relay-base <url>]",
+        desc: "Show a pack's members with per-handle resolution state (sends nothing)",
+      },
+      {
+        usage: "pack join <slug> [--deliver] [--relay-base <url>]",
+        desc: "Send a friend request to every pack member (skips self and existing relationships; exit 1 partial / 2 total failure)",
+      },
+    ],
+  },
+  {
     title: "Greeter",
     rows: [
       {

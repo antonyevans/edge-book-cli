@@ -28,6 +28,10 @@ export interface CliContext {
 export interface CliResult {
   text: string;
   json?: unknown;
+  // spec-145: partial/total-failure signalling for fan-out commands
+  // (`pack join`: 1 = partial failure, 2 = total failure). Additive —
+  // absent/0 keeps the frozen {text, json} contract and exit 0 unchanged.
+  exitCode?: number;
 }
 
 export function takeFlag(args: string[], name: string): string | undefined {

@@ -19,6 +19,7 @@ import { maybeAppendHandleNudge } from "./handle-nudge.ts";
 import { maybeAppendNotifierNudge } from "./notifier-nudge.ts";
 import { maybeAppendOnboardingNudge } from "./onboarding-nudge.ts";
 import { handleIdentityCli } from "./cli-identity.ts";
+import { handlePackCli } from "./cli-pack.ts";
 import { handleSocialCli } from "./cli-social.ts";
 import { handleSupportCli } from "./cli-support.ts";
 import { handleTaxonomyCli } from "./cli-taxonomy.ts";
@@ -83,6 +84,10 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     if (command === "friend" && socialAction === "auto-accept") return socialResult;
     return maybeAppendUpdateNudge(store, command, await maybeAppendNotifierNudge(store, command, await maybeAppendOnboardingNudge(store, command, await maybeAppendHandleNudge(store, command, socialResult))));
   }
+
+  // Starter packs (spec-145): list/show/join curated friend bundles.
+  const packResult = await handlePackCli(command, args, ctx, home, store);
+  if (packResult) return packResult;
 
   const supportResult = await handleSupportCli(command, args, ctx, home, store);
   if (supportResult) return supportResult;
@@ -368,6 +373,9 @@ export async function runCli(args: string[]): Promise<void> {
   } else {
     console.log(result.text);
   }
+  // spec-145: fan-out commands report partial (1) / total (2) failure through
+  // CliResult.exitCode while still printing their per-member report.
+  if (result.exitCode) process.exitCode = result.exitCode;
 }
 
 function isCliEntrypoint(): boolean {
