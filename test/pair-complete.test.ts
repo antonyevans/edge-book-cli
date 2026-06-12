@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { PairCompleteWaiter } from "../src/dialout-pair.ts";
+import { DEFAULT_PAIR_TTL_MS } from "../src/dialout-key.ts";
 import { buildOnboardingNote } from "../src/onboarding.ts";
 import { handleCli } from "../src/cli.ts";
 import { buildPairCompleteNotifyIntent } from "../src/store-notify.ts";
@@ -29,8 +30,9 @@ class FakeSocket {
       );
     }
     if (frame.type === "pair_register") {
+      // Mirrors the current host: ok ack carries the authoritative expiry (ea-claude-112).
       queueMicrotask(() =>
-        this.receive({ type: "pair_register_ok", request_id: frame.request_id })
+        this.receive({ type: "pair_register_ok", request_id: frame.request_id, ttl_ms: frame.ttl_ms, expires_at: Date.now() + (frame.ttl_ms as number) })
       );
     }
   }
@@ -183,4 +185,72 @@ test("pair command: dedup ledger entry exists after pair_complete (when no notif
   const store = new EdgeBookStore({ home });
   const notified = await store.wasNotified("dedup-channel");
   assert.equal(notified, false, "not recorded without notify_cmd");
+});
+
+// ── ea-claude-112: authoritative pairing expiry ───────────────────────────────
+
+test("pair (text mode): surfaces the host-confirmed expires_at from pair_register_ok", async () => {
+  const home = await tempHome();
+  const store = new EdgeBookStore({ home });
+  await store.init({ handle: "pair-expiry-test-1.openclaw.local" });
+  const { factory } = makeSocketFactory();
+
+  const result = await handleCli(["pair", "--host", "ws://fake", "--ttl-ms", "60000"], {
+    home,
+    socketFactory: factory as unknown as (url: string) => WebSocket,
+    textOnly: true,
+  });
+
+  const json = result.json as { expires_at?: number };
+  assert.ok(typeof json.expires_at === "number", "registration carries the host expires_at");
+  assert.ok(json.expires_at! > Date.now() && json.expires_at! <= Date.now() + 60_000, "deadline within the requested window");
+  assert.match(result.text, /Expires at: .*host-confirmed/);
+});
+
+test("pair (text mode): old host ack without expires_at falls back to the TTL estimate", async () => {
+  const home = await tempHome();
+  const store = new EdgeBookStore({ home });
+  await store.init({ handle: "pair-expiry-test-2.openclaw.local" });
+
+  class OldHostSocket extends FakeSocket {
+    override send(data: string): void {
+      const frame = JSON.parse(data) as Record<string, unknown>;
+      this.sent.push(frame);
+      if (frame.type === "hello") {
+        queueMicrotask(() => this.receive({ type: "hello_ok", channel_id: "test-channel", server_time: new Date().toISOString() }));
+      }
+      if (frame.type === "pair_register") {
+        queueMicrotask(() => this.receive({ type: "pair_register_ok", request_id: frame.request_id }));
+      }
+    }
+  }
+  const factory = (url: string) => { void url; const s = new OldHostSocket(); queueMicrotask(() => s.emit("open")); return s; };
+
+  const result = await handleCli(["pair", "--host", "ws://fake", "--ttl-ms", "60000"], {
+    home,
+    socketFactory: factory as unknown as (url: string) => WebSocket,
+    textOnly: true,
+  });
+
+  const json = result.json as { expires_at?: number };
+  assert.equal(json.expires_at, undefined, "no fabricated deadline");
+  assert.match(result.text, /Expires in: ~1 min \(estimated\)/);
+});
+
+test("pair: default TTL is 10 minutes — the host clamp maximum (ea-claude-112)", async () => {
+  assert.equal(DEFAULT_PAIR_TTL_MS, 10 * 60 * 1000);
+
+  const home = await tempHome();
+  const store = new EdgeBookStore({ home });
+  await store.init({ handle: "pair-expiry-test-3.openclaw.local" });
+  const { sockets, factory } = makeSocketFactory();
+
+  await handleCli(["pair", "--host", "ws://fake"], {
+    home,
+    socketFactory: factory as unknown as (url: string) => WebSocket,
+    textOnly: true,
+  });
+
+  const sent = sockets[0]!.sent.find((f) => f.type === "pair_register") as { ttl_ms?: number };
+  assert.equal(sent.ttl_ms, 10 * 60 * 1000, "CLI default pair_register ttl_ms is 10 min");
 });

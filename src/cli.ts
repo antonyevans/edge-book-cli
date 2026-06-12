@@ -25,7 +25,8 @@ import { handleTaxonomyCli } from "./cli-taxonomy.ts";
 import { handleDirectoryCli } from "./cli-directory.ts";
 import { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient, listSessions, mailboxStatus, revokeOneSession, sendPairRegistration, sendSessionsRevoke } from "./dialout.ts";
 import type { MailboxStatusEntry } from "./dialout.ts";
-import type { SessionsRevokeFrame } from "./dialout-key.ts";
+import { DEFAULT_PAIR_TTL_MS } from "./dialout-key.ts";
+import type { PairRegistration, SessionsRevokeFrame } from "./dialout-key.ts";
 import { formatAge, readOutbox, staleQueueMs } from "./store-outbox.ts";
 import { runTwoAgentHarness, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
 import { renderUsage } from "./commands-doc.ts";
@@ -188,15 +189,17 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
 
   if (command === "pair") {
     const hostUrl = parseHost(args, ctx);
-    const ttlMs = Number(takeFlag(args, "--ttl-ms") || `${5 * 60 * 1000}`);
+    const ttlMs = Number(takeFlag(args, "--ttl-ms") || `${DEFAULT_PAIR_TTL_MS}`);
     if (!ctx.textOnly) {
       const client = new EdgeBookDialoutClient({ home, host: hostUrl, socketFactory: ctx.socketFactory, openLocalApi: false });
       await client.start();
       const registration = await client.pair(ttlMs);
       console.log(`Pairing code: ${registration.code}`);
-      console.log(`Expires in: ${ttlMs}ms`);
+      console.log(formatPairExpiry(registration, ttlMs));
       console.log("Waiting for your browser reader to connect...");
-      const pairResult = await client.waitForPairComplete(ttlMs);
+      // Wait out the host's real window when known, not the client estimate.
+      const waitMs = registration.expires_at ? Math.max(registration.expires_at - Date.now(), 1_000) : ttlMs;
+      const pairResult = await client.waitForPairComplete(waitMs);
       await client.stop();
       if (!pairResult) {
         // Old-host degradation or TTL expiry: the pair_complete frame never arrived.
@@ -215,7 +218,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       return { text: `Pairing complete — your reader is connected (device: ${pairResult.label}).`, json: { device_id: pairResult.device_id, label: pairResult.label } };
     }
     const registration = await sendPairRegistration({ home, host: hostUrl, ttlMs, socketFactory: ctx.socketFactory });
-    return { text: `Pairing code: ${registration.code}\nExpires in: ${registration.frame.ttl_ms}ms`, json: registration };
+    return { text: `Pairing code: ${registration.code}\n${formatPairExpiry(registration, ttlMs)}`, json: registration };
   }
 
   if (command === "sessions") {
@@ -322,6 +325,18 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   if (directoryResult) return directoryResult;
 
   throw new EdgeBookError("unknown_command", usage());
+}
+
+// Pairing-code expiry line (ea-claude-112). Prefers the host-confirmed
+// deadline from pair_register_ok; falls back to the requested TTL when the
+// host predates the field. Minutes, not raw ms — this line gets relayed to a
+// human through the agent (Slack/Telegram), so it must read at a glance.
+function formatPairExpiry(registration: PairRegistration, ttlMs: number): string {
+  if (typeof registration.expires_at === "number") {
+    const mins = Math.max(1, Math.round((registration.expires_at - Date.now()) / 60_000));
+    return `Expires at: ${new Date(registration.expires_at).toISOString()} (~${mins} min from now, host-confirmed)`;
+  }
+  return `Expires in: ~${Math.round(ttlMs / 60_000)} min (estimated)`;
 }
 
 export async function runCli(args: string[]): Promise<void> {
