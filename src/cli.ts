@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { parseHome, parseHost, requireArg, takeBoolFlag, takeFlag } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
 import { maybeAppendHandleNudge } from "./handle-nudge.ts";
+import { maybeAppendOnboardingNudge } from "./onboarding-nudge.ts";
 import { handleIdentityCli } from "./cli-identity.ts";
 import { handleSocialCli } from "./cli-social.ts";
 import { handleSupportCli } from "./cli-support.ts";
@@ -69,7 +70,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   const socialResult = await handleSocialCli(command, args, ctx, home, store);
   if (socialResult) {
     if (command === "friend" && socialAction === "auto-accept") return socialResult;
-    return maybeAppendHandleNudge(store, command, socialResult);
+    return maybeAppendOnboardingNudge(store, command, await maybeAppendHandleNudge(store, command, socialResult));
   }
 
   const supportResult = await handleSupportCli(command, args, ctx, home, store);
@@ -293,7 +294,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   }
 
   const taxonomyResult = await handleTaxonomyCli(command, args, ctx, store);
-  if (taxonomyResult) return maybeAppendHandleNudge(store, command, taxonomyResult);
+  if (taxonomyResult) return maybeAppendOnboardingNudge(store, command, await maybeAppendHandleNudge(store, command, taxonomyResult));
 
   const directoryResult = await handleDirectoryCli(command, args, ctx, home, store);
   if (directoryResult) return directoryResult;

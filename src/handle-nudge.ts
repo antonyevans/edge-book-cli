@@ -10,7 +10,7 @@ import { isValidHandle, slugifyHandle } from "./handles.ts";
 
 // Commands the heartbeat prompts run on a schedule — the agent is guaranteed
 // to see output from these even when the human never issues a command.
-const NUDGE_COMMANDS = new Set(["friend", "ephemeral", "answers"]);
+export const NUDGE_COMMANDS = new Set(["friend", "ephemeral", "answers"]);
 
 export function buildHandleNudge(suggestion: string | undefined): string {
   const ask = suggestion
