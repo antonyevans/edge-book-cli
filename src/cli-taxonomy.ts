@@ -3,9 +3,10 @@
 // ephemeral, answers, report. Command names/flags are FROZEN (npm surface);
 // handleCli in cli.ts stays the only dispatch entry and calls this handler in
 // dispatch order. Returns null when the command is not one of its own.
-import { broadcastPost, parseHost, requireArg, takeBoolFlag, takeFlag } from "./cli-shared.ts";
+import { broadcastPost, deliverViaMailboxRecorded, parseHost, requireArg, takeBoolFlag, takeFlag } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
 import { EdgeBookError, EdgeBookStore, contentHash } from "./edge-book.ts";
+import { activeReceivedEphemeral, resolveReceivedQuery } from "./store-received-surface.ts";
 
 export async function handleTaxonomyCli(command: string, args: string[], ctx: CliContext, store: EdgeBookStore): Promise<CliResult | null> {
   // ─── spec-0021 post-taxonomy CLI commands ────────────────────────────────
@@ -95,9 +96,16 @@ export async function handleTaxonomyCli(command: string, args: string[], ctx: Cl
     const deliver = takeBoolFlag(args, "--deliver");
     const hostUrl = parseHost(args, ctx);
     const queryId = requireArg(args.shift(), "<query-id>");
-    const ephemeral = await store.ephemeralPosts();
-    const query = ephemeral[queryId];
-    if (!query) throw new EdgeBookError("not_found", `No local query ${queryId} to answer`);
+    // Parent resolution order (spec-140): local query first, then a received
+    // query with that post_id (ambiguous_query if it came from multiple senders).
+    let query = (await store.ephemeralPosts())[queryId];
+    let receivedAuthor: string | undefined;
+    if (!query) {
+      const received = await resolveReceivedQuery(store, queryId);
+      if (!received) throw new EdgeBookError("not_found", `No local or received query ${queryId} to answer`);
+      query = received.post;
+      receivedAuthor = received.author;
+    }
     // Compute the parent hash over the query's immutable signed content (strip
     // signature and lifecycle, which are not part of the signed payload).
     const { signature: _sig, lifecycle: _lc, ...queryUnsigned } = query;
@@ -106,7 +114,15 @@ export async function handleTaxonomyCli(command: string, args: string[], ctx: Cl
       body: requireArg(takeFlag(args, "--body"), "--body"),
     });
     if (deliver) {
-      const n = await broadcastPost(store, hostUrl, ctx.socketFactory, ans);
+      let n = await broadcastPost(store, hostUrl, ctx.socketFactory, ans);
+      // spec-140: a received query's author must get the answer even when the
+      // friend fan-out above does not reach them (e.g. since unfriended).
+      if (receivedAuthor && (await store.contacts())[receivedAuthor]?.relationship_state !== "friend") {
+        const envelope = await store.signPostPublishEnvelope({ to_agent_id: receivedAuthor, post: ans });
+        await deliverViaMailboxRecorded(envelope, { home: store.home, host: hostUrl, socketFactory: ctx.socketFactory },
+          (id) => `Delivered post_publish (host id ${id})`);
+        n++;
+      }
       return { text: `answer ${ans.answer_id} — delivered to ${n} friend(s)`, json: { post: ans, delivered: n } };
     }
     return { text: `answer ${ans.answer_id}`, json: ans };
@@ -119,13 +135,15 @@ export async function handleTaxonomyCli(command: string, args: string[], ctx: Cl
   }
 
   if (command === "ephemeral") {
-    const all = await store.ephemeralPosts();
-    return { text: JSON.stringify(all, null, 2), json: all };
+    // spec-140: both directions — own posts plus friends' actionable posts.
+    const out = { mine: await store.ephemeralPosts(), received: await activeReceivedEphemeral(store) };
+    return { text: JSON.stringify(out, null, 2), json: out };
   }
 
   if (command === "answers") {
-    const all = await store.answers();
-    return { text: JSON.stringify(all, null, 2), json: all };
+    // spec-140: both directions — own answers plus friends' answers received.
+    const out = { mine: await store.answers(), received: (await store.receivedByCategory()).answers };
+    return { text: JSON.stringify(out, null, 2), json: out };
   }
 
   if (command === "report") {

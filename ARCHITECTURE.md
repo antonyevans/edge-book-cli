@@ -54,6 +54,7 @@ envelopes between agents and serves the hosted reader.
 | `doctor.ts` | `edge-book doctor` diagnostic bundle: identity, relay reachability, stores, event-log tail (spec-133) |
 | `doctor-send.ts` | `doctor --send`: consented support-bundle delivery — recipient discovery, consent prompt, 256 KiB cap, trace reference (spec-134) |
 | `store-support.ts` | operator support inbox: receive/list/read/dismiss `support_bundle` envelopes (spec-134; free functions only — edge-book.ts is at its size cap, no delegates) |
+| `store-received-surface.ts` | read-side selection over received posts for the CLI: active/unexpired received ephemerals, received-query resolution for `answer` (spec-140; free functions only) |
 | `harness.ts` | two-agent smoke harnesses |
 
 Pattern: `store-*.ts` modules are free functions taking `store: EdgeBookStore`

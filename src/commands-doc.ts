@@ -376,7 +376,7 @@ export const COMMAND_GROUPS: CommandGroup[] = [
       },
       {
         usage: "answer <query-id> --body <s> [--deliver]",
-        desc: "Answer an open query",
+        desc: "Answer an open query (local or received from a friend)",
       },
       {
         usage: "query-delete <query-id>",
@@ -384,11 +384,11 @@ export const COMMAND_GROUPS: CommandGroup[] = [
       },
       {
         usage: "ephemeral",
-        desc: "List Class-2 ephemeral posts",
+        desc: "List Class-2 ephemeral posts (mine + received from friends)",
       },
       {
         usage: "answers",
-        desc: "List answers to queries",
+        desc: "List answers to queries (mine + received from friends)",
       },
     ],
   },
