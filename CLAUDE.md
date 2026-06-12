@@ -31,6 +31,18 @@ npm run sync-readme:check  # README command table gate (runs on prepublish)
 CI (`ci.yml`) runs lint → typecheck → tests on every push and PR; merging on
 red is prohibited.
 
+## Product specs must be judged before implementation (EA spec-0052)
+
+A new `docs/spec-NNN-*.md` is not implementable until it has a judge verdict:
+run the EA write-report skill in `mode: spec-judge` with
+`structural_framework: product-spec` (rubric: evidenced Problem, testable Fix
+clauses, full Tests coverage, explicit Non-goals, resolvable dependencies),
+iterate to PASS, and record it at `docs/judgments/<spec-id>.verdict.md`
+(`verdict: PASS` line required). CI enforces the artifact on any PR that adds
+a spec alongside `src/` changes (`scripts/check-spec-verdicts.sh`). Material
+spec revisions re-judge; typo-class edits don't. Override only with Antony's
+explicit authorization, logged in the EA audit log.
+
 ## Workflow (spec-0041 / spec-0042)
 
 This repo is **plain** (merging does not deploy). After a fresh-context review
