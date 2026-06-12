@@ -43,6 +43,14 @@ a spec alongside `src/` changes (`scripts/check-spec-verdicts.sh`). Material
 spec revisions re-judge; typo-class edits don't. Override only with Antony's
 explicit authorization, logged in the EA audit log.
 
+**Claiming a spec number:** numbers are allocated by filename with no central
+counter, and concurrent sessions DO collide (two spec-142s on 2026-06-12).
+Before naming a new spec, take the next number free across ALL of: `ls docs/
+| grep -oE 'spec-[0-9]+' | sort -uV | tail -1`, open PRs touching `docs/spec-*`
+(`gh pr list --search "spec-" --state open`), and sibling repo edge-book-host's
+`docs/`. If you lose the race anyway, renumber YOUR unmerged spec (and its
+verdict file) — merged numbers never move.
+
 ## Workflow (spec-0041 / spec-0042)
 
 This repo is **plain** (merging does not deploy). After a fresh-context review
