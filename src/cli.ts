@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { parseHome, parseHost, requireArg, takeBoolFlag, takeFlag } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
 import { maybeAppendHandleNudge } from "./handle-nudge.ts";
+import { maybeAppendNotifierNudge } from "./notifier-nudge.ts";
 import { maybeAppendOnboardingNudge } from "./onboarding-nudge.ts";
 import { handleIdentityCli } from "./cli-identity.ts";
 import { handleSocialCli } from "./cli-social.ts";
@@ -31,7 +32,7 @@ import { renderUsage } from "./commands-doc.ts";
 import { startEdgeBookServer } from "./http.ts";
 import { startRelayServer } from "./http-relay.ts";
 import { deliverNotification, makeNotifyOnEnvelope, resolveNotifyCmd } from "./notify.ts";
-import { ensureNotifierCron, ensureGreeterCron, defaultHermesRunner } from "./host-cron.ts";
+import { NOTIFIER_PROMPT_VERSION, buildFriendRequestsPrompt, defaultHermesRunner, ensureGreeterCron, ensureNotifierCron } from "./host-cron.ts";
 import { buildPairCompleteNotifyIntent } from "./store-notify.ts";
 import { buildOnboardingNote } from "./onboarding.ts";
 import { logEvent } from "./event-log.ts";
@@ -70,7 +71,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   const socialResult = await handleSocialCli(command, args, ctx, home, store);
   if (socialResult) {
     if (command === "friend" && socialAction === "auto-accept") return socialResult;
-    return maybeAppendOnboardingNudge(store, command, await maybeAppendHandleNudge(store, command, socialResult));
+    return maybeAppendNotifierNudge(store, command, await maybeAppendOnboardingNudge(store, command, await maybeAppendHandleNudge(store, command, socialResult)));
   }
 
   const supportResult = await handleSupportCli(command, args, ctx, home, store);
@@ -111,11 +112,14 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       // `home` can be undefined when neither --home nor ctx.home is set; ensureNotifierCron
       // tolerates that at runtime (any failure is caught below). Documented cast to keep
       // pre-existing behavior unchanged — see FINDINGS.md §1.
-      const res = ensureNotifierCron({ runner: defaultHermesRunner(), home: home as string, disabled });
+      const res = ensureNotifierCron({ runner: ctx.hermesRunner ?? defaultHermesRunner(), home: home as string, disabled });
       // Flight recorder (spec-133): cron provisioning outcome.
       if (res.status === "installed") await logEvent(store, "cron.notifier_installed", {});
       else if (res.status === "updated") await logEvent(store, "cron.notifier_updated", {});
       else if (res.status === "already_present") await logEvent(store, "cron.notifier_already_present", {});
+      // spec-141: a mechanical install/update means the scheduler now runs the
+      // canonical prompt — record the ack so the migration nudge never fires.
+      if (res.status === "installed" || res.status === "updated") await store.updateConfig({ notifier_prompt_ack: NOTIFIER_PROMPT_VERSION });
       if (res.status === "installed") console.log(`  ↳ notifier cron self-installed ("Edge Book — friend requests", every 20m → telegram)`);
       else if (res.status === "updated") console.log(`  ↳ notifier cron recreated with the current prompt ("Edge Book — friend requests")`);
       else if (res.status === "error") console.log(`  ↳ notifier cron install skipped: ${res.detail}`);
@@ -137,15 +141,29 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   }
 
   if (command === "ensure-notifier") {
+    // spec-141 agent-directed migration helpers (agent-tool schedulers have no
+    // hermes shell CLI, so the agent updates its own scheduler job and acks):
+    // --print-prompt emits the canonical prompt verbatim (paste-ready, no
+    // decoration); --ack records that the scheduler runs the current version.
+    if (takeBoolFlag(args, "--print-prompt")) {
+      return { text: buildFriendRequestsPrompt(home as string) };
+    }
+    if (takeBoolFlag(args, "--ack")) {
+      const cfg = await store.updateConfig({ notifier_prompt_ack: NOTIFIER_PROMPT_VERSION });
+      return { text: `notifier_prompt_ack = ${cfg.notifier_prompt_ack}`, json: cfg };
+    }
     // Explicit one-shot: provision the host notifier (for installers/manual setup).
     const disabled = takeBoolFlag(args, "--no-cron-install") || process.env.EDGE_BOOK_NO_CRON_INSTALL === "1";
     // Same documented cast as the dialout branch: `home` may be undefined and
     // ensureNotifierCron reports (not throws) failures. See FINDINGS.md §1.
-    const res = ensureNotifierCron({ runner: defaultHermesRunner(), home: home as string, disabled });
+    const res = ensureNotifierCron({ runner: ctx.hermesRunner ?? defaultHermesRunner(), home: home as string, disabled });
     // Flight recorder (spec-133): cron provisioning outcome.
     if (res.status === "installed") await logEvent(store, "cron.notifier_installed", {});
     else if (res.status === "updated") await logEvent(store, "cron.notifier_updated", {});
     else if (res.status === "already_present") await logEvent(store, "cron.notifier_already_present", {});
+    // spec-141: mechanical success = the scheduler now runs the canonical
+    // prompt — auto-ack so the migration nudge never fires on this home.
+    if (res.status === "installed" || res.status === "updated") await store.updateConfig({ notifier_prompt_ack: NOTIFIER_PROMPT_VERSION });
     const msg: Record<string, string> = {
       installed: 'Installed notifier cron "Edge Book — friend requests" (every 20m → telegram).',
       updated: 'Notifier cron prompt was stale — recreated "Edge Book — friend requests" with the current prompt.',
@@ -298,7 +316,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   }
 
   const taxonomyResult = await handleTaxonomyCli(command, args, ctx, store);
-  if (taxonomyResult) return maybeAppendOnboardingNudge(store, command, await maybeAppendHandleNudge(store, command, taxonomyResult));
+  if (taxonomyResult) return maybeAppendNotifierNudge(store, command, await maybeAppendOnboardingNudge(store, command, await maybeAppendHandleNudge(store, command, taxonomyResult)));
 
   const directoryResult = await handleDirectoryCli(command, args, ctx, home, store);
   if (directoryResult) return directoryResult;

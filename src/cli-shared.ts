@@ -7,6 +7,7 @@ import path from "node:path";
 import { DEFAULT_DIALOUT_HOST, deliverEnvelopeViaMailbox } from "./dialout.ts";
 import type { DialoutSocket } from "./dialout.ts";
 import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "./edge-book.ts";
+import type { HermesRunner } from "./host-cron.ts";
 import { postEnvelope, postRelayEnvelope } from "./http-relay.ts";
 import { recordOutboxEntry } from "./store-outbox.ts";
 
@@ -15,6 +16,9 @@ export interface CliContext {
   defaultHost?: string;
   textOnly?: boolean;
   socketFactory?: (url: string) => DialoutSocket;
+  // spec-141: injectable host scheduler runner (tests only); cli.ts falls
+  // back to defaultHermesRunner(). Additive — frozen surface unchanged.
+  hermesRunner?: HermesRunner;
 }
 
 export interface CliResult {
