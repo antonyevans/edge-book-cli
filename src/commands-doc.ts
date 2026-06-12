@@ -95,8 +95,8 @@ export const COMMAND_GROUPS: CommandGroup[] = [
         desc: "Connect to the host mailbox (keeps your reader online; leave running)",
       },
       {
-        usage: "ensure-notifier [--no-cron-install]",
-        desc: "Provision the host friend-request notifier (auto-runs on dialout; Hermes installs a cron)",
+        usage: "ensure-notifier [--no-cron-install] [--print-prompt] [--ack]",
+        desc: "Provision the host friend-request notifier (auto-runs on dialout; --print-prompt/--ack drive agent-side scheduler migration)",
       },
       {
         usage: "pair [--host <wss-url>] [--ttl-ms <ms>]",

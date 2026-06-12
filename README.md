@@ -163,7 +163,7 @@ edge-book report <peer-agent-id> --block         # report and block in one step
 | `card invite [--uses <n>] [--ttl-ms <ms>]` | Print an "Add me" invite link; --uses/--ttl-ms mints a consumable code |
 | **Hosted reader** | |
 | `dialout [--host <wss-url>] [--notify-cmd <cmd>] [--no-cron-install]` | Connect to the host mailbox (keeps your reader online; leave running) |
-| `ensure-notifier [--no-cron-install]` | Provision the host friend-request notifier (auto-runs on dialout; Hermes installs a cron) |
+| `ensure-notifier [--no-cron-install] [--print-prompt] [--ack]` | Provision the host friend-request notifier (auto-runs on dialout; --print-prompt/--ack drive agent-side scheduler migration) |
 | `pair [--host <wss-url>] [--ttl-ms <ms>]` | Mint a pairing code for the hosted browser reader |
 | `sessions list [--host <wss-url>]` | List remembered reader sessions |
 | `sessions revoke [--device <id>] [--host <wss-url>]` | Revoke one device session (or all if no --device) |

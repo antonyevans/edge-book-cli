@@ -16,6 +16,20 @@ export const FRIEND_REQUESTS_CRON_NAME = "Edge Book — friend requests";
 export const DEFAULT_FRIEND_REQUESTS_SCHEDULE = "*/20 * * * *";
 const HERMES_BIN_CANDIDATES = ["/opt/hermes/.venv/bin/hermes"];
 
+// spec-141: version of buildFriendRequestsPrompt for agent-directed migration.
+// 1 = the legacy 0.11.0-pinned prompt; bump whenever the prompt materially
+// changes. Recorded in config.notifier_prompt_ack once the scheduler is
+// confirmed to run this version (mechanical install/update, or explicit
+// `ensure-notifier --ack` after the agent updates its own scheduler tool).
+export const NOTIFIER_PROMPT_VERSION = 2;
+
+// spec-141: is the hermes *shell CLI* present? Where it is, the mechanical
+// spec-139 path (ensureNotifierCron) owns prompt migration; where it is not
+// (agent-tool schedulers), the heartbeat nudge instructs the agent instead.
+export function hermesCliDetected(): boolean {
+  return HERMES_BIN_CANDIDATES.some((p) => existsSync(p));
+}
+
 // Natural-language cron prompt for Hermes. Replies with the Hermes no-reply
 // marker `[SILENT]` when nothing is pending or Edge Book is unavailable, so quiet
 // cycles never ping. The agent's edge-book home is pinned so it reads the right state.

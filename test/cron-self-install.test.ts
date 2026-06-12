@@ -150,3 +150,59 @@ test("greeter cron: name does not collide with the notifier cron name", () => {
   assert.ok(GREETER_CRON_NAME.startsWith("Edge Book — "), "must keep the Edge Book cron name prefix");
   assert.ok(buildGreeterPrompt(HOME).includes(HOME));
 });
+
+// ── spec-141: mechanical install/update auto-acks the prompt version ────────
+
+test("spec-141: ensure-notifier CLI auto-acks on a mechanical install", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { handleCli } = await import("../src/cli.ts");
+  const { EdgeBookStore } = await import("../src/edge-book.ts");
+  const { NOTIFIER_PROMPT_VERSION } = await import("../src/host-cron.ts");
+
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "edge-book-cron-ack-test-"));
+  await handleCli(["init", "--home", home, "--handle", "scout", "--name", "Scout Agent", "--no-greeter"]);
+  const runner = fakeRunner();
+  const result = await handleCli(["ensure-notifier", "--home", home], { hermesRunner: runner });
+  assert.match(result.text, /Installed notifier cron/);
+  assert.equal((await new EdgeBookStore({ home }).config()).notifier_prompt_ack, NOTIFIER_PROMPT_VERSION,
+    "mechanical installed → ack set");
+});
+
+test("spec-141: ensure-notifier CLI auto-acks on a mechanical update (stale prompt recreated)", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { handleCli } = await import("../src/cli.ts");
+  const { EdgeBookStore } = await import("../src/edge-book.ts");
+  const { NOTIFIER_PROMPT_VERSION } = await import("../src/host-cron.ts");
+
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "edge-book-cron-ack-test-"));
+  await handleCli(["init", "--home", home, "--handle", "scout", "--name", "Scout Agent", "--no-greeter"]);
+  const runner = fakeRunner({
+    listing: `some-id  ${FRIEND_REQUESTS_CRON_NAME}  */20 * * * *  telegram`,
+    getPrompt: () => "npm exec -y edge-book@0.11.0 -- friend pending",
+  });
+  const result = await handleCli(["ensure-notifier", "--home", home], { hermesRunner: runner });
+  assert.match(result.text, /recreated/);
+  assert.equal((await new EdgeBookStore({ home }).config()).notifier_prompt_ack, NOTIFIER_PROMPT_VERSION,
+    "mechanical updated → ack set");
+});
+
+test("spec-141: ensure-notifier CLI does not ack when already_present (prompt unverified)", async () => {
+  const fs = await import("node:fs/promises");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const { handleCli } = await import("../src/cli.ts");
+  const { EdgeBookStore } = await import("../src/edge-book.ts");
+
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "edge-book-cron-ack-test-"));
+  await handleCli(["init", "--home", home, "--handle", "scout", "--name", "Scout Agent", "--no-greeter"]);
+  // getPrompt → null: the stored prompt cannot be read, so it may still be stale.
+  const runner = fakeRunner({ listing: `some-id  ${FRIEND_REQUESTS_CRON_NAME}  */20 * * * *  telegram` });
+  const result = await handleCli(["ensure-notifier", "--home", home], { hermesRunner: runner });
+  assert.match(result.text, /already present/);
+  assert.equal((await new EdgeBookStore({ home }).config()).notifier_prompt_ack, undefined,
+    "unverified prompt must not be acked");
+});

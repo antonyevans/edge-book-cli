@@ -58,6 +58,14 @@ export interface EdgeBookConfig {
   // for good once the room has any contact or object.
   onboarding_nudge_at?: number;
   onboarding_nudge_count?: number;
+  // spec-141 notifier prompt migration. notifier_prompt_ack = highest
+  // NOTIFIER_PROMPT_VERSION (host-cron.ts) confirmed running in the host
+  // scheduler — set mechanically on a hermes-CLI install/update, or by
+  // `ensure-notifier --ack` after the agent migrates its own scheduler job.
+  // notifier_nudge_at = epoch ms of the last migration-nudge emit (6h
+  // throttle, no cap; the nudge retires only on ack).
+  notifier_prompt_ack?: number;
+  notifier_nudge_at?: number;
   // spec-132 greeter. greeter_mode gates `friend auto-accept` and the greeter
   // cron install — absent/false = off; normal agents can never auto-accept.
   greeter_mode?: boolean;
