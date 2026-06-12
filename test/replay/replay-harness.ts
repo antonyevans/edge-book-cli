@@ -165,6 +165,12 @@ function validateProvenance(raw: unknown, name: string): void {
   if (needsRef && p.source_type === "manual-craft") {
     fail(name, `provenance.source_type "manual-craft" pairs only with origin "synthetic" — a ${String(p.origin)} fixture has a source class (spec-0044 rule 3)`);
   }
+  // Review hardening: a typoed key (e.g. "source-ref") must not be silently
+  // ignored — unknown keys are rejected so provenance stays exact.
+  const PROVENANCE_KEYS = new Set(["origin", "source_type", "source_ref", "note"]);
+  for (const key of Object.keys(p)) {
+    if (!PROVENANCE_KEYS.has(key)) fail(name, `provenance.${key} is not a recognized provenance field (allowed: ${[...PROVENANCE_KEYS].join(", ")})`);
+  }
 }
 
 // Strict structural validation with errors that name the offending field —
@@ -211,6 +217,13 @@ export function validateFixture(raw: unknown, name = "(inline)"): ReplayFixture 
         }
         if (!CARD_BOOTSTRAP_TYPES.has(String(d.type))) {
           fail(name, `steps[${i}].deliver.card_expires_at only applies to card-bootstrap kinds (${[...CARD_BOOTSTRAP_TYPES].join(" | ")})`);
+        }
+        // Determinism: a near-term card expiry would flip the fixture's outcome
+        // the day it passes (same flake class as expires_at). Allowed values:
+        // already-stale (monotonically safe) or pinned far-future.
+        const cardExp = Date.parse(d.card_expires_at);
+        if (cardExp >= Date.now() && cardExp < EXPIRES_AT_FLOOR) {
+          fail(name, `steps[${i}].deliver.card_expires_at must be already-past (stale-card shape) or pinned >= 2090-01-01 — a near-future value flips the outcome mid-life (got "${d.card_expires_at}")`);
         }
       }
       if (d.tamper !== undefined && d.tamper !== "signature") fail(name, `steps[${i}].deliver.tamper must be "signature" when present`);
