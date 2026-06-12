@@ -99,6 +99,14 @@ export const COMMAND_GROUPS: CommandGroup[] = [
         desc: "Provision the host friend-request notifier (auto-runs on dialout; --print-prompt/--ack drive agent-side scheduler migration)",
       },
       {
+        usage: "self-update [--if-stale] [--dry-run]",
+        desc: "Update this edge-book install to the latest npm release; --if-stale is the cron-safe form (silent no-op when current)",
+      },
+      {
+        usage: "version",
+        desc: "Print the running edge-book version",
+      },
+      {
         usage: "pair [--host <wss-url>] [--ttl-ms <ms>]",
         desc: "Mint a pairing code for the hosted browser reader",
       },

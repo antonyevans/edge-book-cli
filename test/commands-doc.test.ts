@@ -8,7 +8,7 @@ import { COMMAND_GROUPS, renderUsage, renderReadmeTable } from "../src/commands-
 // registry. These are runtime help aliases that print the usage text rather than being
 // documented commands in their own right. A genuinely new user-facing command must be
 // added to COMMAND_GROUPS, not here.
-const UNDOCUMENTED = new Set<string>(["help", "--help", "-h"]);
+const UNDOCUMENTED = new Set<string>(["help", "--help", "-h", "--version", "-v"]); // --version/-v are aliases of the documented `version` command
 
 test("registry is non-empty and every row has usage + desc", () => {
   const rows = COMMAND_GROUPS.flatMap((g) => g.rows);

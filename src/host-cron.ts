@@ -17,11 +17,12 @@ export const DEFAULT_FRIEND_REQUESTS_SCHEDULE = "*/20 * * * *";
 const HERMES_BIN_CANDIDATES = ["/opt/hermes/.venv/bin/hermes"];
 
 // spec-141: version of buildFriendRequestsPrompt for agent-directed migration.
-// 1 = the legacy 0.11.0-pinned prompt; bump whenever the prompt materially
+// 1 = the legacy 0.11.0-pinned prompt; 2 = the pin-free spec-139 prompt;
+// 3 = spec-142 step-0 self-update. Bump whenever the prompt materially
 // changes. Recorded in config.notifier_prompt_ack once the scheduler is
 // confirmed to run this version (mechanical install/update, or explicit
 // `ensure-notifier --ack` after the agent updates its own scheduler tool).
-export const NOTIFIER_PROMPT_VERSION = 2;
+export const NOTIFIER_PROMPT_VERSION = 3;
 
 // spec-141: is the hermes *shell CLI* present? Where it is, the mechanical
 // spec-139 path (ensureNotifierCron) owns prompt migration; where it is not
@@ -38,6 +39,11 @@ export function buildFriendRequestsPrompt(home: string): string {
     "You are the Edge Book friend-request notifier. Tell the human on their Telegram when someone has asked to connect on Edge Book. Hermes delivers your final assistant reply to their chat.",
     "",
     "This runs every 20 minutes; most runs there will be nothing pending. On any such run — and on any error — end your turn with exactly [SILENT] and nothing else. [SILENT] tells Hermes to send no message.",
+    "",
+    "0. Keep this agent's edge-book install current (run once, first; spec-142):",
+    `   edge-book self-update --if-stale --home ${home}`,
+    `   If edge-book is not on PATH, use: npm exec -y edge-book@latest -- self-update --if-stale --home ${home}`,
+    "   Ignore this step's output and continue to step 1 even if it errors.",
     "",
     "1. List new (not-yet-surfaced) requests (run once):",
     `   edge-book friend pending --new --home ${home} --json`,

@@ -173,6 +173,12 @@ export async function updateConfig(store: EdgeBookStore, input: EdgeBookConfig):
   if (input.notifier_nudge_at !== undefined) next.notifier_nudge_at = input.notifier_nudge_at; // spec-141
   if (input.support_inbox !== undefined) next.support_inbox = input.support_inbox; // spec-134 operator opt-in
   if (input.greeter_welcome_object_id !== undefined) next.greeter_welcome_object_id = input.greeter_welcome_object_id;
+  if (input.auto_update !== undefined) next.auto_update = input.auto_update; // spec-142
+  if (input.update_check_at !== undefined) next.update_check_at = input.update_check_at; // spec-142
+  if (input.update_latest_known !== undefined) next.update_latest_known = input.update_latest_known; // spec-142
+  if (input.update_nudge_at !== undefined) next.update_nudge_at = input.update_nudge_at; // spec-142
+  if (input.updated_at !== undefined) next.updated_at = input.updated_at; // spec-142
+  if (input.dialout_respawn_expected !== undefined) next.dialout_respawn_expected = input.dialout_respawn_expected; // spec-142
   await writeJson(store.file(CONFIG_FILE), next);
   return next;
 }

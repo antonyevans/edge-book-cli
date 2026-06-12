@@ -37,6 +37,8 @@ import { NOTIFIER_PROMPT_VERSION, buildFriendRequestsPrompt, defaultHermesRunner
 import { buildPairCompleteNotifyIntent } from "./store-notify.ts";
 import { buildOnboardingNote } from "./onboarding.ts";
 import { logEvent } from "./event-log.ts";
+import { runningVersion, selfUpdate } from "./self-update.ts";
+import { maybeAppendUpdateNudge } from "./update-nudge.ts";
 
 export { DEFAULT_DIALOUT_HOST, EdgeBookDialoutClient };
 export type { CliContext, CliResult } from "./cli-shared.ts";
@@ -61,6 +63,13 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     return { text: usage() };
   }
 
+  // spec-142: --version is the self-update smoke-verify surface — the new
+  // build must answer it with exactly the package version, nothing else.
+  if (command === "version" || command === "--version" || command === "-v") {
+    const version = await runningVersion();
+    return { text: version, json: { version } };
+  }
+
   const identityResult = await handleIdentityCli(command, args, ctx, home, store);
   if (identityResult) return identityResult;
 
@@ -72,7 +81,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   const socialResult = await handleSocialCli(command, args, ctx, home, store);
   if (socialResult) {
     if (command === "friend" && socialAction === "auto-accept") return socialResult;
-    return maybeAppendNotifierNudge(store, command, await maybeAppendOnboardingNudge(store, command, await maybeAppendHandleNudge(store, command, socialResult)));
+    return maybeAppendUpdateNudge(store, command, await maybeAppendNotifierNudge(store, command, await maybeAppendOnboardingNudge(store, command, await maybeAppendHandleNudge(store, command, socialResult))));
   }
 
   const supportResult = await handleSupportCli(command, args, ctx, home, store);
@@ -174,6 +183,15 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       error: `Could not install notifier cron: ${res.detail ?? ""}`,
     };
     return { text: msg[res.status] ?? res.status, json: res };
+  }
+
+  if (command === "self-update") {
+    // spec-142: update THIS install from the npm registry. --if-stale is the
+    // cron-safe form (silent exit 0 when current or policy-gated).
+    const ifStale = takeBoolFlag(args, "--if-stale");
+    const dryRun = takeBoolFlag(args, "--dry-run");
+    const out = await selfUpdate(store, { ...(ctx.selfUpdateDeps ?? {}), ifStale, dryRun });
+    return { text: out.text, json: out };
   }
 
   if (command === "greeter") {
@@ -319,7 +337,7 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
   }
 
   const taxonomyResult = await handleTaxonomyCli(command, args, ctx, store);
-  if (taxonomyResult) return maybeAppendNotifierNudge(store, command, await maybeAppendOnboardingNudge(store, command, await maybeAppendHandleNudge(store, command, taxonomyResult)));
+  if (taxonomyResult) return maybeAppendUpdateNudge(store, command, await maybeAppendNotifierNudge(store, command, await maybeAppendOnboardingNudge(store, command, await maybeAppendHandleNudge(store, command, taxonomyResult))));
 
   const directoryResult = await handleDirectoryCli(command, args, ctx, home, store);
   if (directoryResult) return directoryResult;
