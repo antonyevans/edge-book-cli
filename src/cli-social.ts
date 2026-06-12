@@ -3,15 +3,59 @@
 // privileged messages, escalations, inbox. Command names/flags are FROZEN
 // (npm surface); handleCli in cli.ts stays the only dispatch entry and calls
 // this handler in dispatch order. Returns null when the command is not its own.
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { deliverToEndpoint, deliverToPeer, deliverViaMailboxRecorded, parseHost, readEnvelope, relayBaseFromHost, requireArg, takeBoolFlag, takeFlag, takeRepeated } from "./cli-shared.ts";
 import type { CliContext, CliResult } from "./cli-shared.ts";
 import { loadCard, EdgeBookError, EdgeBookStore } from "./edge-book.ts";
-import type { FriendRequestBody } from "./edge-book.ts";
+import type { AgentCard, FriendRequestBody } from "./edge-book.ts";
 import { postRelayEnvelope, pullRelayEnvelopes } from "./http-relay.ts";
 import { resolveTarget, defaultProviders, listCandidates, getCandidate, markCandidateApproved } from "./resolver.ts";
+import type { ResolverProvider } from "./resolver.ts";
 import { runGreeterPass } from "./store-greeter.ts";
 import fs from "node:fs/promises";
+
+// spec-138: targets that loadCard can handle directly — a URL, an invite
+// deeplink, or a file that actually exists. Everything else (bare handles,
+// typos, missing paths) routes through the resolver instead of dying on a
+// raw fs ENOENT inside loadCard.
+function isCardLocation(target: string): boolean {
+  if (/^https?:\/\//.test(target) || target.startsWith("edgebook:invite:")) return true;
+  if (target.startsWith("file://")) return true;
+  return existsSync(path.resolve(target));
+}
+
+const notResolvable = (target: string) =>
+  new EdgeBookError("target_not_resolvable", `could not resolve '${target}' — share your invite link instead (card invite)`);
+
+// spec-138: resolve a friend-request target to a verified Agent Card through
+// the same pipeline as `resolve`, so the canonical `resolve <handle>` →
+// `friend request <handle> --deliver` sequence works. A non-resolvable target
+// is a domain error with a next action, never an fs error. Exported for tests.
+export async function resolveFriendRequestCard(store: EdgeBookStore, target: string, providers: ResolverProvider[]): Promise<AgentCard> {
+  if (isCardLocation(target)) return loadCard(target);
+  let result;
+  try {
+    result = await resolveTarget(store, target, { providers });
+  } catch (error) {
+    // A path-shaped target that does not exist must never surface a raw ENOENT.
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") throw notResolvable(target);
+    throw error;
+  }
+  if (result.status === "resolved") {
+    if (result.card) return result.card;
+    // Local-contact resolution carries no card — re-verify via the stored card_url.
+    const cardUrl = result.agent_id ? (await store.contacts())[result.agent_id]?.card_url : undefined;
+    if (cardUrl) return loadCard(cardUrl);
+    throw notResolvable(target);
+  }
+  if (result.status === "approval_required" || result.status === "candidates") {
+    const first = result.candidates?.[0];
+    throw new EdgeBookError("approval_required",
+      `'${target}' matched an unverified candidate — run: candidates list   then: friend request ${first?.candidate_id ?? "<candidate-id>"}`);
+  }
+  throw notResolvable(target);
+}
 
 export async function handleSocialCli(command: string, args: string[], ctx: CliContext, home: string | undefined, store: EdgeBookStore): Promise<CliResult | null> {
   if (command === "resolve") {
@@ -37,6 +81,9 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
     const action = args.shift();
     if (action === "request") {
       const deliver = takeBoolFlag(args, "--deliver");
+      // Parse --host up front (it can sit anywhere in args): the resolver needs
+      // the relay base, and the mailbox fallback below reuses the same host.
+      const hostUrl = parseHost(args, ctx);
       const rawTarget = requireArg(args.shift(), "card-path-url-or-candidate");
       // Parse an embedded invite code from `edgebook:invite:<b64>#code=<code>`.
       let inviteCode = "";
@@ -51,7 +98,12 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
       if (candidate && !candidate.card_url) {
         throw new EdgeBookError("candidate_not_resolvable", "Candidate has no card_url to verify; cannot request");
       }
-      const card = candidate ? await loadCard(candidate.card_url!) : await loadCard(target);
+      // spec-138: non-candidate targets route through the resolver pipeline
+      // (card locations load directly; handles hit the registry; misses are
+      // a target_not_resolvable domain error, never a raw ENOENT).
+      const card = candidate
+        ? await loadCard(candidate.card_url!)
+        : await resolveFriendRequestCard(store, target, defaultProviders(relayBaseFromHost(hostUrl)));
       const envelope = await store.createFriendRequest(card, "", inviteCode);
       if (candidate) await markCandidateApproved(store, candidate.candidate_id, card.agent_id);
       if (deliver) {
@@ -63,7 +115,6 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
           return { text: `Queued friend_request via relay ${relay}`, json: envelope };
         }
         // Dial-out agent (no inbound endpoint): deliver over the host mailbox.
-        const hostUrl = parseHost(args, ctx);
         const outcome = await deliverViaMailboxRecorded(envelope, { home, host: hostUrl, socketFactory: ctx.socketFactory },
           (id) => `Delivered friend_request to ${card.agent_id} over the mailbox (host id ${id})`);
         return { text: outcome.text, json: envelope };
