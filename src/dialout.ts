@@ -23,27 +23,18 @@ import type { PairCompleteResult } from "./dialout-pair.ts";
 import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "./edge-book.ts";
 import { logEvent, eventErrorCode } from "./event-log.ts";
 import { gateHostFrame } from "./frame-validate.ts";
+import { createUpdateDriftMonitor } from "./update-drift.ts";
+import type { UpdateDriftMonitor } from "./update-drift.ts";
 
 export const DEFAULT_DIALOUT_HOST = "wss://edge-book-host.fly.dev/agent/ws";
 const DEFAULT_HEARTBEAT_MS = 25_000;
 const DEFAULT_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 
-export interface SessionsRevokeAck {
-  type: "sessions_revoke_ok";
-  request_id?: string;
-  channel_id?: string;
-}
-
-// Per-device session management (ea-claude-057).
-export interface DeviceInfo {
-  device_id: string;
-  label: string;
-  created_at: number;
-  last_seen_at: number;
-}
-export interface SessionsListAck { type: "sessions_list_ok"; request_id?: string; devices?: DeviceInfo[] }
-export interface SessionRevokeOneAck { type: "session_revoke_one_ok"; request_id?: string; device_id?: string; revoked?: boolean }
+// Frame/ack shapes live in dialout-frames.ts (spec-142 size split);
+// re-exported here so the package's public surface is unchanged.
+export type { DeviceInfo, MailboxDeliverFrame, MailboxSendAck, MailboxStatusEntry, SessionRevokeOneAck, SessionsListAck, SessionsRevokeAck } from "./dialout-frames.ts";
+import type { MailboxDeliverFrame, MailboxSendAck, MailboxStatusEntry, SessionRevokeOneAck, SessionsListAck, SessionsRevokeAck, DeviceInfo } from "./dialout-frames.ts";
 
 export interface DialoutSocket {
   readyState?: number;
@@ -70,19 +61,10 @@ export interface DialoutClientOptions {
   // revoke), then acks the host. Set autoApplyEnvelopes=false to handle manually.
   autoApplyEnvelopes?: boolean;
   onEnvelope?: (envelope: MessageEnvelope, result: { applied: boolean; error?: string }) => void | Promise<void>;
+  // spec-142: injectable version-drift monitor (tests only); defaults to the
+  // real one — drift check on every (re)connect + a 6h registry/drift timer.
+  driftMonitor?: UpdateDriftMonitor;
 }
-
-// A delivered mailbox message (Contract 1, mirrors edge-book-host).
-export interface MailboxDeliverFrame { type: "mailbox_deliver"; id: string; from: string; blob_b64: string; ts: number }
-
-// Resolved mailbox_send acknowledgement (spec-097). recipient_live reports
-// whether any live channel claimed the recipient at enqueue time; absent when
-// the host predates receipts.
-export interface MailboxSendAck { id: string; recipient_live?: boolean }
-
-// One entry from mailbox_status_ok (spec-097). queued_ms/recipient_live are
-// present only for queued/delivered (key omitted otherwise).
-export interface MailboxStatusEntry { id: string; state: "queued" | "delivered" | "acked" | "unknown"; queued_ms?: number; recipient_live?: boolean }
 
 // Decide whether the agent should claim a handle with the relay on connect.
 // Skip the default placeholder and any handle that isn't a valid slug — the
@@ -106,7 +88,8 @@ function addSocketListener(socket: DialoutSocket, event: "open" | "message" | "c
 }
 
 export class EdgeBookDialoutClient {
-  private options: Required<Omit<DialoutClientOptions, "home">> & { home?: string };
+  private options: Required<Omit<DialoutClientOptions, "home" | "driftMonitor">> & { home?: string };
+  private readonly driftMonitor: UpdateDriftMonitor;
   private store: EdgeBookStore;
   private socket?: DialoutSocket;
   private localApi?: LocalApi;
@@ -150,6 +133,9 @@ export class EdgeBookDialoutClient {
       home: options.home
     };
     this.store = new EdgeBookStore({ home: options.home });
+    // spec-142: capture the running version now (before any self-update can
+    // rewrite package.json) so reconnects can detect on-disk drift.
+    this.driftMonitor = options.driftMonitor ?? createUpdateDriftMonitor(this.store);
     this.currentBackoff = this.options.backoffMs;
   }
 
@@ -160,6 +146,7 @@ export class EdgeBookDialoutClient {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.driftMonitor.stop();
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);
     this.socket?.close();
@@ -429,6 +416,11 @@ export class EdgeBookDialoutClient {
       this.opened?.resolve();
       this.opened = undefined;
       void logEvent(this.store, "dialout.connected", { host: this.options.host });
+      // spec-142: on every (re)connect, check whether a self-update replaced
+      // the install on disk; arm the 6h registry+drift timer. Best-effort —
+      // the monitor swallows its own errors.
+      void this.driftMonitor.onConnect();
+      this.driftMonitor.start();
       // Best-effort: auto-claim a real handle so peers can find this agent.
       // A claim failure (or default/invalid handle) never breaks the connection
       // or mail delivery — mail still routes by DID regardless.
@@ -537,6 +529,7 @@ export class EdgeBookDialoutClient {
 
   private async standDown(frame: { type?: string; reason?: string; idle_ms?: number }): Promise<void> {
     this.stopped = true;
+    this.driftMonitor.stop();
     await logEvent(this.store, "dialout.stand_down", { host: this.options.host, reason: frame.reason, idle_ms: frame.idle_ms });
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.heartbeat) clearInterval(this.heartbeat);

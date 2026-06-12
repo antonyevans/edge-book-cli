@@ -131,3 +131,11 @@ test("nudge composes with the onboarding and handle nudges in one output", async
   assert.ok(result.text.includes("Onboarding incomplete"), "onboarding nudge must still fire");
   assert.ok(result.text.includes(NUDGE_MARKER), "migration nudge must fire in the same output");
 });
+
+test("spec-142: an ack at v2 re-nudges under prompt v3 (the rollout vehicle)", async () => {
+  const home = await initHome();
+  const store = new EdgeBookStore({ home });
+  await store.updateConfig({ notifier_prompt_ack: 2 });
+  const result = await maybeAppendNotifierNudge(store, "friend", { text: "x" }, Date.now(), () => false);
+  assert.ok(result.text.includes(NUDGE_MARKER), "ack below NOTIFIER_PROMPT_VERSION must nudge again");
+});

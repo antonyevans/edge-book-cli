@@ -9,6 +9,7 @@ import type { DialoutSocket } from "./dialout.ts";
 import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "./edge-book.ts";
 import type { HermesRunner } from "./host-cron.ts";
 import { postEnvelope, postRelayEnvelope } from "./http-relay.ts";
+import type { SelfUpdateDeps } from "./self-update.ts";
 import { recordOutboxEntry } from "./store-outbox.ts";
 
 export interface CliContext {
@@ -19,6 +20,9 @@ export interface CliContext {
   // spec-141: injectable host scheduler runner (tests only); cli.ts falls
   // back to defaultHermesRunner(). Additive — frozen surface unchanged.
   hermesRunner?: HermesRunner;
+  // spec-142: injectable self-update deps (tests only — mocked registry +
+  // npm install). Additive — frozen surface unchanged.
+  selfUpdateDeps?: SelfUpdateDeps;
 }
 
 export interface CliResult {

@@ -76,6 +76,19 @@ export interface EdgeBookConfig {
   // Set once by the greeter's first welcome pass (store-greeter.ts): the single
   // shared welcome object every newly accepted friend is granted to read.
   greeter_welcome_object_id?: string;
+  // spec-142 self-update. auto_update governs how a stale install is handled:
+  // "auto" (the default when unset) = the notifier cron's `self-update
+  // --if-stale` applies it and the dial-out exits 75 for supervisor respawn;
+  // "notify" = a 24h-throttled heartbeat nudge asks the agent to run
+  // self-update; "off" = kill switch, no update surface fires.
+  auto_update?: "auto" | "notify" | "off";
+  update_check_at?: number;     // epoch ms of the last registry check (24h throttle)
+  update_latest_known?: string; // latest version the registry reported (cache)
+  update_nudge_at?: number;     // epoch ms of the last update-nudge emit (24h throttle)
+  updated_at?: number;          // epoch ms of the last successful self-update
+  // Set false when nothing supervises/respawns the dial-out: version drift is
+  // then logged but the process never exits 75 on its own.
+  dialout_respawn_expected?: boolean;
 }
 
 export interface LocalIdentity {

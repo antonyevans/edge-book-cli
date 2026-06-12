@@ -206,3 +206,35 @@ test("spec-141: ensure-notifier CLI does not ack when already_present (prompt un
   assert.equal((await new EdgeBookStore({ home }).config()).notifier_prompt_ack, undefined,
     "unverified prompt must not be acked");
 });
+
+// ── spec-142: notifier prompt v3 — step-0 self-update ───────────────────────
+
+test("spec-142: NOTIFIER_PROMPT_VERSION is 3 (prompt gained the self-update step)", async () => {
+  const { NOTIFIER_PROMPT_VERSION } = await import("../src/host-cron.ts");
+  assert.equal(NOTIFIER_PROMPT_VERSION, 3);
+});
+
+test("spec-142: prompt v3 carries the step-0 self-update line with the npm exec fallback", () => {
+  const p = buildFriendRequestsPrompt(HOME);
+  assert.ok(p.includes(`edge-book self-update --if-stale --home ${HOME}`), "step 0 runs the cron-safe self-update");
+  assert.ok(p.includes(`npm exec -y edge-book@latest -- self-update --if-stale --home ${HOME}`), "fallback line when not on PATH");
+  const selfUpdateAt = p.indexOf("self-update");
+  const pendingAt = p.indexOf("friend pending");
+  assert.ok(selfUpdateAt !== -1 && selfUpdateAt < pendingAt, "self-update runs before the pending check");
+});
+
+test("spec-142: the spec-141 machinery treats a stored v2 prompt as drift (recreate fires)", () => {
+  // Reconstruct a v2-era prompt: the current prompt minus every self-update line.
+  const v2 = buildFriendRequestsPrompt(HOME)
+    .split("\n")
+    .filter((line) => !line.includes("self-update") && !line.includes("Keep this agent current"))
+    .join("\n");
+  const runner = fakeRunner({
+    listing: `some-id  ${FRIEND_REQUESTS_CRON_NAME}  */20 * * * *  telegram`,
+    getPrompt: () => v2,
+  });
+  const r = ensureNotifierCron({ runner, home: HOME });
+  assert.equal(r.status, "updated", "v2 → v3 is prompt drift: delete + recreate");
+  assert.deepEqual(runner.removed, [FRIEND_REQUESTS_CRON_NAME]);
+  assert.ok(runner.created[0]![3]!.includes("self-update --if-stale"), "recreated with the v3 prompt");
+});
