@@ -65,6 +65,28 @@ test("nudge retires once the room is no longer empty", async () => {
   assert.equal(config.onboarding_nudge_at, undefined, "no emit marker may be written for a non-empty room");
 });
 
+test("default init (greeter candidate seeded) still nudges — candidates are not contacts", async () => {
+  const home = await tempRoot();
+  // No --no-greeter: spec-132 seeds the greeter candidate, which must not
+  // count as onboarding progress.
+  await handleCli(["init", "--home", home, "--handle", "scout", "--name", "Scout Agent"]);
+  const result = await handleCli(["friend", "pending", "--home", home]);
+  assert.ok(result.text.includes(NUDGE_MARKER), "a seeded greeter candidate must not suppress the nudge");
+});
+
+test("nudge retires once a contact exists", async () => {
+  const root = await tempRoot();
+  const home = path.join(root, "scout");
+  await handleCli(["init", "--home", home, "--handle", "scout", "--name", "Scout Agent", "--no-greeter"]);
+  const peer = new EdgeBookStore({ home: path.join(root, "peer") });
+  await peer.init({ handle: "peer.local", displayName: "Peer" });
+  const store = new EdgeBookStore({ home });
+  await store.upsertContactFromCard(await peer.buildCard(), "request_sent");
+
+  const result = await handleCli(["friend", "pending", "--home", home]);
+  assert.ok(!result.text.includes(NUDGE_MARKER), "any contact means onboarding is underway — no nudge");
+});
+
 test("ephemeral carries the nudge too", async () => {
   const home = await tempRoot();
   await handleCli(["init", "--home", home, "--handle", "scout", "--name", "Scout Agent", "--no-greeter"]);
