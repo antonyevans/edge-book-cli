@@ -24,12 +24,14 @@ import os from "node:os";
 import path from "node:path";
 import { EdgeBookDialoutClient } from "../../src/dialout.ts";
 import { EdgeBookStore } from "../../src/edge-book.ts";
-import type { LocalIdentity, MessageEnvelope, RelationshipState } from "../../src/edge-book.ts";
+import type { AgentCard, LocalIdentity, MessageEnvelope, RelationshipState } from "../../src/edge-book.ts";
 import { readEvents } from "../../src/event-log.ts";
 import type { ProtocolEvent } from "../../src/event-log.ts";
-import { relationshipId, signPayload, stableIdFromPublicKey } from "../../src/crypto.ts";
+import { canonicalize, relationshipId, signPayload, stableIdFromPublicKey } from "../../src/crypto.ts";
+import { deliverViaMailboxRecorded } from "../../src/cli-shared.ts";
+import { readOutbox } from "../../src/store-outbox.ts";
 
-export const REPLAY_FIXTURE_SCHEMA = "edge-book-replay-fixture/0.1";
+export const REPLAY_FIXTURE_SCHEMA = "edge-book-replay-fixture/0.2";
 
 const ENVELOPE_TYPES = new Set<MessageEnvelope["type"]>([
   "friend_request", "friend_response", "privileged_message", "ack", "error",
@@ -37,7 +39,17 @@ const ENVELOPE_TYPES = new Set<MessageEnvelope["type"]>([
   "escalation", "escalation_response", "support_bundle",
 ]);
 const OUTCOMES = new Set(["accepted", "dedup_hit", "signature_failed", "rejected"]);
-const LOCAL_ACTIONS = new Set(["accept_friend", "reject_friend"]);
+const LOCAL_ACTIONS = new Set(["accept_friend", "reject_friend", "send_friend_request"]);
+// Provenance vocabulary — spec-0044/spec-0045, verbatim. The fixture validator
+// is the deterministic in-repo backstop for the standing rule.
+const PROVENANCE_ORIGINS = new Set(["real", "synthetic", "synthetic-promoted"]);
+const PROVENANCE_SOURCE_TYPES = new Set(["capa", "judge-log", "trace", "incident-note", "manual-craft"]);
+// Card-bootstrap envelope kinds: the only ones that carry the sender's card in
+// the body, so the only ones where card_expires_at is meaningful.
+const CARD_BOOTSTRAP_TYPES = new Set(["friend_request", "friend_response", "support_bundle"]);
+// Determinism floor for envelope expiry (spec-135 §B.5): anything between
+// "authoring time" and "far future" can flip mid-suite-lifetime.
+const EXPIRES_AT_FLOOR = Date.parse("2090-01-01T00:00:00.000Z");
 
 export interface SyntheticIdentitySpec {
   seed: string;          // 64 hex chars (32-byte ed25519 seed) — SYNTHETIC only
@@ -55,7 +67,8 @@ export interface StepExpect {
   outcome?: "accepted" | "dedup_hit" | "signature_failed" | "rejected";
   error?: string;        // substring of the apply error (rejected outcomes)
   events?: ExpectedEvent[];
-  relationship_state?: RelationshipState; // of the step's peer in the recipient store
+  relationship_state?: RelationshipState | "none"; // "none" = no contact may exist
+  outbox?: { envelope_type: string; recipient_live?: boolean }; // spec-097 ledger entry
 }
 
 export interface DeliverStep {
@@ -68,13 +81,30 @@ export interface DeliverStep {
     expires_at: string;  // pin far-future so replays stay deterministic
     body?: Record<string, unknown>; // synthetic body; card auto-embedded for bootstrap kinds
     tamper?: "signature"; // mutate the payload AFTER signing → signature_failed
+    // Override the auto-embedded card's expires_at (card-bootstrap kinds only);
+    // the card is re-hashed and re-signed by the synthetic sender, so a PAST
+    // value reproduces a stale-but-validly-signed card (spec-096 §C shape).
+    card_expires_at?: string;
   };
   expect: StepExpect;
 }
 
 export interface LocalStep {
-  local: { action: "accept_friend" | "reject_friend"; peer: string };
+  local: {
+    action: "accept_friend" | "reject_friend" | "send_friend_request";
+    peer: string;
+    // send_friend_request only: liveness the relay reports in mailbox_send_ok
+    // (spec-097). false = the June-9 "queued to a DID no channel claims" shape;
+    // omitted = pre-receipts host (no recipient_live in the ack).
+    recipient_live?: boolean;
+  };
   expect?: StepExpect;
+}
+
+export interface ProvenanceSpec {
+  origin: "real" | "synthetic" | "synthetic-promoted";
+  source_type: "capa" | "judge-log" | "trace" | "incident-note" | "manual-craft";
+  source_ref?: string;   // required iff origin is real | synthetic-promoted
 }
 
 export type ReplayStep = DeliverStep | LocalStep;
@@ -83,8 +113,11 @@ export interface ReplayFixture {
   schema: typeof REPLAY_FIXTURE_SCHEMA;
   title: string;
   description?: string;
-  // Provenance of a captured failure (doctor bundle reference, original
-  // trace_id). Informational only — never used to reconstruct real keys.
+  // Mandatory provenance (spec-0045 rule 2): where this fixture came from,
+  // in spec-0044's controlled vocabulary. Enforced by validateFixture.
+  provenance: ProvenanceSpec;
+  // Free-form capture context (doctor bundle reference, original trace_id).
+  // Informational only — never used to reconstruct real keys.
   source?: { doctor_bundle?: string; trace_id?: string; note?: string };
   identities: Record<string, SyntheticIdentitySpec>;
   recipient?: { handle?: string; display_name?: string; config?: Record<string, unknown> };
@@ -108,6 +141,38 @@ function fail(name: string, message: string): never {
   throw new Error(`replay fixture ${name}: ${message}`);
 }
 
+// spec-0045 rule 2 (vocabulary verbatim from spec-0044): every fixture carries
+// provenance; real/synthetic-promoted need a resolvable source_ref and can
+// never be manual-craft (a real incident has a source class).
+function validateProvenance(raw: unknown, name: string): void {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    fail(name, "provenance (object with origin/source_type) is required — spec-0045: every fixture is tagged with where it came from");
+  }
+  const p = raw as Record<string, unknown>;
+  if (!PROVENANCE_ORIGINS.has(String(p.origin))) {
+    fail(name, `provenance.origin must be one of ${[...PROVENANCE_ORIGINS].join(" | ")} (got ${JSON.stringify(p.origin)})`);
+  }
+  if (!PROVENANCE_SOURCE_TYPES.has(String(p.source_type))) {
+    fail(name, `provenance.source_type must be one of ${[...PROVENANCE_SOURCE_TYPES].join(" | ")} (got ${JSON.stringify(p.source_type)})`);
+  }
+  const needsRef = p.origin === "real" || p.origin === "synthetic-promoted";
+  if (p.source_ref !== undefined && (typeof p.source_ref !== "string" || !p.source_ref)) {
+    fail(name, "provenance.source_ref must be a non-empty string when present");
+  }
+  if (needsRef && typeof p.source_ref !== "string") {
+    fail(name, `provenance.source_ref (trace id, doctor-bundle id, or EA task id) is required when origin is "${String(p.origin)}"`);
+  }
+  if (needsRef && p.source_type === "manual-craft") {
+    fail(name, `provenance.source_type "manual-craft" pairs only with origin "synthetic" — a ${String(p.origin)} fixture has a source class (spec-0044 rule 3)`);
+  }
+  // Review hardening: a typoed key (e.g. "source-ref") must not be silently
+  // ignored — unknown keys are rejected so provenance stays exact.
+  const PROVENANCE_KEYS = new Set(["origin", "source_type", "source_ref", "note"]);
+  for (const key of Object.keys(p)) {
+    if (!PROVENANCE_KEYS.has(key)) fail(name, `provenance.${key} is not a recognized provenance field (allowed: ${[...PROVENANCE_KEYS].join(", ")})`);
+  }
+}
+
 // Strict structural validation with errors that name the offending field —
 // a fixture is hand-edited by an operator, so "bad fixture" must be obvious.
 export function validateFixture(raw: unknown, name = "(inline)"): ReplayFixture {
@@ -115,6 +180,7 @@ export function validateFixture(raw: unknown, name = "(inline)"): ReplayFixture 
   const f = raw as Record<string, unknown>;
   if (f.schema !== REPLAY_FIXTURE_SCHEMA) fail(name, `schema must be "${REPLAY_FIXTURE_SCHEMA}" (got ${JSON.stringify(f.schema)})`);
   if (typeof f.title !== "string" || !f.title) fail(name, "title (string) is required");
+  validateProvenance(f.provenance, name);
   if (!f.identities || typeof f.identities !== "object" || Array.isArray(f.identities)) fail(name, "identities must be an object map");
   for (const [id, spec] of Object.entries(f.identities as Record<string, unknown>)) {
     const s = spec as Record<string, unknown>;
@@ -136,16 +202,45 @@ export function validateFixture(raw: unknown, name = "(inline)"): ReplayFixture 
       for (const field of ["message_id", "trace_id", "created_at", "expires_at"] as const) {
         if (typeof d[field] !== "string" || !d[field]) fail(name, `steps[${i}].deliver.${field} (string) is required`);
       }
+      // ea-claude-141 follow-up: timestamps must parse, and expires_at must be
+      // pinned far-future — a near-term expiry flips the fixture's outcome the
+      // day it passes, which is exactly the flake quarantine exists to prevent.
+      for (const field of ["created_at", "expires_at"] as const) {
+        if (!Number.isFinite(Date.parse(String(d[field])))) fail(name, `steps[${i}].deliver.${field} "${String(d[field])}" is not a parseable date`);
+      }
+      if (Date.parse(String(d.expires_at)) < EXPIRES_AT_FLOOR) {
+        fail(name, `steps[${i}].deliver.expires_at must be pinned far-future (>= 2090-01-01) so replays stay deterministic — got "${String(d.expires_at)}"`);
+      }
+      if (d.card_expires_at !== undefined) {
+        if (typeof d.card_expires_at !== "string" || !Number.isFinite(Date.parse(d.card_expires_at))) {
+          fail(name, `steps[${i}].deliver.card_expires_at must be a parseable date string`);
+        }
+        if (!CARD_BOOTSTRAP_TYPES.has(String(d.type))) {
+          fail(name, `steps[${i}].deliver.card_expires_at only applies to card-bootstrap kinds (${[...CARD_BOOTSTRAP_TYPES].join(" | ")})`);
+        }
+        // Determinism: a near-term card expiry would flip the fixture's outcome
+        // the day it passes (same flake class as expires_at). Allowed values:
+        // already-stale (monotonically safe) or pinned far-future.
+        const cardExp = Date.parse(d.card_expires_at);
+        if (cardExp >= Date.now() && cardExp < EXPIRES_AT_FLOOR) {
+          fail(name, `steps[${i}].deliver.card_expires_at must be already-past (stale-card shape) or pinned >= 2090-01-01 — a near-future value flips the outcome mid-life (got "${d.card_expires_at}")`);
+        }
+      }
       if (d.tamper !== undefined && d.tamper !== "signature") fail(name, `steps[${i}].deliver.tamper must be "signature" when present`);
       const expect = step.expect as Record<string, unknown> | undefined;
       if (!expect || typeof expect !== "object") fail(name, `steps[${i}].expect is required for deliver steps`);
       if (typeof expect.outcome !== "string" || !OUTCOMES.has(expect.outcome)) {
         fail(name, `steps[${i}].expect.outcome must be one of ${[...OUTCOMES].join(" | ")}`);
       }
+      validateExpectOutbox(expect, name, i);
     } else if (step.local) {
       const l = step.local as Record<string, unknown>;
       if (!LOCAL_ACTIONS.has(String(l.action))) fail(name, `steps[${i}].local.action must be one of ${[...LOCAL_ACTIONS].join(" | ")}`);
       if (!identityNames.has(String(l.peer))) fail(name, `steps[${i}].local.peer "${String(l.peer)}" is not in identities`);
+      if (l.recipient_live !== undefined && (typeof l.recipient_live !== "boolean" || l.action !== "send_friend_request")) {
+        fail(name, `steps[${i}].local.recipient_live must be a boolean and only applies to send_friend_request`);
+      }
+      validateExpectOutbox(step.expect as Record<string, unknown> | undefined, name, i);
     } else {
       fail(name, `steps[${i}] must have either "deliver" or "local"`);
     }
@@ -163,6 +258,17 @@ export function validateFixture(raw: unknown, name = "(inline)"): ReplayFixture 
   return raw as ReplayFixture;
 }
 
+function validateExpectOutbox(expect: Record<string, unknown> | undefined, name: string, i: number): void {
+  if (!expect || expect.outbox === undefined) return;
+  const o = expect.outbox as Record<string, unknown>;
+  if (!o || typeof o !== "object" || Array.isArray(o) || typeof o.envelope_type !== "string" || !o.envelope_type) {
+    fail(name, `steps[${i}].expect.outbox must be an object with envelope_type (string)`);
+  }
+  if (o.recipient_live !== undefined && typeof o.recipient_live !== "boolean") {
+    fail(name, `steps[${i}].expect.outbox.recipient_live must be a boolean when present`);
+  }
+}
+
 // Deterministic ed25519 keypair from a 32-byte seed: PKCS8 DER for ed25519 is
 // a fixed 16-byte prefix + the raw seed (RFC 8410).
 const ED25519_PKCS8_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
@@ -178,15 +284,24 @@ export function keyPairFromSeed(seedHex: string): { public_key_pem: string; priv
 
 // FakeSocket relay seam (pattern: test/dialout-friend-relay.test.ts) — acks
 // hello + mailbox_send, and lets the harness inject mailbox_deliver frames.
-class FakeSocket {
+export class FakeSocket {
   sent: Record<string, unknown>[] = [];
   listeners: Record<string, Array<(event?: unknown) => void>> = {};
   readyState = 1;
+  // recipientLive controls the spec-097 receipts field on mailbox_send acks:
+  // undefined reproduces a pre-receipts host (field absent from the ack).
+  private recipientLive?: boolean;
+  constructor(recipientLive?: boolean) { this.recipientLive = recipientLive; }
   send(data: string): void {
     const frame = JSON.parse(data) as Record<string, unknown>;
     this.sent.push(frame);
     if (frame.type === "hello") queueMicrotask(() => this.receive({ type: "hello_ok", channel_id: "replay-ch", server_time: new Date().toISOString() }));
-    if (frame.type === "mailbox_send") queueMicrotask(() => this.receive({ type: "mailbox_send_ok", request_id: frame.request_id, id: `replay-relay-${this.sent.length}` }));
+    if (frame.type === "mailbox_send") {
+      queueMicrotask(() => this.receive({
+        type: "mailbox_send_ok", request_id: frame.request_id, id: `replay-relay-${this.sent.length}`,
+        ...(this.recipientLive === undefined ? {} : { recipient_live: this.recipientLive }),
+      }));
+    }
   }
   close(): void { this.emit("close"); }
   addEventListener(event: string, handler: (event?: unknown) => void): void { (this.listeners[event] ||= []).push(handler); }
@@ -216,14 +331,27 @@ async function materializeSender(root: string, name: string, spec: SyntheticIden
   return { store, identity };
 }
 
+// Re-stamp a synthetic card's expires_at and re-hash + re-sign it with the
+// synthetic sender key (mirrors buildCard's hash/sign order). Produces a
+// STALE but validly-signed card — the June-9 frozen-invite-snapshot shape.
+function restampCardExpiry(card: AgentCard, expiresAt: string, privateKeyPem: string): AgentCard {
+  const { card_hash: _hash, signature: _sig, ...unsigned } = card;
+  const stale = { ...unsigned, expires_at: expiresAt };
+  const card_hash = crypto.createHash("sha256").update(canonicalize(stale)).digest("base64url");
+  const withHash = { ...stale, card_hash };
+  return { ...withHash, signature: signPayload(withHash, privateKeyPem) } as AgentCard;
+}
+
 async function buildStepEnvelope(step: DeliverStep, sender: MaterializedSender, recipientId: string): Promise<MessageEnvelope> {
   const d = step.deliver;
   let body: Record<string, unknown> = { ...(d.body ?? {}) };
   // Stranger-bootstrap kinds must carry the sender's card (verifyEnvelope
   // resolves the key from it before any contact exists). Auto-embed the
   // synthetic card; fixtures only supply the human-meaningful body fields.
-  if ((d.type === "friend_request" || d.type === "friend_response" || d.type === "support_bundle") && !("card" in body)) {
-    body = { note: "", ...body, card: await sender.store.writeCard() };
+  if (CARD_BOOTSTRAP_TYPES.has(d.type) && !("card" in body)) {
+    let card = await sender.store.writeCard();
+    if (d.card_expires_at) card = restampCardExpiry(card, d.card_expires_at, sender.identity.private_key_pem);
+    body = { note: "", ...body, card };
   }
   const unsigned: Omit<MessageEnvelope, "signature"> = {
     message_id: d.message_id,
@@ -327,14 +455,34 @@ export async function runReplayFixture(fixture: ReplayFixture): Promise<ReplayRe
         }
         assertExpectedEvents(fixture.title, index, step.expect.events ?? [], events, step.deliver.trace_id);
         await assertRelationship(fixture.title, index, recipient, sender.identity.agent_id, step.expect.relationship_state);
+        await assertOutbox(fixture.title, index, recipient, step.expect.outbox);
       } else if ("local" in step && step.local) {
         const peer = senders.get(step.local.peer)!;
-        if (step.local.action === "accept_friend") await recipient.acceptFriend(peer.identity.agent_id);
-        else await recipient.rejectFriend(peer.identity.agent_id);
+        if (step.local.action === "accept_friend") {
+          await recipient.acceptFriend(peer.identity.agent_id);
+        } else if (step.local.action === "reject_friend") {
+          await recipient.rejectFriend(peer.identity.agent_id);
+        } else {
+          // send_friend_request: the OUTBOUND half of the production path —
+          // createFriendRequest → transient dial-out → mailbox_send → spec-097
+          // outbox ledger recording. The fixture controls the relay's
+          // recipient_live answer (false = June-9 stale-DID shape).
+          const live = step.local.recipient_live;
+          await deliverViaMailboxRecorded(
+            await recipient.createFriendRequest(await peer.store.writeCard(), "synthetic reproduction"),
+            {
+              home: recipient.home,
+              host: "ws://replay.fixture.test/agent",
+              socketFactory: (() => { const s = new FakeSocket(live); queueMicrotask(() => s.emit("open")); return s; }) as never,
+            },
+            (id) => `legacy ack ${id}`,
+          );
+        }
         transcript.push({ index, kind: step.local.action, outcome: "applied" });
         const events = await readEvents(recipient);
         assertExpectedEvents(fixture.title, index, step.expect?.events ?? [], events);
         await assertRelationship(fixture.title, index, recipient, peer.identity.agent_id, step.expect?.relationship_state);
+        await assertOutbox(fixture.title, index, recipient, step.expect?.outbox);
       }
     }
     return { title: fixture.title, steps: transcript, events: await readEvents(recipient) };
@@ -344,11 +492,28 @@ export async function runReplayFixture(fixture: ReplayFixture): Promise<ReplayRe
   }
 }
 
-async function assertRelationship(title: string, index: number, recipient: EdgeBookStore, peerAgentId: string, expected?: RelationshipState): Promise<void> {
+async function assertRelationship(title: string, index: number, recipient: EdgeBookStore, peerAgentId: string, expected?: RelationshipState | "none"): Promise<void> {
   if (!expected) return;
   const state = (await recipient.contacts())[peerAgentId]?.relationship_state;
+  if (expected === "none") {
+    // A rejected envelope must leave no trace: no contact record at all.
+    if (state !== undefined) throw new Error(`${title} steps[${index}]: expected NO contact for peer, got relationship_state=${String(state)}`);
+    return;
+  }
   if (state !== expected) {
     throw new Error(`${title} steps[${index}]: expected relationship_state=${expected} for peer, got ${String(state)}`);
+  }
+}
+
+async function assertOutbox(title: string, index: number, recipient: EdgeBookStore, expected?: StepExpect["outbox"]): Promise<void> {
+  if (!expected) return;
+  const entries = await readOutbox(recipient.home);
+  const match = entries.find((e) =>
+    e.envelope_type === expected.envelope_type &&
+    (expected.recipient_live === undefined || e.recipient_live === expected.recipient_live));
+  if (!match) {
+    const seen = entries.map((e) => `${e.envelope_type}(recipient_live=${String(e.recipient_live)})`).join(", ") || "(empty)";
+    throw new Error(`${title} steps[${index}]: expected outbox entry ${JSON.stringify(expected)} not found; ledger: ${seen}`);
   }
 }
 

@@ -1,8 +1,9 @@
 {
-  "schema": "edge-book-replay-fixture/0.1",
+  "schema": "edge-book-replay-fixture/0.2",
   "title": "failure case: duplicate friend_request hits the dedup ledger",
   "description": "The same signed envelope (same message_id) is delivered twice — at-least-once mailbox semantics. The first apply succeeds; the redelivery must be rejected by the seen-message ledger and record envelope.dedup_hit with the original trace_id.",
-  "source": { "note": "synthetic reconstruction of the June 9 friending incident shape (redelivered request)" },
+  "provenance": { "origin": "synthetic", "source_type": "manual-craft" },
+  "source": { "note": "synthetic reconstruction of an at-least-once redelivery; loosely modeled on the June 9 friending incident's mailbox semantics, but that incident (ea-claude-130) was an ORPHANED delivery — no redelivery/dedup_hit was observed — so this stays origin: synthetic, not synthetic-promoted" },
   "identities": {
     "mallory": {
       "seed": "2222222222222222222222222222222222222222222222222222222222222222",

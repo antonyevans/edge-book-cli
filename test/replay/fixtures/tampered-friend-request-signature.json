@@ -1,7 +1,8 @@
 {
-  "schema": "edge-book-replay-fixture/0.1",
+  "schema": "edge-book-replay-fixture/0.2",
   "title": "failure case: envelope tampered in transit fails signature verification",
   "description": "A friend_request whose payload was mutated after signing must be rejected by verifyEnvelope and record envelope.signature_failed — and must NOT create a contact or a pending approval.",
+  "provenance": { "origin": "synthetic", "source_type": "manual-craft" },
   "identities": {
     "mallory": {
       "seed": "3333333333333333333333333333333333333333333333333333333333333333",

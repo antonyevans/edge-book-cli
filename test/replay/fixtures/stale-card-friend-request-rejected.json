@@ -1,0 +1,36 @@
+{
+  "schema": "edge-book-replay-fixture/0.2",
+  "title": "incident: friend_request carrying a stale (expired) card is rejected loudly",
+  "description": "June 9 friending incident (ea-claude-130): a raw invite is a frozen snapshot of a mutable identity — a friend request built from a stale card snapshot was 'dispatched successfully' to a DID no channel claimed and orphaned silently. spec-096 §C made card expiry ENFORCED (validateCard): a stale-but-validly-signed card must now fail loudly instead of orphaning mail. This fixture replays the stale-snapshot shape through the production inbound path: the envelope's signature verifies (the synthetic key is valid), then validateCard rejects the expired embedded card with card_expired, no contact is created, and the flight recorder logs the rejection.",
+  "provenance": { "origin": "real", "source_type": "incident-note", "source_ref": "ea-claude-130" },
+  "source": { "note": "identities and bodies are synthetic stand-ins; the card is re-signed by the synthetic sender with a deliberately past expires_at (the incident's frozen-snapshot class, sanitized)" },
+  "identities": {
+    "stale-peer": {
+      "seed": "4444444444444444444444444444444444444444444444444444444444444444",
+      "handle": "stale-peer.replay.local",
+      "display_name": "Stale Peer (synthetic)"
+    }
+  },
+  "steps": [
+    {
+      "deliver": {
+        "from": "stale-peer",
+        "type": "friend_request",
+        "message_id": "msg-replay-stale-card-001",
+        "trace_id": "trace-replay-stale-card-001",
+        "created_at": "2026-06-09T00:00:00.000Z",
+        "expires_at": "2099-01-01T00:00:00.000Z",
+        "card_expires_at": "2026-06-01T00:00:00.000Z",
+        "body": { "note": "synthetic reproduction: request built from a stale card snapshot" }
+      },
+      "expect": {
+        "outcome": "rejected",
+        "error": "card_expired",
+        "events": [
+          { "kind": "envelope.received", "fields": { "envelope_kind": "friend_request", "applied": false, "error": "card_expired" } }
+        ],
+        "relationship_state": "none"
+      }
+    }
+  ]
+}

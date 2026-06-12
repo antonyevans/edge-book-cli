@@ -1,7 +1,8 @@
 {
-  "schema": "edge-book-replay-fixture/0.1",
+  "schema": "edge-book-replay-fixture/0.2",
   "title": "happy path: friend request received, then accepted",
-  "description": "Synthetic baseline: an inbound friend_request lands through the dial-out mailbox path, the recipient accepts, and the contact reaches relationship_state=friend with the matching flight-recorder entries.",
+  "description": "Originally a synthetic baseline: an inbound friend_request lands through the dial-out mailbox path, the recipient accepts, and the contact reaches relationship_state=friend with the matching flight-recorder entries. Promoted to synthetic-promoted: the ea-claude-111 investigation (2026-06-09, silent friend-request notifications) sent a real friend_request through the live relay mailbox to the production agent — enqueued/delivered/acked, contact surfaced as request_received — confirming the inbound half of this exact shape live. The local accept step remains a synthetic extension.",
+  "provenance": { "origin": "synthetic-promoted", "source_type": "incident-note", "source_ref": "ea-claude-111" },
   "identities": {
     "mallory": {
       "seed": "1111111111111111111111111111111111111111111111111111111111111111",

@@ -14,16 +14,27 @@ The flight recorder already captures the shape of every protocol failure (envelo
 
 ## Design
 
-### A. Fixture format (`edge-book-replay-fixture/0.1`)
+### A. Fixture format (`edge-book-replay-fixture/0.2`)
 
-A fixture is one JSON file in `test/replay/fixtures/`:
+A fixture is one JSON file in `test/replay/fixtures/`. Since `0.2` (ea-claude-153)
+every fixture carries a **mandatory `provenance` block** in spec-0044's controlled
+vocabulary — `validateFixture` rejects fixtures without one, which makes the
+in-repo validator the deterministic backstop for the spec-0045 standing rule (§E).
+`0.1` fixtures are not accepted; all three seed fixtures were migrated.
 
 ```jsonc
 {
-  "schema": "edge-book-replay-fixture/0.1",
+  "schema": "edge-book-replay-fixture/0.2",
   "title": "failure case: duplicate friend_request hits the dedup ledger",
   "description": "…",
-  "source": { "doctor_bundle": "…", "trace_id": "…", "note": "…" }, // provenance, informational only
+  "provenance": {                       // MANDATORY (spec-0045 rule 2; vocabulary = spec-0044)
+    "origin": "real" | "synthetic" | "synthetic-promoted",
+    "source_type": "capa" | "judge-log" | "trace" | "incident-note" | "manual-craft",
+    "source_ref": "ea-claude-130"       // REQUIRED iff origin is real|synthetic-promoted: a trace id,
+                                        // doctor-bundle id, or EA task id. real/synthetic-promoted
+                                        // can never be manual-craft (a real incident has a source class).
+  },
+  "source": { "doctor_bundle": "…", "trace_id": "…", "note": "…" }, // free-form capture context, informational only
   "identities": {                       // SYNTHETIC senders only (see C)
     "mallory": { "seed": "<64 hex>", "handle": "mallory.replay.local", "display_name": "…" }
   },
@@ -35,18 +46,22 @@ A fixture is one JSON file in `test/replay/fixtures/`:
         "message_id": "msg-replay-dup-001",
         "trace_id": "trace-replay-dup-001",
         "created_at": "2026-06-01T00:00:00.000Z",
-        "expires_at": "2099-01-01T00:00:00.000Z",   // pin far future (see determinism)
+        "expires_at": "2099-01-01T00:00:00.000Z",   // pin far future — validated: must be >= 2090-01-01
         "body": { "note": "synthetic reproduction" }, // card auto-embedded for bootstrap kinds
-        "tamper": "signature"           // optional: mutate payload AFTER signing
+        "tamper": "signature",          // optional: mutate payload AFTER signing
+        "card_expires_at": "2026-06-01T00:00:00.000Z" // optional, bootstrap kinds only: re-stamp + re-sign
+                                        // the embedded card with this expiry (stale-invite shape, spec-096 §C)
       },
       "expect": {
         "outcome": "accepted" | "dedup_hit" | "signature_failed" | "rejected",
         "error": "Replay detected",     // substring of the apply error
         "events": [ { "kind": "envelope.dedup_hit", "trace_id": "…", "fields": { "applied": false } } ],
-        "relationship_state": "request_received"     // sender's state in the recipient store
+        "relationship_state": "request_received"     // sender's state in the recipient store; "none" = no contact may exist
       } },
-    { "local": { "action": "accept_friend" | "reject_friend", "peer": "mallory" },
-      "expect": { "events": [{ "kind": "friend.accepted" }], "relationship_state": "friend" } }
+    { "local": { "action": "accept_friend" | "reject_friend" | "send_friend_request", "peer": "mallory",
+        "recipient_live": false },      // send_friend_request only: the relay's spec-097 liveness answer
+      "expect": { "events": [{ "kind": "friend.accepted" }], "relationship_state": "friend",
+        "outbox": { "envelope_type": "friend_request", "recipient_live": false } } } // spec-097 outbox ledger assertion
   ]
 }
 ```
@@ -82,14 +97,36 @@ The skeleton is a starting point, not a finished test — e.g. a `dedup_hit` who
 1. User: `edge-book doctor --send` (spec-134) or pastes `edge-book doctor --json`.
 2. Operator: `edge-book support read <id>` → save bundle JSON; pick the failing trace from its `traces` section.
 3. `node scripts/extract-replay-fixture.ts bundle.json --trace <id> --out test/replay/fixtures/<name>.json`
-4. Fill in synthetic bodies, rename identities, tighten `expect` (events, relationship_state, error substrings).
+4. Fill in synthetic bodies, rename identities, tighten `expect` (events, relationship_state, error substrings), and set honest `provenance` (the skeleton defaults to `real`/`trace`/`<trace_id>`; downgrade to `synthetic`/`manual-craft` if you repurpose the shape).
 5. Done — `test/replay.test.ts` discovers every `test/replay/fixtures/*.json` at load time and replays each as its own test in `npm test`. No registration step.
+
+**Standing rule (spec-0045, EA repo `12-operations/spec-incident-replay-fixtures.md`):**
+fixtures are not optional nice-to-haves — every resolved Edge Book production
+incident (doctor bundle, event-log trace investigation, user-reported protocol
+failure) either adds a fixture + regression test here, or records an explicit
+**waiver** in the resolving task/FINDINGS entry naming why no fixture is
+derivable. Provenance (above) is mandatory and vocabulary-enforced by
+`validateFixture`, so `npm test` is the deterministic half of the rule. An
+incident whose shape an existing fixture already covers gets a provenance
+promotion (`synthetic` → `synthetic-promoted` + the new `source_ref`), not a
+duplicate fixture.
+
+**Quarantine:** a fixture that flakes in CI — one intermittent failure — moves
+to `test/replay/quarantine/` immediately (outside the discovery glob; the
+discovery test asserts the glob never reaches it) with a FINDINGS.md entry.
+Repair deterministically or delete with a note; never retry-until-green in
+place. See `test/replay/quarantine/README.md`.
 
 ## Seed fixtures (checked in)
 
-- `friend-request-accept.json` — happy path: inbound friend_request applied (`friend.request_received`, `envelope.received applied=true`), local accept → `relationship_state=friend` + `friend.accepted`.
-- `duplicate-friend-request-dedup.json` — at-least-once redelivery of the same message_id: first delivery accepted, replay rejected by the seen-message ledger with `envelope.dedup_hit` carrying the original trace_id.
-- `tampered-friend-request-signature.json` — payload mutated after signing: `verifyEnvelope` rejects with `envelope.signature_failed`; no contact is created.
+- `friend-request-accept.json` — happy path: inbound friend_request applied (`friend.request_received`, `envelope.received applied=true`), local accept → `relationship_state=friend` + `friend.accepted`. Promoted `synthetic-promoted` (ea-claude-111 confirmed the inbound shape live).
+- `duplicate-friend-request-dedup.json` — at-least-once redelivery of the same message_id: first delivery accepted, replay rejected by the seen-message ledger with `envelope.dedup_hit` carrying the original trace_id. (`synthetic`: the June-9 incident it was modeled on never exhibited a redelivery.)
+- `tampered-friend-request-signature.json` — payload mutated after signing: `verifyEnvelope` rejects with `envelope.signature_failed`; no contact is created. (`synthetic`.)
+
+## Incident fixtures (origin: real)
+
+- `stale-card-friend-request-rejected.json` — June 9 friending incident (`source_ref: ea-claude-130`): a friend_request carrying a stale-but-validly-signed card is rejected with `card_expired` (spec-096 §C), no contact created.
+- `queued-friend-request-offline-recipient-outbox.json` — same incident, outbound half: a friend_request sent against a relay reporting `recipient_live=false` lands in the spec-097 outbox ledger as queued — the "dispatched successfully" lie is structurally impossible.
 
 ## Test plan (implemented — test/replay.test.ts)
 
