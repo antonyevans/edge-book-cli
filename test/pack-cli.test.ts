@@ -192,3 +192,46 @@ test("onboarding copy: pack path present and ordered before the share-your-link 
   const onboarding = readFileSync(new URL("../src/onboarding.ts", import.meta.url), "utf8");
   assert.ok(onboarding.includes("pack join <slug> --deliver"), "init console note carries the pack line");
 });
+
+// Review-finding regressions (fresh-context review, 2026-06-12).
+test("join without --deliver surfaces envelopes for manual transport (state is request_sent, nothing silently dropped)", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-pack-nodeliver-"));
+  const bob = await makeMember(root, "nd-bob");
+  const { home } = await joinerWith(root);
+  const { posted, restore } = mockHost({ nd: { title: "ND", member_handles: ["nd-bob"] } }, [bob]);
+  try {
+    const result = await handleCli(["pack", "join", "--home", home, "nd", "--relay-base", RELAY]);
+    const json = result.json as { requested: number; members: Array<{ envelope?: { type: string } }> };
+    assert.equal(json.requested, 1);
+    assert.equal(posted.length, 0, "nothing was sent");
+    assert.equal(json.members[0]?.envelope?.type, "friend_request", "envelope surfaced for manual transport");
+    assert.match(result.text, /nothing was sent/i, "text warns that no delivery happened");
+  } finally { restore(); }
+});
+
+test("pack show then join inside the host rate window: join falls back to the cached pack", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "eb-pack-cache-"));
+  const bob = await makeMember(root, "cache-bob");
+  const { home } = await joinerWith(root);
+  let packFetches = 0;
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input.toString();
+    if (/\/pack\/cachepack$/.test(url)) {
+      packFetches++;
+      return packFetches === 1
+        ? new Response(JSON.stringify({ slug: "cachepack", title: "C", description: "", member_handles: ["cache-bob"] }), { status: 200 })
+        : new Response(JSON.stringify({ ok: false, error: "rate_limited", retry_after_ms: 600000 }), { status: 429 });
+    }
+    if (url.includes("/handle/cache-bob")) return new Response(JSON.stringify(bob.card), { status: 200 });
+    if (url.includes("/relay/") && init?.method === "POST") return new Response(JSON.stringify({ ok: true }), { status: 200 });
+    return new Response(null, { status: 404 });
+  }) as typeof fetch;
+  try {
+    await handleCli(["pack", "show", "--home", home, "cachepack", "--relay-base", RELAY]);
+    const join = await handleCli(["pack", "join", "--home", home, "cachepack", "--deliver", "--relay-base", RELAY]);
+    const json = join.json as { requested: number };
+    assert.equal(json.requested, 1, "join succeeded via the cached pack despite the 429");
+    assert.equal(packFetches, 2, "host saw exactly one real fetch plus one 429");
+  } finally { globalThis.fetch = original; }
+});

@@ -19,6 +19,8 @@ import type { RelationshipState } from "./edge-book.ts";
 import { postRelayEnvelope } from "./http-relay.ts";
 import { defaultProviders, resolveTarget } from "./resolver.ts";
 import { recordOutboxEntry } from "./store-outbox.ts";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 // Courtesy pacing between sequential pack-join sends (spec-145): the relay
 // has no per-sender burst limit, so this keeps a 50-member join from spiking
@@ -50,6 +52,8 @@ interface MemberOutcome {
   handle: string;
   outcome: "requested" | "skipped" | "failed";
   reason?: string;
+  // Present only on non---deliver joins: the signed envelope for manual transport.
+  envelope?: unknown;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -75,14 +79,40 @@ async function fetchPackJson(url: string, agentKey?: string): Promise<{ status: 
   return { status: response.status, body };
 }
 
+// Local cache of fetched packs (per home): the host rate-limits the
+// member-list fetch (it gates the join fan-out), so `pack show` followed by
+// `pack join` would 429 inside the window. A 429 falls back to the cached
+// copy — the host-side gate still bounds real fetches to one per window.
+const PACK_CACHE_FILE = "packs-cache.json";
+type PackCache = Record<string, { fetched_at: number; pack: PackRecord }>;
+
+async function readPackCache(store: EdgeBookStore): Promise<PackCache> {
+  try { return JSON.parse(await fs.readFile(path.join(store.home, PACK_CACHE_FILE), "utf8")) as PackCache; } catch { return {}; }
+}
+
+async function cachePack(store: EdgeBookStore, key: string, pack: PackRecord): Promise<void> {
+  try {
+    const cache = await readPackCache(store);
+    cache[key] = { fetched_at: Date.now(), pack };
+    await fs.writeFile(path.join(store.home, PACK_CACHE_FILE), JSON.stringify(cache));
+  } catch { /* cache is best-effort */ }
+}
+
 // Authenticated member-list fetch — the join gate. Maps every host status to
 // a domain error with a next action (no raw HTTP surfaces to the human).
 async function fetchPack(base: string, slug: string, store: EdgeBookStore): Promise<PackRecord> {
   const key = await loadOrCreateDialoutKey(store);
+  const cacheKey = `${base}/${slug}`;
   const { status, body } = await fetchPackJson(`${base}/pack/${encodeURIComponent(slug)}`, key.agent_key);
-  if (status === 200) return body as PackRecord;
+  if (status === 200) {
+    const pack = body as PackRecord;
+    await cachePack(store, cacheKey, pack);
+    return pack;
+  }
   if (status === 404) throw new EdgeBookError("pack_not_found", `No pack '${slug}' — run: pack list`);
   if (status === 429) {
+    const cached = (await readPackCache(store))[cacheKey];
+    if (cached) return cached.pack;
     const retryMs = (body as { retry_after_ms?: number } | null)?.retry_after_ms ?? 0;
     const mins = Math.max(1, Math.ceil(retryMs / 60_000));
     throw new EdgeBookError("pack_rate_limited", `Pack '${slug}' was fetched recently — try again in ~${mins} min`);
@@ -175,8 +205,14 @@ async function joinMember(
   if (skipReason) return { handle, outcome: "skipped", reason: skipReason };
   if (paceBefore) await sleep(PACK_JOIN_REQUEST_DELAY_MS);
   const envelope = await store.createFriendRequest(card);
-  if (deliver) await deliverPackRequest(envelope, card, deliverOpts);
-  return { handle, outcome: "requested" };
+  if (deliver) {
+    await deliverPackRequest(envelope, card, deliverOpts);
+    return { handle, outcome: "requested" };
+  }
+  // No --deliver: contact state is now request_sent, so the envelope MUST
+  // surface for manual transport (same semantics as `friend request` without
+  // --deliver) — discarding it would strand the relationship state.
+  return { handle, outcome: "requested", envelope };
 }
 
 async function handlePackJoin(args: string[], ctx: CliContext, home: string | undefined, store: EdgeBookStore): Promise<CliResult> {
@@ -202,7 +238,8 @@ async function handlePackJoin(args: string[], ctx: CliContext, home: string | un
   const skipped = outcomes.filter((o) => o.outcome === "skipped").length;
   const failed = outcomes.filter((o) => o.outcome === "failed").length;
   const lines = outcomes.map((o) => `${o.handle}  ${o.outcome}${o.reason ? `  (${o.reason})` : ""}`);
-  const summary = `requested ${requested}, skipped ${skipped}, failed ${failed}`;
+  const summary = `requested ${requested}, skipped ${skipped}, failed ${failed}`
+    + (!deliver && requested ? " — envelopes in --json output (no --deliver: nothing was sent; transport them manually or re-run with --deliver)" : "");
   // Exit codes (spec-145): 0 = every member succeeded or was a benign skip;
   // 1 = partial failure (>=1 sent, >=1 failed); 2 = total failure.
   const exitCode = failed === 0 ? 0 : requested > 0 ? 1 : 2;
