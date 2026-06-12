@@ -114,8 +114,10 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
       const res = ensureNotifierCron({ runner: defaultHermesRunner(), home: home as string, disabled });
       // Flight recorder (spec-133): cron provisioning outcome.
       if (res.status === "installed") await logEvent(store, "cron.notifier_installed", {});
+      else if (res.status === "updated") await logEvent(store, "cron.notifier_updated", {});
       else if (res.status === "already_present") await logEvent(store, "cron.notifier_already_present", {});
       if (res.status === "installed") console.log(`  ↳ notifier cron self-installed ("Edge Book — friend requests", every 20m → telegram)`);
+      else if (res.status === "updated") console.log(`  ↳ notifier cron recreated with the current prompt ("Edge Book — friend requests")`);
       else if (res.status === "error") console.log(`  ↳ notifier cron install skipped: ${res.detail}`);
     } catch (e) {
       console.log(`  ↳ notifier cron install skipped: ${e instanceof Error ? e.message : String(e)}`);
@@ -142,9 +144,11 @@ export async function handleCli(inputArgs: string[], ctx: CliContext = {}): Prom
     const res = ensureNotifierCron({ runner: defaultHermesRunner(), home: home as string, disabled });
     // Flight recorder (spec-133): cron provisioning outcome.
     if (res.status === "installed") await logEvent(store, "cron.notifier_installed", {});
+    else if (res.status === "updated") await logEvent(store, "cron.notifier_updated", {});
     else if (res.status === "already_present") await logEvent(store, "cron.notifier_already_present", {});
     const msg: Record<string, string> = {
       installed: 'Installed notifier cron "Edge Book — friend requests" (every 20m → telegram).',
+      updated: 'Notifier cron prompt was stale — recreated "Edge Book — friend requests" with the current prompt.',
       already_present: "Notifier cron already present — nothing to do.",
       host_unsupported: "No recognized host (Hermes) detected — nothing installed. Set notify_cmd for real-time delivery on hosts with a sender.",
       disabled: "Cron self-install disabled.",

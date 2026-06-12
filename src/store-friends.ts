@@ -162,13 +162,21 @@ export async function receiveFriendRequest(store: EdgeBookStore, envelope: Messa
   return contact;
 }
 
+// spec-139: ALL requests awaiting accept/decline — the "do I have friend
+// requests waiting?" surface (`friend pending`). Notification state never
+// hides an un-actioned request; callers read notified_at to tell new from seen.
 export async function pendingFriendRequests(store: EdgeBookStore): Promise<AgentContactRecord[]> {
+  const contacts = await store.contacts();
+  return Object.values(contacts).filter((c) => c.relationship_state === "request_received");
+}
+
+// spec-139: the notification de-dup queue (`friend pending --new`) — only
+// un-notified requests, gated on notify_on_friend_request. This is the
+// notifier-cron surface; mark-notified removes entries from it.
+export async function unnotifiedFriendRequests(store: EdgeBookStore): Promise<AgentContactRecord[]> {
   const config = await store.config();
   if (config.notify_on_friend_request === false) return [];
-  const contacts = await store.contacts();
-  return Object.values(contacts).filter(
-    (c) => c.relationship_state === "request_received" && !c.notified_at,
-  );
+  return (await pendingFriendRequests(store)).filter((c) => !c.notified_at);
 }
 
 export async function markFriendRequestNotified(store: EdgeBookStore, peerAgentId: string): Promise<void> {

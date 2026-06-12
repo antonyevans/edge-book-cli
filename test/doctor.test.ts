@@ -16,7 +16,7 @@ const DEAD_HOST = "ws://127.0.0.1:9/agent/ws";
 const SECRET_BODY = "SECRET-BODY-MARKER-must-never-leak-9f2c";
 
 const okFetch = (async () => ({ status: 200 })) as unknown as typeof fetch;
-const noHermes: HermesRunner = { hermesBin: null, list: () => "", create: () => undefined };
+const noHermes: HermesRunner = { hermesBin: null, list: () => "", create: () => undefined, getPrompt: () => null, remove: () => undefined };
 
 // Seed a store the way a real agent ends up: one confirmed friend who sent a
 // privileged message with a known body, one pending friend request, one post.

@@ -10,13 +10,17 @@ import {
   type HermesRunner,
 } from "../src/host-cron.ts";
 
-function fakeRunner(over: Partial<HermesRunner> & { listing?: string } = {}): HermesRunner & { created: string[][] } {
+function fakeRunner(over: Partial<HermesRunner> & { listing?: string } = {}): HermesRunner & { created: string[][]; removed: string[] } {
   const created: string[][] = [];
+  const removed: string[] = [];
   return {
     hermesBin: "hermesBin" in over ? (over.hermesBin ?? null) : "/opt/hermes/.venv/bin/hermes",
     list: over.list ?? (() => over.listing ?? ""),
     create: over.create ?? ((args: string[]) => { created.push(args); }),
+    getPrompt: over.getPrompt ?? (() => null),
+    remove: over.remove ?? ((name: string) => { removed.push(name); }),
     created,
+    removed,
   };
 }
 
@@ -36,11 +40,41 @@ test("no hermes binary → host_unsupported, no create", () => {
   assert.equal(runner.created.length, 0);
 });
 
-test("cron already present → already_present, no duplicate create", () => {
+test("cron already present, prompt unreadable → already_present, no churn", () => {
+  // getPrompt returns null (host cannot show the stored prompt) — be
+  // conservative: keep the existing job rather than recreating every run.
   const runner = fakeRunner({ listing: `some-id  ${FRIEND_REQUESTS_CRON_NAME}  */20 * * * *  telegram` });
   const r = ensureNotifierCron({ runner, home: HOME });
   assert.equal(r.status, "already_present");
   assert.equal(runner.created.length, 0);
+  assert.equal(runner.removed.length, 0);
+});
+
+test("spec-139: cron present with the current prompt → already_present, no recreate", () => {
+  const runner = fakeRunner({
+    listing: `some-id  ${FRIEND_REQUESTS_CRON_NAME}  */20 * * * *  telegram`,
+    getPrompt: () => `name: ${FRIEND_REQUESTS_CRON_NAME}\nprompt:\n${buildFriendRequestsPrompt(HOME)}\n`,
+  });
+  const r = ensureNotifierCron({ runner, home: HOME });
+  assert.equal(r.status, "already_present");
+  assert.equal(runner.created.length, 0);
+  assert.equal(runner.removed.length, 0);
+});
+
+test("spec-139: cron present with a stale prompt → deleted and recreated with the current prompt", () => {
+  const stale = "1. List pending requests: edge-book friend pending --home " + HOME + " --json\n" +
+    "If edge-book is not on PATH, use: npm exec -y edge-book@0.11.0 -- friend pending --home " + HOME + " --json";
+  const runner = fakeRunner({
+    listing: `some-id  ${FRIEND_REQUESTS_CRON_NAME}  */20 * * * *  telegram`,
+    getPrompt: () => stale,
+  });
+  const r = ensureNotifierCron({ runner, home: HOME });
+  assert.equal(r.status, "updated");
+  assert.deepEqual(runner.removed, [FRIEND_REQUESTS_CRON_NAME], "stale job removed first");
+  assert.equal(runner.created.length, 1, "fresh job created");
+  const prompt = runner.created[0][3];
+  assert.match(prompt, /friend pending --new/, "recreated with the --new notifier surface");
+  assert.ok(!/edge-book@\d/.test(prompt), "recreated without a stale version pin");
 });
 
 test("absent + hermes present → installs the cron with correct args", () => {
@@ -66,11 +100,12 @@ test("create failure → error status, surfaced detail", () => {
   assert.match(String(r.detail), /boom/);
 });
 
-test("buildFriendRequestsPrompt pins home and uses [SILENT]", () => {
+test("buildFriendRequestsPrompt pins home, uses [SILENT], polls --new, and carries no version pin", () => {
   const p = buildFriendRequestsPrompt(HOME);
   assert.match(p, /\[SILENT\]/);
   assert.ok(p.includes(HOME));
-  assert.match(p, /friend pending/);
+  assert.match(p, /friend pending --new/, "spec-139: the cron polls the un-notified surface");
+  assert.ok(!/edge-book@\d/.test(p), "spec-139: no stale version pin");
 });
 
 test("greeter cron: disabled → no host mutation", () => {

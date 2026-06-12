@@ -173,7 +173,10 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
       return { text: `Blocked ${peer}` };
     }
     if (action === "pending") {
-      const pending = await store.pendingFriendRequests();
+      // spec-139: plain `pending` = ALL requests awaiting accept/decline;
+      // `--new` = only un-notified ones (the notifier-cron surface).
+      const onlyNew = takeBoolFlag(args, "--new");
+      const pending = onlyNew ? await store.unnotifiedFriendRequests() : await store.pendingFriendRequests();
       const inbox = await store.inbox();
       const json = pending.map((c) => {
         // Find the most recent friend_request envelope from this peer in the inbox.
@@ -191,6 +194,8 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
           note,
           requested_at,
           contact_created_at: c.created_at,
+          // spec-139: lets callers distinguish new from already-surfaced requests.
+          ...(c.notified_at ? { notified_at: c.notified_at } : {}),
         };
       });
       const text = json.length

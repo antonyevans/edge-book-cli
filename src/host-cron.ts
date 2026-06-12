@@ -25,9 +25,9 @@ export function buildFriendRequestsPrompt(home: string): string {
     "",
     "This runs every 20 minutes; most runs there will be nothing pending. On any such run — and on any error — end your turn with exactly [SILENT] and nothing else. [SILENT] tells Hermes to send no message.",
     "",
-    "1. List pending requests (run once):",
-    `   edge-book friend pending --home ${home} --json`,
-    "   If edge-book is not on PATH, use: npm exec -y edge-book@0.11.0 -- friend pending --home " + home + " --json",
+    "1. List new (not-yet-surfaced) requests (run once):",
+    `   edge-book friend pending --new --home ${home} --json`,
+    `   If edge-book is not on PATH, use: npm exec -y edge-book -- friend pending --new --home ${home} --json`,
     "   If the command errors, Edge Book is unavailable, or the list is empty ([]) → end your turn with exactly [SILENT].",
     "",
     "2. Otherwise write ONE short, warm message. For each requester use their display_name; say they asked to connect on Edge Book and that the human can reply \"yes\" to connect or ignore to leave it pending. No internal IDs, no JSON.",
@@ -44,10 +44,18 @@ export interface HermesRunner {
   list: () => string;
   /** Run `hermes cron create …` (or any cron subcommand); throw on failure. */
   create: (args: string[]) => void;
+  /**
+   * Return the stored prompt (or any output containing it) for the named job,
+   * or null when it cannot be read — null means "unknown", and the caller
+   * keeps the existing job rather than churning it. (spec-139)
+   */
+  getPrompt: (name: string) => string | null;
+  /** Delete the named cron job; throw on failure. (spec-139) */
+  remove: (name: string) => void;
 }
 
 export interface EnsureResult {
-  status: "installed" | "already_present" | "host_unsupported" | "disabled" | "error";
+  status: "installed" | "updated" | "already_present" | "host_unsupported" | "disabled" | "error";
   detail?: string;
 }
 
@@ -66,10 +74,23 @@ export function ensureNotifierCron(opts: {
   } catch (e) {
     return { status: "error", detail: e instanceof Error ? e.message : String(e) };
   }
-  if (listing.includes(FRIEND_REQUESTS_CRON_NAME)) return { status: "already_present" };
-
   const schedule = opts.schedule ?? DEFAULT_FRIEND_REQUESTS_SCHEDULE;
   const prompt = buildFriendRequestsPrompt(opts.home);
+  let recreating = false;
+  if (listing.includes(FRIEND_REQUESTS_CRON_NAME)) {
+    // spec-139: an existing job with a stale prompt (deployed agents hold the
+    // old `friend pending --json` + 0.11.0-pinned text) must be recreated.
+    // When the stored prompt cannot be read (null) be conservative: keep it.
+    const existing = opts.runner.getPrompt(FRIEND_REQUESTS_CRON_NAME);
+    if (existing === null || existing.includes(prompt)) return { status: "already_present" };
+    try {
+      opts.runner.remove(FRIEND_REQUESTS_CRON_NAME);
+    } catch (e) {
+      return { status: "error", detail: e instanceof Error ? e.message : String(e) };
+    }
+    recreating = true;
+  }
+
   const args = [
     "cron", "create", schedule, prompt,
     "--name", FRIEND_REQUESTS_CRON_NAME,
@@ -78,7 +99,7 @@ export function ensureNotifierCron(opts: {
   ];
   try {
     opts.runner.create(args);
-    return { status: "installed" };
+    return { status: recreating ? "updated" : "installed" };
   } catch (e) {
     return { status: "error", detail: e instanceof Error ? e.message : String(e) };
   }
@@ -91,6 +112,18 @@ export function defaultHermesRunner(): HermesRunner {
     hermesBin: bin,
     list: () => (bin ? execFileSync(bin, ["cron", "list"], { encoding: "utf8" }) : ""),
     create: (args) => { if (bin) execFileSync(bin, args, { stdio: ["ignore", "ignore", "pipe"] }); },
+    // Best-effort prompt read: `hermes cron show <name>` prints the job
+    // (including its prompt). Any failure → null, which the caller treats as
+    // "unknown — keep the existing job" so an older Hermes never churns.
+    getPrompt: (name) => {
+      if (!bin) return null;
+      try {
+        return execFileSync(bin, ["cron", "show", name], { encoding: "utf8" });
+      } catch {
+        return null;
+      }
+    },
+    remove: (name) => { if (bin) execFileSync(bin, ["cron", "delete", name], { stdio: ["ignore", "ignore", "pipe"] }); },
   };
 }
 

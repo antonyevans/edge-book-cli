@@ -157,8 +157,8 @@ export const COMMAND_GROUPS: CommandGroup[] = [
         desc: "Block a peer (ends relationship + prevents re-request)",
       },
       {
-        usage: "friend pending [--json]",
-        desc: "List inbound friend requests awaiting your decision",
+        usage: "friend pending [--new] [--json]",
+        desc: "List inbound friend requests awaiting your decision (--new: only ones not yet surfaced to the human)",
       },
       {
         usage: "friend mark-notified <peer-agent-id>",
