@@ -50,6 +50,20 @@ passes, the agent may merge — unless the task says otherwise.
 - **Reversions:** agent code substantially rewritten or reverted within 30
   days of merge gets one line (date, PR, cause) in FINDINGS.md `## Reversions`.
 
+## Learnings (docs/LEARNINGS.md)
+
+- Read `docs/LEARNINGS.md` before any non-trivial task; treat entries as hints
+  to verify, not overrides of current evidence.
+- Every incident or refactor session appends an entry there (Trigger /
+  Observation / Action / Confidence / Status) — or updates an existing one.
+  Two-strikes rule: the second occurrence of the same lesson promotes it to a
+  formal rule in this file.
+- Division of labor: FINDINGS.md holds the facts (grandfathered exceptions;
+  `## Reversions` date/PR/cause); LEARNINGS.md holds the why/avoid lesson —
+  cross-reference, never restate.
+- The monthly gardening pass (spec-0038) prunes stale/low-confidence entries,
+  promotes 2x-triggered patterns, and updates the `_Last gardening pass_` header.
+
 ## Gotchas
 
 - `npm run typecheck` is a real gate (strict + `noUncheckedIndexedAccess`,

@@ -63,6 +63,8 @@ the module count grows past ~60 files.
 
 Each `origin: real` replay fixture cites its incident here (and the incident
 record cites the fixture path); quarantine moves also land in this section.
+The actionable lesson behind this pipeline ("incidents must leave a fixture or
+a waiver") is the 2026-06-11 entry in `docs/LEARNINGS.md`.
 
 - `test/replay/fixtures/stale-card-friend-request-rejected.json` —
   `source_ref: ea-claude-130` (June 9 friending incident: stale frozen-card
