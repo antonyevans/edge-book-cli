@@ -52,6 +52,11 @@ export interface EdgeBookConfig {
   // Epoch ms when the one-time handle nudge (spec-130) was emitted. Set once,
   // never cleared — even if the human declines, the nudge must not repeat.
   handle_nudge_at?: number;
+  // spec-137 durable onboarding nudge: epoch ms of the last emit and total
+  // emit count. Throttled (6h) and capped (3) in onboarding-nudge.ts; retires
+  // for good once the room has any contact or object.
+  onboarding_nudge_at?: number;
+  onboarding_nudge_count?: number;
   // spec-132 greeter. greeter_mode gates `friend auto-accept` and the greeter
   // cron install — absent/false = off; normal agents can never auto-accept.
   greeter_mode?: boolean;
