@@ -1,0 +1,366 @@
+{
+  "$id": "edge-book/wire-frames",
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "HandleClaimErrFrame": {
+      "properties": {
+        "reason": {
+          "enum": [
+            "taken",
+            "bad_sig",
+            "bad_format",
+            "bad_card"
+          ],
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "handle_claim_err",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "HandleClaimFrame": {
+      "properties": {
+        "card": {},
+        "claim_sig": {
+          "type": "string"
+        },
+        "claimed_at": {
+          "type": "number"
+        },
+        "discoverable": {
+          "type": "boolean"
+        },
+        "handle": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "handle_claim",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "handle",
+        "card",
+        "claimed_at",
+        "claim_sig"
+      ],
+      "type": "object"
+    },
+    "HandleClaimOkFrame": {
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "handle_claim_ok",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "handle"
+      ],
+      "type": "object"
+    },
+    "MailboxAckFrame": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "mailbox_ack",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "type": "object"
+    },
+    "MailboxDeliverFrame": {
+      "properties": {
+        "blob_b64": {
+          "type": "string"
+        },
+        "from": {
+          "$ref": "#/definitions/RecipientAddress"
+        },
+        "id": {
+          "type": "string"
+        },
+        "trace_id": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "number"
+        },
+        "type": {
+          "const": "mailbox_deliver",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "from",
+        "blob_b64",
+        "ts"
+      ],
+      "type": "object"
+    },
+    "MailboxMessage": {
+      "properties": {
+        "blob": {
+          "type": "string"
+        },
+        "from": {
+          "$ref": "#/definitions/RecipientAddress"
+        },
+        "id": {
+          "type": "string"
+        },
+        "to": {
+          "$ref": "#/definitions/RecipientAddress"
+        },
+        "trace_id": {
+          "type": "string"
+        },
+        "ts": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "to",
+        "from",
+        "blob",
+        "ts"
+      ],
+      "type": "object"
+    },
+    "MailboxSendErrFrame": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "mailbox_send_err",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "error"
+      ],
+      "type": "object"
+    },
+    "MailboxSendFrame": {
+      "properties": {
+        "blob_b64": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "to": {
+          "$ref": "#/definitions/RecipientAddress"
+        },
+        "trace_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "mailbox_send",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "to",
+        "blob_b64"
+      ],
+      "type": "object"
+    },
+    "MailboxSendOkFrame": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "recipient_live": {
+          "type": "boolean"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "mailbox_send_ok",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "id"
+      ],
+      "type": "object"
+    },
+    "MailboxStatusEntry": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "queued_ms": {
+          "type": "number"
+        },
+        "recipient_live": {
+          "type": "boolean"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "delivered",
+            "acked",
+            "unknown"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "state"
+      ],
+      "type": "object"
+    },
+    "MailboxStatusErrFrame": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "mailbox_status_err",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "error"
+      ],
+      "type": "object"
+    },
+    "MailboxStatusFrame": {
+      "properties": {
+        "ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "type": {
+          "const": "mailbox_status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "ids"
+      ],
+      "type": "object"
+    },
+    "MailboxStatusOkFrame": {
+      "properties": {
+        "request_id": {
+          "type": "string"
+        },
+        "statuses": {
+          "items": {
+            "$ref": "#/definitions/MailboxStatusEntry"
+          },
+          "type": "array"
+        },
+        "type": {
+          "const": "mailbox_status_ok",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "request_id",
+        "statuses"
+      ],
+      "type": "object"
+    },
+    "RecipientAddress": {
+      "type": "string"
+    },
+    "WireFrame": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/MailboxSendFrame"
+        },
+        {
+          "$ref": "#/definitions/MailboxSendOkFrame"
+        },
+        {
+          "$ref": "#/definitions/MailboxSendErrFrame"
+        },
+        {
+          "$ref": "#/definitions/MailboxDeliverFrame"
+        },
+        {
+          "$ref": "#/definitions/MailboxAckFrame"
+        },
+        {
+          "$ref": "#/definitions/MailboxStatusFrame"
+        },
+        {
+          "$ref": "#/definitions/MailboxStatusOkFrame"
+        },
+        {
+          "$ref": "#/definitions/MailboxStatusErrFrame"
+        },
+        {
+          "$ref": "#/definitions/HandleClaimFrame"
+        },
+        {
+          "$ref": "#/definitions/HandleClaimOkFrame"
+        },
+        {
+          "$ref": "#/definitions/HandleClaimErrFrame"
+        }
+      ]
+    }
+  },
+  "description": "Host<->agent wire-frame contract, generated from src/contracts.ts (edge-book-host). Regenerate with `npm run schemas`; do not edit."
+}
