@@ -1,0 +1,26 @@
+{
+  "schema": "edge-book-replay-fixture/0.2",
+  "title": "incident: friend_request to an offline/stale-DID recipient is recorded as queued, not 'dispatched successfully'",
+  "description": "June 9 friending incident (ea-claude-130): mail was queued on the relay to a stale DID no channel claimed, the sender was told 'dispatched successfully', and the message orphaned silently until manual purge. spec-097 (delivery receipts) is the fix: the relay's mailbox_send_ok now carries recipient_live, and every --deliver path records an outbox ledger entry so a stuck-at-queued send is self-diagnosing from the sender's CLI. This fixture replays the incident sequence outbound: a friend_request sent through the production deliver path against a relay reporting recipient_live=false must land in outbox.json with recipient_live=false (the loud 'Queued — NOT connected' state), with the envelope.sent flight-recorder entry.",
+  "provenance": { "origin": "real", "source_type": "incident-note", "source_ref": "ea-claude-130" },
+  "source": { "note": "identities and bodies are synthetic stand-ins; the relay's recipient_live=false ack reproduces the incident's 'queued to a DID no channel claims' state" },
+  "identities": {
+    "stale-peer": {
+      "seed": "5555555555555555555555555555555555555555555555555555555555555555",
+      "handle": "stale-peer.replay.local",
+      "display_name": "Stale Peer (synthetic)"
+    }
+  },
+  "steps": [
+    {
+      "local": { "action": "send_friend_request", "peer": "stale-peer", "recipient_live": false },
+      "expect": {
+        "events": [
+          { "kind": "envelope.sent", "fields": { "envelope_kind": "friend_request" } }
+        ],
+        "outbox": { "envelope_type": "friend_request", "recipient_live": false },
+        "relationship_state": "request_sent"
+      }
+    }
+  ]
+}

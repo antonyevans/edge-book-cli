@@ -118,6 +118,10 @@ export function buildFixtureSkeleton(
     schema: REPLAY_FIXTURE_SCHEMA,
     title: `Extracted replay skeleton — trace ${traceId}`,
     description: "SKELETON: fill in synthetic bodies, rename identities, tighten expectations, then drop into test/replay/fixtures/.",
+    // A skeleton comes from a captured bundle, so it defaults to incident
+    // provenance keyed on the trace (spec-0045). If the operator repurposes it
+    // as a hand-crafted shape, downgrade to synthetic/manual-craft by hand.
+    provenance: { origin: "real", source_type: "trace", source_ref: String(traceId) },
     source: {
       trace_id: traceId,
       note: "identities are synthetic stand-ins (user private keys are never available); original sender DIDs recorded in display_name",

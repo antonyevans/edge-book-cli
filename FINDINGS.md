@@ -59,6 +59,29 @@ with no horizontal layer stack defined in DESIGN.md — there is no forbidden
 import direction to encode. Revisit if DESIGN.md ever defines module layers or
 the module count grows past ~60 files.
 
+## Incident fixtures (spec-0045 cross-references)
+
+Each `origin: real` replay fixture cites its incident here (and the incident
+record cites the fixture path); quarantine moves also land in this section.
+
+- `test/replay/fixtures/stale-card-friend-request-rejected.json` —
+  `source_ref: ea-claude-130` (June 9 friending incident: stale frozen-card
+  invite → mail orphaned to a DID no channel claimed). Pins spec-096 §C: an
+  expired embedded card is rejected loudly (`card_expired`), no contact created.
+- `test/replay/fixtures/queued-friend-request-offline-recipient-outbox.json` —
+  `source_ref: ea-claude-130`, outbound half. Pins spec-097: a send against a
+  relay reporting `recipient_live=false` records an outbox ledger entry as
+  queued, replacing the incident's silent "dispatched successfully".
+- Promotion (no new fixture, per spec-0045 exception 2):
+  `test/replay/fixtures/friend-request-accept.json` `synthetic` →
+  `synthetic-promoted` (`source_ref: ea-claude-111` — the silent-notification
+  investigation's live end-to-end send confirmed the inbound shape).
+- NOT promoted: `duplicate-friend-request-dedup.json` stays `synthetic` — it
+  was modeled on the June 9 incident's at-least-once mailbox semantics, but
+  that incident was an orphaned (never-delivered) message; no redelivery or
+  `dedup_hit` was ever observed, so claiming incident confirmation would be
+  provenance inflation.
+
 ## Reversions
 
 Agent-written code substantially rewritten or reverted within 30 days of merge
