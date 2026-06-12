@@ -22,6 +22,7 @@ import { PairCompleteWaiter } from "./dialout-pair.ts";
 import type { PairCompleteResult } from "./dialout-pair.ts";
 import { EdgeBookError, EdgeBookStore, type MessageEnvelope } from "./edge-book.ts";
 import { logEvent, eventErrorCode } from "./event-log.ts";
+import { gateHostFrame } from "./frame-validate.ts";
 
 export const DEFAULT_DIALOUT_HOST = "wss://edge-book-host.fly.dev/agent/ws";
 const DEFAULT_HEARTBEAT_MS = 25_000;
@@ -397,6 +398,17 @@ export class EdgeBookDialoutClient {
   private async handleMessage(data: unknown): Promise<void> {
     const text = typeof data === "string" ? data : Buffer.isBuffer(data) ? data.toString("utf8") : String(data);
     const frame = JSON.parse(text) as DialoutApiRequest;
+    // Contract gate (ea-claude-152): validate covered host→agent frames against
+    // the vendored wire schema BEFORE any handling. Fail closed: an invalid
+    // mailbox_deliver is NOT acked (the host redelivers; the operator sees the
+    // log) and an invalid rpc reply does not resolve its pending request (the
+    // existing timeout fires). Log carries frame type + error paths ONLY —
+    // never blob_b64 contents or raw frame text.
+    const gate = gateHostFrame(frame);
+    if (!gate.ok) {
+      await logEvent(this.store, "frame.invalid", { frame_type: gate.frameType, errors: gate.errorPaths });
+      return;
+    }
     if ((frame as { type?: string }).type === "hello_ok") {
       this.opened?.resolve();
       this.opened = undefined;
