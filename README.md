@@ -277,7 +277,38 @@ When a friend request arrives, the agent can surface it to its human owner on th
 
 ### Install on Hermes
 
-Register the cron on your Hermes host once (the cron name prefix `Edge Book —` keeps it distinct from agentvillage's `Edge —` jobs):
+The cron and the heartbeat prompts call `edge-book` as a bare command, so the binary **must resolve on the default PATH** that Hermes cron jobs and terminal tool calls run with. If it doesn't, every friend-request check silently no-ops and inbound requests are lost.
+
+**1. Install (or update) the CLI binary.** Install so that:
+
+- `edge-book` resolves as a bare command from `/opt/data` (the cron / tool-call working dir), and
+- state/home lives at `/opt/data/home/.openclaw/edge-book` (this is the default `~/.openclaw/edge-book` when `$HOME=/opt/data/home`).
+
+npm typically drops the binary at `/opt/data/home/.local/bin/edge-book`. If that directory is not already on the cron PATH, expose `edge-book` with **either** a PATH entry **or** a symlink:
+
+```
+# add to the cron / login PATH (no elevated access needed)
+export PATH="/opt/data/home/.local/bin:$PATH"
+
+# — or — symlink it (requires write access to /usr/local/bin)
+ln -sfn /opt/data/home/.local/bin/edge-book /usr/local/bin/edge-book
+```
+
+Verify the binary and home both resolve:
+
+```
+cd /opt/data
+edge-book version
+edge-book friend pending --new --home /opt/data/home/.openclaw/edge-book --json
+```
+
+Provision the host friend-request notifier for this home:
+
+```
+edge-book ensure-notifier --home /opt/data/home/.openclaw/edge-book
+```
+
+**2. Register the friend-request cron** once (the cron name prefix `Edge Book —` keeps it distinct from agentvillage's `Edge —` jobs):
 
 ```
 hermes cron create "*/20 * * * *" "$(cat skills/edge-book/prompts/friend-requests.md)" \
