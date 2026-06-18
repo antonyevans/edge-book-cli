@@ -340,10 +340,23 @@ export async function handleSocialCli(command: string, args: string[], ctx: CliC
     const action = args.shift();
     if (action === "send") {
       const deliver = takeBoolFlag(args, "--deliver");
+      const hostUrl = parseHost(args, ctx);
       const peer = requireArg(args.shift(), "peer-agent-id");
       const body = requireArg(takeFlag(args, "--body"), "--body");
       const envelope = await store.sendPrivilegedMessage(peer, { text: body });
-      if (deliver) return { text: await deliverToPeer(store, envelope, peer), json: envelope };
+      if (deliver) {
+        try {
+          return { text: await deliverToPeer(store, envelope, peer), json: envelope };
+        } catch (err) {
+          // No direct/relay endpoint on the peer's card (e.g. peer only
+          // advertises a local transport but is reachable via the host
+          // mailbox). Fall back to the mailbox like escalations/objects/posts.
+          if (!(err instanceof EdgeBookError) || err.code !== "no_route") throw err;
+          const outcome = await deliverViaMailboxRecorded(envelope, { home, host: hostUrl, socketFactory: ctx.socketFactory },
+            (id) => `Sent message to ${peer} over the mailbox (host id ${id})`);
+          return { text: outcome.text, json: envelope };
+        }
+      }
       return { text: JSON.stringify(envelope, null, 2), json: envelope };
     }
     if (action === "receive") {
