@@ -61,6 +61,27 @@ const NOTIFY_POLICIES: Partial<Record<MessageEnvelope["type"], NotifyPolicy>> = 
       dedup_key: env.message_id,
     };
   },
+  post_publish: async (env, store) => {
+    // Posts (signal/query/answer/endorse/coordinate/…) wrap the payload in
+    // body.post. Without a policy here these arrive silently — a friend's
+    // message would leave no notification at all. Surface a short preview.
+    const post = (env.body as { post?: { post_type?: unknown; body?: unknown; text?: unknown } }).post;
+    if (!post) return null;
+    const name = (await peerName(store, env.from_agent_id)) || env.from_agent_id;
+    const postType = typeof post.post_type === "string" ? post.post_type : "post";
+    const raw =
+      typeof post.body === "string" ? post.body :
+      typeof post.text === "string" ? post.text :
+      post.body != null ? JSON.stringify(post.body) : "";
+    const preview = raw.length > 280 ? `${raw.slice(0, 279)}…` : raw;
+    return {
+      kind: "post_publish",
+      from_id: env.from_agent_id,
+      from_name: await peerName(store, env.from_agent_id),
+      message: preview ? `${name} (${postType}): ${preview}` : `${name} sent a ${postType}.`,
+      dedup_key: env.message_id,
+    };
+  },
   object_share: async (env, store) => {
     const body = env.body as unknown as ObjectShareBody;
     const name = (await peerName(store, env.from_agent_id)) || env.from_agent_id;

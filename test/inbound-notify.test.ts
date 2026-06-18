@@ -78,3 +78,29 @@ test("unregistered/silent type (profile_share) yields a null intent", async () =
   const env = envelopeOf("profile_share", aliceId, bobId, {}, "msg_ps_1");
   assert.equal(await bob.notificationIntent(env), null);
 });
+
+test("notificationIntent renders a post_publish (coordinate) with a body preview", async () => {
+  // Regression: posts (signal/query/answer/coordinate/…) had no policy and
+  // arrived silently — a friend's message left no notification at all.
+  const { alice, bob } = await pair();
+  const aliceId = (await alice.identity()).agent_id;
+  const bobId = (await bob.identity()).agent_id;
+  const bobCard = await bob.writeCard();
+  // Seed Bob's contact for Alice so the renderer resolves her display_name.
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+
+  const env = envelopeOf(
+    "post_publish", aliceId, bobId,
+    { post: { post_type: "coordinate", body: "Hey Kublai — glad to connect." } },
+    "msg_pp_1",
+  );
+  const intent = await bob.notificationIntent(env);
+
+  assert.ok(intent, "post_publish should notify (was silent before)");
+  assert.equal(intent!.kind, "post_publish");
+  assert.equal(intent!.from_id, aliceId);
+  assert.match(intent!.message, /coordinate/, "names the post type");
+  assert.match(intent!.message, /glad to connect/, "includes a body preview");
+  assert.match(intent!.message, /Alice Agent/, "resolves sender name from contacts");
+  assert.equal(intent!.dedup_key, env.message_id);
+});
