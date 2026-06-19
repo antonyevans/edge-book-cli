@@ -71,12 +71,64 @@ test("notificationIntent renders a privileged_message (gated message) genericall
   assert.equal(intent!.dedup_key, msg.message_id);
 });
 
-test("unregistered/silent type (profile_share) yields a null intent", async () => {
+test("protocol-level type (ack) yields a null intent (stays silent)", async () => {
   const { alice, bob } = await pair();
   const aliceId = (await alice.identity()).agent_id;
   const bobId = (await bob.identity()).agent_id;
-  const env = envelopeOf("profile_share", aliceId, bobId, {}, "msg_ps_1");
+  const env = envelopeOf("ack", aliceId, bobId, {}, "msg_ack_1");
   assert.equal(await bob.notificationIntent(env), null);
+});
+
+test("notificationIntent renders an escalation_response (answer to a raised decision)", async () => {
+  const { alice, bob } = await pair();
+  const aliceId = (await alice.identity()).agent_id;
+  const bobId = (await bob.identity()).agent_id;
+  const bobCard = await bob.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+
+  const env = envelopeOf(
+    "escalation_response", aliceId, bobId,
+    { escalation_id: "esc_42", status: "answered", answer_choice: "approve", answer_text: "", answered_at: "" },
+    "msg_er_1",
+  );
+  const intent = await bob.notificationIntent(env);
+  assert.ok(intent, "escalation_response should notify");
+  assert.equal(intent!.kind, "escalation_response");
+  assert.match(intent!.message, /esc_42/, "names the escalation");
+  assert.match(intent!.message, /approve/, "includes the answer");
+  assert.match(intent!.message, /Alice Agent/);
+  assert.equal(intent!.dedup_key, env.message_id);
+});
+
+test("notificationIntent renders an object_revoke", async () => {
+  const { alice, bob } = await pair();
+  const aliceId = (await alice.identity()).agent_id;
+  const bobId = (await bob.identity()).agent_id;
+  const bobCard = await bob.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+
+  const env = envelopeOf("object_revoke", aliceId, bobId, { object_id: "obj_7", grant_id: "grant_x" }, "msg_or_1");
+  const intent = await bob.notificationIntent(env);
+  assert.ok(intent, "object_revoke should notify");
+  assert.equal(intent!.kind, "object_revoke");
+  assert.match(intent!.message, /revoked/i);
+  assert.match(intent!.message, /obj_7/);
+  assert.equal(intent!.dedup_key, env.message_id);
+});
+
+test("notificationIntent renders a profile_share (deliberate broadcast)", async () => {
+  const { alice, bob } = await pair();
+  const aliceId = (await alice.identity()).agent_id;
+  const bobId = (await bob.identity()).agent_id;
+  const bobCard = await bob.writeCard();
+  await bob.receiveFriendRequest(await alice.createFriendRequest(bobCard));
+
+  const env = envelopeOf("profile_share", aliceId, bobId, { profile: { name: "Alice Agent" } }, "msg_ps_1");
+  const intent = await bob.notificationIntent(env);
+  assert.ok(intent, "profile_share should notify (deliberate broadcast)");
+  assert.equal(intent!.kind, "profile_share");
+  assert.match(intent!.message, /profile/i);
+  assert.equal(intent!.dedup_key, env.message_id);
 });
 
 test("notificationIntent renders a post_publish (coordinate) with a body preview", async () => {

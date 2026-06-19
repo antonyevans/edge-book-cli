@@ -7,7 +7,7 @@
 // public function is called by a same-named one-line delegate method on
 // EdgeBookStore.
 import { EdgeBookStore } from "./edge-book.ts";
-import type { EscalationBody, FriendRequestBody, FriendResponseBody, MessageEnvelope, NotificationIntent, ObjectShareBody, SupportBundleBody } from "./types.ts";
+import type { EscalationBody, EscalationResponseBody, FriendRequestBody, FriendResponseBody, MessageEnvelope, NotificationIntent, ObjectRevokeBody, ObjectShareBody, ProfileShareBody, SupportBundleBody } from "./types.ts";
 import { readJson, writeJson } from "./fs-json.ts";
 import { NOTIFIED_FILE } from "./store-files.ts";
 
@@ -114,6 +114,46 @@ const NOTIFY_POLICIES: Partial<Record<MessageEnvelope["type"], NotifyPolicy>> = 
       from_id: env.from_agent_id,
       from_name: body.card?.display_name,
       message: `${name} sent a support bundle (ref ${env.trace_id ?? env.message_id}). Review: edge-book support pending`,
+      dedup_key: env.message_id,
+    };
+  },
+  escalation_response: async (env, store) => {
+    // A friend answered a decision/escalation you raised — high-signal, must notify.
+    const body = env.body as unknown as EscalationResponseBody;
+    const name = (await peerName(store, env.from_agent_id)) || env.from_agent_id;
+    const text = typeof body.answer_text === "string" ? body.answer_text : "";
+    const answer = body.answer_choice || (text.length > 240 ? `${text.slice(0, 239)}…` : text) || body.status || "responded";
+    return {
+      kind: "escalation_response",
+      from_id: env.from_agent_id,
+      from_name: await peerName(store, env.from_agent_id),
+      message: `${name} answered your escalation${body.escalation_id ? ` (${body.escalation_id})` : ""}: ${answer}`,
+      dedup_key: env.message_id,
+    };
+  },
+  object_revoke: async (env, store) => {
+    // A friend revoked access to something they shared — you can no longer read it.
+    const body = env.body as unknown as ObjectRevokeBody;
+    const name = (await peerName(store, env.from_agent_id)) || env.from_agent_id;
+    return {
+      kind: "object_revoke",
+      from_id: env.from_agent_id,
+      from_name: await peerName(store, env.from_agent_id),
+      message: `${name} revoked access to a shared item${body.object_id ? ` (object ${body.object_id})` : ""}.`,
+      dedup_key: env.message_id,
+    };
+  },
+  profile_share: async (env, store) => {
+    // Deliberate `profile broadcast` from a friend (manual command, not auto
+    // housekeeping) — surface it once so profile updates aren't invisible.
+    const body = env.body as unknown as ProfileShareBody;
+    const profileName = typeof body.profile?.name === "string" ? body.profile.name : undefined;
+    const name = (await peerName(store, env.from_agent_id)) || profileName || env.from_agent_id;
+    return {
+      kind: "profile_share",
+      from_id: env.from_agent_id,
+      from_name: (await peerName(store, env.from_agent_id)) || profileName,
+      message: `${name} shared an updated profile.`,
       dedup_key: env.message_id,
     };
   },
