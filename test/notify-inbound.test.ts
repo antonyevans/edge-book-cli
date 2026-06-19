@@ -74,7 +74,8 @@ test("silent type yields no delivery", async () => {
   const { alice, bob } = await pair();
   const aliceId = (await alice.identity()).agent_id;
   const bobId = (await bob.identity()).agent_id;
-  const env = envelopeOf("profile_share", aliceId, bobId, {}, "ps1");
+  // ack is a protocol-level frame with no notify policy — stays silent.
+  const env = envelopeOf("ack", aliceId, bobId, {}, "ack1");
   const r = await notifyInbound(bob, env, { cmd: "cat" });
   assert.equal(r.notified, false);
   assert.equal(r.reason, "silent");
